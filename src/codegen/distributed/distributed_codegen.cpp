@@ -35,6 +35,12 @@
 namespace pypto {
 namespace codegen {
 
+// ---------------------------------------------------------------------------
+// Allreduce constants — must match allreduce_builtin.py and the allreduce kernel.
+// ---------------------------------------------------------------------------
+static constexpr size_t kAllreduceCount = 256;
+static constexpr const char* kAllreduceCallableName = "allreduce_kernel";
+
 // ========================================================================
 // Public API
 // ========================================================================
@@ -162,7 +168,7 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 
 void DistributedCodegen::EmitImports() {
   emitter_.EmitLine("import torch");
-  emitter_.EmitLine("from simpler.task_interface import TaskArgs, TensorArgType");
+  emitter_.EmitLine("from simpler.task_interface import TaskArgs, TensorArgType, ContinuousTensor, DataType");
   emitter_.EmitLine("from simpler_setup.torch_interop import make_tensor_arg");
 }
 
@@ -617,6 +623,11 @@ void DistributedCodegen::EmitDistIntrinsic(const ir::CallPtr& call) {
     return;
   }
 
+  if (op_name == "dist.allreduce") {
+    EmitAllreduce(call);
+    return;
+  }
+
   current_expr_value_ = op_name + "(" + FormatArgs(call->args_) + ")";
 }
 
@@ -635,6 +646,62 @@ void DistributedCodegen::EmitTreeReduce(const ir::CallPtr& call) {
   } else {
     emitter_.EmitLine("tree_reduce(" + args.str() + ")");
   }
+}
+
+void DistributedCodegen::EmitAllreduce(const ir::CallPtr& call) {
+  // dist.allreduce(input_tensor, output_tensor)
+  // Emits a per-context submit_next_level to the built-in allreduce kernel.
+  // The scratch buffer is sourced from ctx.buffer_ptrs["scratch"] (set up by
+  // the HCCL bootstrap during Worker.init()).
+  INTERNAL_CHECK(call->args_.size() >= 2) << "dist.allreduce requires at least 2 args (input, output)";
+
+  VisitExpr(call->args_[0]);
+  std::string input_var = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(call->args_[1]);
+  std::string output_var = current_expr_value_;
+  current_expr_value_ = "";
+
+  // Iterate over chip contexts — one allreduce submission per chip.
+  // Uses enumerate(contexts) so worker=i matches the chip index.
+  emitter_.EmitLine("for i, ctx in enumerate(contexts):");
+  emitter_.IncreaseIndent();
+  {
+    std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
+    emitter_.EmitLine(ta_var + " = TaskArgs()");
+
+    // Input tensor
+    emitter_.EmitLine(
+        ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + input_var + "\"]), TensorArgType.INPUT)");
+
+    // Output tensor
+    emitter_.EmitLine(
+        ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + output_var + "\"]), TensorArgType.OUTPUT_EXISTING)");
+
+    // Scratch buffer — child_memory=True because it's a device pointer into the HCCL window,
+    // not a host tensor. The runtime skips H2D for child_memory tensors.
+    emitter_.EmitLine(
+        ta_var + ".add_tensor(ContinuousTensor.make("
+        "data=ctx.buffer_ptrs[\"scratch\"], "
+        "shapes=(" + std::to_string(kAllreduceCount) + ",), "
+        "dtype=DataType.FLOAT32, "
+        "child_memory=True), "
+        "TensorArgType.INOUT)");
+
+    // nranks scalar
+    emitter_.EmitLine(ta_var + ".add_scalar(ctx.nranks)");
+
+    // CommContext device pointer
+    emitter_.EmitLine(ta_var + ".add_scalar(ctx.device_ctx)");
+
+    // Submit to chip i
+    emitter_.EmitLine("_keep.append(" + ta_var + ")");
+    emitter_.EmitLine(
+        "orch.submit_next_level(callables[\"" + std::string(kAllreduceCallableName) +
+        "\"], " + ta_var + ", config, worker=i)");
+  }
+  emitter_.DecreaseIndent();
 }
 
 void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {

@@ -97,6 +97,7 @@ class DistributedCodegen : public CodegenBase {
   bool TryEmitHierarchyCall(const ir::ExprPtr& expr);
   void EmitDistIntrinsic(const ir::CallPtr& call);
   void EmitTreeReduce(const ir::CallPtr& call);
+  void EmitAllreduce(const ir::CallPtr& call);
   void EmitTensorCreate(const ir::CallPtr& call);
 
   // Pre-init allocation hoisting for HOST orchestrator. tensor.create

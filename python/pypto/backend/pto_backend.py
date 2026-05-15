@@ -958,7 +958,18 @@ def _generate_with_distributed(
 
     # 2. Each chip-level Orchestration → next_levels/{name}/...
     for func in transformed_program.functions.values():
-        if func.func_type == _ir_core.FunctionType.Orchestration:
+        # Match functions that should produce chip-level artifacts:
+        # (a) Explicitly typed Orchestration functions, OR
+        # (b) Opaque functions at chip level (L0-L2) with Orchestrator role
+        #     that were not promoted by OutlineHierarchyScopes because they
+        #     call into InCore kernels rather than containing incore scopes.
+        is_chip_orchestrator = func.func_type == _ir_core.FunctionType.Orchestration or (
+            func.func_type == _ir_core.FunctionType.Opaque
+            and func.level is not None
+            and _ir_core.level_to_linqu_level(func.level) < 3
+            and func.role == _ir_core.Role.Orchestrator
+        )
+        if is_chip_orchestrator:
             chip_funcs = _collect_chip_task_functions(func, transformed_program)
             chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
             chip_subdir = os.path.join(output_dir, "next_levels", func.name)
@@ -979,7 +990,36 @@ def _generate_with_distributed(
         ):
             result_files[f"sub_workers/{func.name}.py"] = _emit_sub_worker_module(func)
 
+    # 4. Built-in allreduce chip task — emitted when the program declares
+    #    at least one CommGroup (cross-rank communication).  The 4-phase
+    #    symmetric allreduce pattern needs a scratch window buffer, so the
+    #    comm manifest must include it.  The runtime compiles this C++ PTO-ISA
+    #    kernel via simpler's KernelCompiler (no ptoas needed).
+    if _program_has_comm_group(transformed_program):
+        result_files.update(_emit_allreduce_bundle(output_dir))
+
     return result_files
+
+
+def _program_has_comm_group(program: _ir_core.Program) -> bool:
+    """Check whether *program* declares any :class:`CommGroup` (cross-rank windows)."""
+    return bool(list(program.comm_groups))
+
+
+def _emit_allreduce_bundle(output_dir: str) -> dict[str, str]:
+    """Emit the built-in allreduce chip task bundle.
+
+    The allreduce kernel is emitted as raw C++ PTO-ISA (not MLIR) and compiled
+    by the runtime via simpler's ``KernelCompiler``.  Callers must ensure the
+    program's :class:`CommGroup` includes a ``WindowBuffer("scratch")`` so the
+    comm manifest picks it up at compile time.
+    """
+    from pypto.backend.allreduce_builtin import (  # noqa: PLC0415
+        ALLREDUCE_COUNT,
+        emit_allreduce_chip_task,
+    )
+
+    return emit_allreduce_chip_task(output_dir, count=ALLREDUCE_COUNT)
 
 
 def _emit_sub_worker_module(func: _ir_core.Function) -> str:
@@ -1081,6 +1121,12 @@ def _generate_single_chip(
             f
             for f in transformed_program.functions.values()
             if f.func_type == _ir_core.FunctionType.Orchestration
+            or (
+                f.func_type == _ir_core.FunctionType.Opaque
+                and f.level is not None
+                and _ir_core.level_to_linqu_level(f.level) < 3
+                and f.role == _ir_core.Role.Orchestrator
+            )
         ),
         None,
     )
