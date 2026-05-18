@@ -158,20 +158,43 @@ class TestManualScopeParsing:
                         b = self.k1(x, deps=[a])
                     return b
 
-    def test_submit_outside_manual_scope_is_rejected(self):
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    def test_submit_in_auto_scope_records_manual_dep_edges(self):
+        """``pl.submit(..., deps=[...])`` is orthogonal to ``manual_scope``.
 
-            @pl.program
-            class _Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    return x
+        The runtime's ``Arg::set_dependencies`` adds explicit edges on top of
+        auto-tracked OverlapMap deps (final fanin = auto ∪ explicit), so
+        ``pl.submit`` and ``deps=`` work in auto scope too — as a precision
+        tool that patches the edges auto can't infer (or infers too
+        conservatively). No ``with pl.manual_scope():`` required.
+        """
 
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    # No manual_scope around this — pl.submit must error.
-                    b, _ = pl.submit(self.k1, x)
-                    return b
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                # No manual_scope wrapper — auto OverlapMap stays on; the
+                # explicit deps= entry is added on top.
+                a, a_tid = pl.submit(self.k1, x)
+                b, _ = pl.submit(self.k2, x, deps=[a_tid])
+                return b
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        # No RuntimeScopeStmt: the program stays in the implicit auto scope.
+        assert _first_runtime_scope(fn.body) is None
+        k2_call = next(c for c in _calls_in(fn.body) if c.op.name == "k2")
+        edges = k2_call.attrs.get("manual_dep_edges", [])
+        assert len(edges) == 1
+        assert isinstance(edges[0].type, ir.ScalarType)
+        assert edges[0].type.dtype == pl.TASK_ID
 
     def test_submit_as_bare_expression_is_rejected(self):
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
@@ -203,6 +226,66 @@ class TestManualScopeParsing:
                     with pl.manual_scope():
                         a = pl.submit(self.k1, x)
                     return a
+
+    def test_pl_at_deps_and_as_tid_attach_scope_attrs(self):
+        """``with pl.at(..., deps=[d1]) as tid:`` attaches metadata to the
+        synthesised ScopeStmt via ``attrs_``. The outliner later promotes
+        them to the ``Call`` it synthesises for the outlined kernel.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s1") as t1:
+                    y: pl.Tensor[[64], pl.FP32] = x
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s2", deps=[t1]) as _t2:
+                    z: pl.Tensor[[64], pl.FP32] = y
+                return z
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        # Parser emits placeholder ``AssignStmt(tid, system.task_invalid())``
+        # before each scope to give ConvertToSSA a definition; the outliner
+        # drops these once it generates the real binding.
+        stmts = list(fn.body.stmts) if isinstance(fn.body, ir.SeqStmts) else [fn.body]
+        # First stmt: placeholder for t1.
+        assert isinstance(stmts[0], ir.AssignStmt)
+        assert isinstance(stmts[0].value, ir.Call)
+        assert stmts[0].value.op.name == "system.task_invalid"
+        # Second stmt: the first pl.at scope. Its ``task_id_var`` attr must
+        # point at the same Var bound by the placeholder above (otherwise the
+        # outliner couldn't unify the synthesised ``TupleGetItem`` binding
+        # with subsequent ``deps=[t1]`` uses).
+        assert isinstance(stmts[1], ir.InCoreScopeStmt)
+        scope1_attrs = stmts[1].attrs
+        assert "task_id_var" in scope1_attrs, f"scope1 missing task_id_var: keys={list(scope1_attrs)}"
+        assert scope1_attrs["task_id_var"] is stmts[0].var
+        # First scope has no deps=, so manual_dep_edges is absent (not an empty list).
+        assert "manual_dep_edges" not in scope1_attrs
+        # Third stmt: placeholder for t2.
+        assert isinstance(stmts[2], ir.AssignStmt)
+        # Fourth stmt: the second pl.at scope with deps=. Both attrs are set;
+        # ``manual_dep_edges`` references t1 (the producer Var from scope1's
+        # ``task_id_var``).
+        assert isinstance(stmts[3], ir.InCoreScopeStmt)
+        scope2_attrs = stmts[3].attrs
+        assert "task_id_var" in scope2_attrs
+        assert scope2_attrs["task_id_var"] is stmts[2].var
+        assert "manual_dep_edges" in scope2_attrs
+        assert len(scope2_attrs["manual_dep_edges"]) == 1
+        assert scope2_attrs["manual_dep_edges"][0] is scope1_attrs["task_id_var"]
+
+    def test_pl_at_as_on_non_at_scope_is_rejected(self):
+        """``as`` is only meaningful on ``pl.at(...)``; other constructs reject it."""
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope() as not_supported:  # noqa: F841
+                        return x
 
     def test_submit_nested_result_tuple_is_rejected(self):
         """pl.submit result targets must be plain names — no nested tuples."""
