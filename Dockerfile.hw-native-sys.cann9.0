@@ -1,0 +1,203 @@
+# Standalone PyPTO dev image for Ascend 910B
+#
+# No local files required — everything is cloned from GitHub at build time.
+# No build context needed; build from any directory.
+#
+# All paths are driven by build args:
+#   CANN_VERSION    (default: 9.0.0)  — selects base image tag and all cann-* paths
+#   INSTALL_PREFIX  (default: /opt)   — root for pypto, pto-isa, ptoas installs
+#   PTO_ISA_COMMIT  (default: auto)   — pto-isa commit; auto-derives from ci.yml if not set
+#
+# REQUIREMENTS:
+#   - Internet access during build (GitHub)
+#   - Ascend 910B NPUs + host driver at runtime
+#   - CANN >= 9.0.0: libopapi.so must export aclnnShmemSdmaStarsQuery
+#     (absent in CANN 8.5.0) for comm_alloc_windows / SDMA workspace.
+#
+# SCOPE: real NPU execution only (a2a3 platform).
+#   Simulator mode (a2a3sim) is NOT supported — requires C++23 <format> / GCC 13+.
+#
+# BUILD (defaults):
+#   docker build -t pypto3-hw-native-sys:cann9 - < Dockerfile.hw-native-sys.cann9.0
+#
+# BUILD (custom paths / pinned pto-isa):
+#   docker build --build-arg INSTALL_PREFIX=/workspace --build-arg PTO_ISA_COMMIT=2c607938 -t pypto3-hw-native-sys:cann9 - < Dockerfile.hw-native-sys.cann9.0
+#
+# RUN (single-device):
+#   docker run --rm -it --privileged --ipc=host -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro -v /dev:/dev pypto3-hw-native-sys:cann9
+#
+# RUN (multi-device, distributed / HCCL):
+#   docker run --rm -it --privileged --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro -v /dev:/dev pypto3-hw-native-sys:cann9
+#
+# NOTE: Do NOT mount /usr/local/Ascend — the image contains CANN baked in.
+#   Only the host kernel-driver user-space (/usr/local/Ascend/driver) is needed.
+#
+# TROUBLESHOOTING HCCL HANGS:
+#   If multi-device examples stall during bootstrap (HcclGetRootInfo /
+#   HcclCommInitRootInfo), HCCL may be picking the wrong network interface.
+#   Explicitly set the loopback or management interface:
+#     docker run ... -e HCCL_SOCKET_IFNAME=lo pypto3-hw-native-sys:cann9
+#
+# VERIFIED WORKING (4× Ascend 910B, driver v25.5.1, 2026-05-18):
+#   ✅ simpler L3 allreduce_distributed  (a2a3, 2-chip) → all ranks matched golden ✅
+#   ✅ simpler L3 ep_dispatch_combine    (a2a3, 2-chip) → all ranks matched golden ✅
+#   ✅ simpler L2 tests  (28/28, a2a3, devices 0-3)
+#   ✅ pypto  L3 distributed tests       (5/5, a2a3, devices 0-3)
+#
+# COMMON COMMANDS INSIDE CONTAINER (defaults: INSTALL_PREFIX=/opt, CANN_VERSION=9.0.0):
+#
+#   (simpler — pre-installed; rebuild only after editing source)
+#   cd /opt/pypto/runtime
+#   pip install --no-build-isolation .
+#   pytest tests/ -v --platform=a2a3 --device="0,1,2,3"
+#   python examples/workers/l3/allreduce_distributed/main.py -p a2a3 -d 0-1
+#   python examples/workers/l3/ep_dispatch_combine/main.py -p a2a3 -d 0-1
+#   python examples/workers/l3/ffn_tp_parallel/main.py -p a2a3 -d 0-1
+#   python examples/workers/l3/multi_chip_dispatch/main.py -p a2a3 -d 0-1
+#
+#   (pypto)
+#   cd /opt/pypto
+#   python -c "import pypto; print('pypto ok')"
+#   which ptoas
+#   pytest tests/ut -v
+#   pytest tests/st -v --device="0,1,2,3" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
+#   pytest tests/st/distributed -v --device="0,1,2,3" --pto-isa-commit=2c607938
+
+# ARG before FROM: drives the base image tag.
+ARG CANN_VERSION=9.0.0
+FROM quay.io/ascend/cann:${CANN_VERSION}-910b-ubuntu22.04-py3.12
+
+# Re-declare after FROM (ARG scope resets after each FROM).
+ARG CANN_VERSION=9.0.0
+ARG INSTALL_PREFIX=/opt
+# PTO_ISA_COMMIT defaults to empty — auto-derived from ci.yml at build time.
+# Set via --build-arg to pin a specific commit.
+ARG PTO_ISA_COMMIT=
+
+# Persist as ENV so all subsequent instructions can reference them.
+ENV CANN_VERSION=${CANN_VERSION} \
+    INSTALL_PREFIX=${INSTALL_PREFIX}
+
+# Derived paths — all other paths flow from these two.
+ENV CANN_HOME=/usr/local/Ascend/cann-${CANN_VERSION}
+ENV PYPTO_DIR=${INSTALL_PREFIX}/pypto \
+    PTO_ISA_DIR=${INSTALL_PREFIX}/pto-isa \
+    PTOAS_DIR=${INSTALL_PREFIX}/ptoas-bin
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_CACHE_DIR=/tmp/pip-cache
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git curl ca-certificates \
+      build-essential cmake ninja-build pkg-config \
+      mpich libmpich-dev && \
+    if ! command -v g++-15 >/dev/null 2>&1; then \
+      ln -sf "$(command -v g++)" /usr/local/bin/g++-15; \
+    fi && \
+    if ! command -v gcc-15 >/dev/null 2>&1; then \
+      ln -sf "$(command -v gcc)" /usr/local/bin/gcc-15; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=gcc-15 \
+    CXX=g++-15
+
+# Clone latest pypto from main (shallow for speed; submodules resolve by SHA).
+RUN git clone --depth 1 --branch main https://github.com/hw-native-sys/pypto.git "${PYPTO_DIR}" && \
+    for i in 1 2 3; do \
+      git -C "${PYPTO_DIR}" submodule update --init --recursive && break || sleep 5; \
+    done
+
+WORKDIR ${PYPTO_DIR}
+
+# Ensure required third-party sources exist (submodule or fallback clone).
+# simpler is always the runtime submodule — no fallback clone needed.
+RUN if [ ! -f 3rdparty/libbacktrace/configure.ac ]; then \
+      rm -rf 3rdparty/libbacktrace && \
+      git clone --depth 1 --branch macho-bundle-support \
+        https://github.com/Hzfengsy/libbacktrace.git 3rdparty/libbacktrace; \
+    fi && \
+    if [ ! -f 3rdparty/msgpack-c/include/msgpack.hpp ]; then \
+      rm -rf 3rdparty/msgpack-c && \
+      git clone --depth 1 --branch cpp_master \
+        https://github.com/msgpack/msgpack-c.git 3rdparty/msgpack-c; \
+    fi && \
+    test -f 3rdparty/libbacktrace/configure.ac && \
+    test -f 3rdparty/msgpack-c/include/msgpack.hpp && \
+    test -f runtime/pyproject.toml
+
+# Install PTO-ISA (required by system tests).
+# If PTO_ISA_COMMIT was not set via --build-arg, derive it from pypto's own
+# ci.yml so it never drifts from what CI tests against.
+RUN if [ -z "${PTO_ISA_COMMIT}" ]; then \
+      PTO_ISA_COMMIT=$(grep -oP '(?<=--pto-isa-commit=)[a-f0-9]+' .github/workflows/ci.yml | head -1); \
+      if [ -z "${PTO_ISA_COMMIT}" ]; then \
+        echo "ERROR: could not extract --pto-isa-commit from .github/workflows/ci.yml"; exit 1; \
+      fi; \
+      echo "Auto-derived PTO_ISA_COMMIT=${PTO_ISA_COMMIT} from ci.yml"; \
+    fi && \
+    git clone https://github.com/PTO-ISA/pto-isa.git "${PTO_ISA_DIR}" && \
+    git -C "${PTO_ISA_DIR}" checkout "${PTO_ISA_COMMIT}" && \
+    git -C "${PTO_ISA_DIR}" rev-parse --short HEAD
+
+ENV PTO_ISA_ROOT=${PTO_ISA_DIR}
+
+# Install PTOAS binary.
+ARG PTOAS_VERSION=v0.36
+ARG PTOAS_SHA256=698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
+RUN curl --fail --location --retry 3 --retry-all-errors \
+      "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz" \
+      -o /tmp/ptoas-bin-aarch64.tar.gz && \
+    echo "${PTOAS_SHA256}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c - && \
+    mkdir -p "${PTOAS_DIR}" && \
+    tar -xzf /tmp/ptoas-bin-aarch64.tar.gz -C "${PTOAS_DIR}" && \
+    chmod +x "${PTOAS_DIR}/ptoas" "${PTOAS_DIR}/bin/ptoas" && \
+    rm -f /tmp/ptoas-bin-aarch64.tar.gz
+
+# Python build toolchain.
+RUN python3 -m pip install --upgrade pip setuptools wheel && \
+    pip install \
+      "scikit-build-core>=0.10.0" \
+      "nanobind>=2.0.0" \
+      "ninja>=1.11.0" \
+      "cmake>=3.15"
+
+# CI/test dependencies.
+RUN pip install \
+      "numpy>=2.0" \
+      "pytest>=7.0.0" "pytest-forked>=1.0" "pytest-xdist==3.8.0" \
+      "pyright==1.1.407" "ruff==0.14.8" "clang-tidy==21.1.0" \
+      "pre-commit==4.5.1"
+
+# Fuzz/simulation dependencies.
+RUN pip install \
+      "torch==2.6.0" --index-url https://download.pytorch.org/whl/cpu
+
+# Build simpler runtime extension.
+RUN rm -rf ./runtime/build && \
+    pip install --no-build-isolation ./runtime
+
+# Build and install pypto.
+RUN pip install --no-build-isolation -v ".[dev]"
+
+# Source CANN environment for every interactive shell.
+RUN echo "[ -f ${CANN_HOME}/set_env.sh ] && { source ${CANN_HOME}/set_env.sh 2>/dev/null || true; }" >> /etc/bash.bashrc
+
+ENV ASCEND_HOME_PATH=${CANN_HOME} \
+    PTO_TILE_LIB_CODE_PATH=${CANN_HOME} \
+    ASCEND_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp \
+    MPI_HOME=/usr \
+    PTOAS_ROOT=${PTOAS_DIR} \
+    SIMPLER_ROOT=${PYPTO_DIR}/runtime \
+    PTO_ISA_ROOT=${PTO_ISA_DIR}
+ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${CANN_HOME}/aarch64-linux/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:${LD_LIBRARY_PATH:-}
+ENV PATH=${PTOAS_DIR}:${PTOAS_DIR}/bin:${PATH}
+ENV PYTHONPATH=${PYPTO_DIR}/runtime/python:${PYPTO_DIR}/runtime/examples/scripts
+ENV PYTHONPATH=${PYTHONPATH}:${CANN_HOME}/python/site-packages:${CANN_HOME}/opp/built-in/op_impl/ai_core/tbe
+ENV PYTHONPATH=${PYTHONPATH}:/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:/usr/local/Ascend/ascend-toolkit/latest/opp/built-in/op_impl/ai_core/tbe
+
+WORKDIR ${PYPTO_DIR}
+CMD ["bash"]
