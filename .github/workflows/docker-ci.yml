@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  docker-distributed:
+  docker-system-tests:
     runs-on: [self-hosted, linux, arm64, npu]
     timeout-minutes: 60
     steps:
@@ -21,19 +21,92 @@ jobs:
       - name: Build Docker image
         run: docker build -t pypto3-ci:cann9 - < Dockerfile.hw-native-sys.cann9.0
 
-      - name: Run distributed system tests
+      - name: Test system tests (non-distributed)
+        timeout-minutes: 15
         run: |
           docker run --rm --privileged --ipc=host \
             --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
             -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
             -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
             -v /dev:/dev \
+            -e HCCL_SOCKET_IFNAME=lo \
+            -e DEVICE_RANGE \
             pypto3-ci:cann9 \
             bash -c '
               set -e
               source /usr/local/Ascend/cann-9.0.0/set_env.sh 2>/dev/null || true
               cd /opt/pypto
               PTO_ISA_COMMIT=$(grep -oP "(?<=--pto-isa-commit=)[a-f0-9]+" .github/workflows/ci.yml | head -1)
-              echo "Running distributed tests with PTO_ISA_COMMIT=${PTO_ISA_COMMIT}"
-              pytest tests/st/distributed -v --device="0,1,2,3" --pto-isa-commit="${PTO_ISA_COMMIT}"
+              echo "PTO_ISA_COMMIT=${PTO_ISA_COMMIT}  DEVICE_RANGE=${DEVICE_RANGE}"
+              pytest tests/st -v \
+                --device="${DEVICE_RANGE}" \
+                --precompile-workers=128 \
+                --pto-isa-commit="${PTO_ISA_COMMIT}" \
+                --ignore=tests/st/distributed
+            '
+
+      - name: Test multi-orch L2 (isolated, before distributed)
+        timeout-minutes: 3
+        run: |
+          docker run --rm --privileged --ipc=host \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+            -v /dev:/dev \
+            -e HCCL_SOCKET_IFNAME=lo \
+            -e DEVICE_RANGE \
+            pypto3-ci:cann9 \
+            bash -c '
+              set -e
+              source /usr/local/Ascend/cann-9.0.0/set_env.sh 2>/dev/null || true
+              cd /opt/pypto
+              PTO_ISA_COMMIT=$(grep -oP "(?<=--pto-isa-commit=)[a-f0-9]+" .github/workflows/ci.yml | head -1)
+              pytest tests/st/distributed/test_l2_multi_orch.py -v \
+                --device="${DEVICE_RANGE}" \
+                --pto-isa-commit="${PTO_ISA_COMMIT}"
+            '
+
+      - name: Test distributed system tests
+        timeout-minutes: 5
+        run: |
+          docker run --rm --privileged --ipc=host \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+            -v /dev:/dev \
+            -e HCCL_SOCKET_IFNAME=lo \
+            -e DEVICE_RANGE \
+            pypto3-ci:cann9 \
+            bash -c '
+              set -e
+              source /usr/local/Ascend/cann-9.0.0/set_env.sh 2>/dev/null || true
+              cd /opt/pypto
+              PTO_ISA_COMMIT=$(grep -oP "(?<=--pto-isa-commit=)[a-f0-9]+" .github/workflows/ci.yml | head -1)
+              pytest tests/st/distributed -v \
+                --device="${DEVICE_RANGE}" \
+                --pto-isa-commit="${PTO_ISA_COMMIT}" \
+                --ignore=tests/st/distributed/test_l2_multi_orch.py
+            '
+
+      - name: Test swimlane output
+        run: |
+          docker run --rm --privileged --ipc=host \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+            -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+            -v /dev:/dev \
+            -e HCCL_SOCKET_IFNAME=lo \
+            -e DEVICE_ID \
+            pypto3-ci:cann9 \
+            bash -c '
+              set -e
+              source /usr/local/Ascend/cann-9.0.0/set_env.sh 2>/dev/null || true
+              cd /opt/pypto
+              PTO_ISA_COMMIT=$(grep -oP "(?<=--pto-isa-commit=)[a-f0-9]+" .github/workflows/ci.yml | head -1)
+              pytest tests/st/runtime/test_perf_swimlane.py -v \
+                --device="${DEVICE_ID}" \
+                --platform=a2a3 \
+                --enable-l2-swimlane \
+                --forked \
+                --pto-isa-commit="${PTO_ISA_COMMIT}"
             '
