@@ -148,8 +148,8 @@ RUN if [ -z "${PTO_ISA_COMMIT}" ]; then \
 ENV PTO_ISA_ROOT=${PTO_ISA_DIR}
 
 # Install PTOAS binary.
-ARG PTOAS_VERSION=v0.36
-ARG PTOAS_SHA256=698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
+ARG PTOAS_VERSION=v0.40
+ARG PTOAS_SHA256=2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
 RUN curl --fail --location --retry 3 --retry-all-errors \
       "https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz" \
       -o /tmp/ptoas-bin-aarch64.tar.gz && \
