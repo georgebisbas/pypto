@@ -109,7 +109,9 @@ ENV CC=gcc-15 \
 RUN git clone --depth 1 --branch main https://github.com/hw-native-sys/pypto.git "${PYPTO_DIR}" && \
     for i in 1 2 3; do \
       git -C "${PYPTO_DIR}" submodule update --init --recursive && break || sleep 5; \
-    done
+    done && \
+    git -C "${PYPTO_DIR}/runtime" fetch origin main && \
+    git -C "${PYPTO_DIR}/runtime" checkout origin/main
 
 WORKDIR ${PYPTO_DIR}
 
