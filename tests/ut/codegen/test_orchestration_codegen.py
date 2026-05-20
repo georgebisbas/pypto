@@ -2102,6 +2102,90 @@ class TestTensorReadWriteOffsetCodegen:
             f"Consumer inputs should all be distinct tensors, got {t1_inputs}"
         )
 
+    def test_windowed_tuple_outputs_rebind_loop_carried_tensor_without_redeclaration(self):
+        """OutWindowExternalizer tuple outputs must rebind loop-carried tensors instead of redeclaring them."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class WindowedTupleLoopCarryProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kv_proj(
+                self,
+                k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                ob_chunk: pl.Scalar[pl.INDEX],
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+                wv: pl.Tensor[[512, 512], pl.BF16],
+            ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
+                for ob, (k_proj_iter, v_proj_iter) in pl.range(
+                    ob_chunk, ob_chunk + 4, init_values=(k_proj, v_proj)
+                ):
+                    kv0: pl.Scalar[pl.INDEX] = ob * 64
+                    tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
+                        normed_tile, [0, 0], [16, 128], [16, 128]
+                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wk, [0, kv0], [128, 64], [128, 64])
+                    k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
+                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_proj_iter)
+
+                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wv, [0, kv0], [128, 64], [128, 64])
+                    v_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wv)
+                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(v_acc, [0, kv0], v_proj_iter)
+                    k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
+                return k_proj_rv, v_proj_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+                wv: pl.Tensor[[512, 512], pl.BF16],
+                k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
+                for ob_chunk, (k_proj_iter, v_proj_iter) in pl.range(0, 8, 4, init_values=(k_proj, v_proj)):
+                    result: tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]] = (
+                        self.kv_proj(k_proj_iter, v_proj_iter, ob_chunk, normed_tile, wk, wv)
+                    )
+                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = result[0]
+                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = result[1]
+                    k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
+                return k_proj_rv, v_proj_rv
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(WindowedTupleLoopCarryProgram)
+        code = _generate_orch_code(transformed)
+
+        assert "kv_proj__windowed" in code, code
+
+        declared_names = re.findall(
+            r"^\s*(?:const\s+Tensor&|Tensor|PTO2TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
+            code,
+            flags=re.MULTILINE,
+        )
+        duplicate_declarations = {name for name in declared_names if declared_names.count(name) > 1}
+        assert not duplicate_declarations, (
+            f"generated C++ redeclared names {sorted(duplicate_declarations)}:\n{code}"
+        )
+
+        mutable_tensor_names = set(re.findall(r"^\s*Tensor\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE))
+        const_alias_names = set(
+            re.findall(r"^\s*const\s+Tensor&\s+([A-Za-z_]\w*)\s*=", code, flags=re.MULTILINE)
+        )
+        assert not (mutable_tensor_names & const_alias_names), code
+
+        rv_carry_names = {
+            name for name in mutable_tensor_names if name.endswith("_rv") or re.search(r"__rv(?:_|$)", name)
+        }
+        assert rv_carry_names, code
+        assert any(
+            re.search(rf"^\s*{re.escape(name)}\s*=\s*[^;]+;", code, flags=re.MULTILINE)
+            for name in rv_carry_names
+        ), code
+
     def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
         """Cross-core split inferred from pipe ops should reuse one AIV kernel across both slots."""
         backend.reset_for_testing()
