@@ -18,6 +18,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check NPU
+        run: npu-smi info
+
       - name: Build Docker image
         run: docker build -t pypto3-ci:cann9 - < Dockerfile.hw-native-sys.cann9.0
 
