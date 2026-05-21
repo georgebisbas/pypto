@@ -4,24 +4,24 @@
 # No build context needed; build from any directory.
 #
 # All paths are driven by build args:
-#   CANN_VERSION    (default: 9.0.0)  — selects base image tag and all cann-* paths
-#   INSTALL_PREFIX  (default: /opt)   — root for pypto, pto-isa, ptoas installs
-#   PTO_ISA_COMMIT  (default: auto)   — pto-isa commit; auto-derives from ci.yml if not set
+#   CANN_VERSION    (default: 9.0.0)    — selects base image tag and all cann-* paths
+#   INSTALL_PREFIX  (default: /opt)     — root for pypto, pto-isa, ptoas installs
+#   PYPTO_COMMIT    (default: 55ff78e0) — pypto commit to build from; changing it busts the layer cache
+#   PTO_ISA_COMMIT  (default: auto)     — pto-isa commit; auto-derives from ci.yml if not set
 #
 # REQUIREMENTS:
 #   - Internet access during build (GitHub)
 #   - Ascend 910B NPUs + host driver at runtime
-#   - CANN >= 9.0.0: libopapi.so must export aclnnShmemSdmaStarsQuery
-#     (absent in CANN 8.5.0) for comm_alloc_windows / SDMA workspace.
+#   - CANN >= 9.0.0
 #
-# SCOPE: real NPU execution only (a2a3 platform).
+# SCOPE: real NPU execution tested only on a2a3 platform.
 #   Simulator mode (a2a3sim) is NOT supported — requires C++23 <format> / GCC 13+.
 #
 # BUILD (defaults):
 #   docker build -t pypto3-hw-native-sys:cann9 - < Dockerfile.hw-native-sys.cann9.0
 #
-# BUILD (custom paths / pinned pto-isa):
-#   docker build --build-arg INSTALL_PREFIX=/workspace --build-arg PTO_ISA_COMMIT=2c607938 -t pypto3-hw-native-sys:cann9 - < Dockerfile.hw-native-sys.cann9.0
+# BUILD (custom prefix / pinned pto-isa / different commit):
+#   docker build --build-arg PYPTO_COMMIT=55ff78e0 --build-arg PTO_ISA_COMMIT=2c607938 -t pypto3-hw-native-sys:cann9 - < Dockerfile.hw-native-sys.cann9.0
 #
 # RUN (single-device):
 #   docker run --rm -it --privileged --ipc=host -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro -v /dev:/dev pypto3-hw-native-sys:cann9
@@ -32,30 +32,39 @@
 # NOTE: Do NOT mount /usr/local/Ascend — the image contains CANN baked in.
 #   Only the host kernel-driver user-space (/usr/local/Ascend/driver) is needed.
 #
-# VERIFIED WORKING (4× Ascend 910B, driver v25.5.1, 2026-05-18):
-#   ✅ simpler L3 allreduce_distributed  (a2a3, 2-chip) → all ranks matched golden ✅
-#   ✅ simpler L3 ep_dispatch_combine    (a2a3, 2-chip) → all ranks matched golden ✅
-#   ✅ simpler L2 tests  (28/28, a2a3, devices 0-3)
-#   ✅ pypto  L3 distributed tests       (5/5, a2a3, devices 0-3)
-#
-# COMMON COMMANDS INSIDE CONTAINER (defaults: INSTALL_PREFIX=/opt, CANN_VERSION=9.0.0):
-#
-#   (simpler — pre-installed; rebuild only after editing source)
-#   cd /opt/pypto/runtime
-#   pip install --no-build-isolation .
-#   pytest tests/ -v --platform=a2a3 --device="0,1,2,3"
-#   python examples/workers/l3/allreduce_distributed/main.py -p a2a3 -d 0-1
-#   python examples/workers/l3/ep_dispatch_combine/main.py -p a2a3 -d 0-1
-#   python examples/workers/l3/ffn_tp_parallel/main.py -p a2a3 -d 0-1
-#   python examples/workers/l3/multi_chip_dispatch/main.py -p a2a3 -d 0-1
+# COMMANDS INSIDE CONTAINER (defaults: INSTALL_PREFIX=/opt, CANN_VERSION=9.0.0):
 #
 #   (pypto)
 #   cd /opt/pypto
 #   python -c "import pypto; print('pypto ok')"
-#   which ptoas
-#   pytest tests/ut -v
+#   which ptoas; ptoas --version
+#   pytest tests/ut -n auto --maxprocesses 8 -v
+#   (Needs some time:)
 #   pytest tests/st -v --device="0,1,2,3" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
-#   pytest tests/st/distributed -v --device="0,1,2,3" --pto-isa-commit=2c607938
+#   # Distributed — MUST run as two SEPARATE invocations (level=2 leaks state into level=3 in same process):
+#   pytest tests/st/distributed/test_l2_multi_orch.py -v --device="0,1,2,3" --pto-isa-commit=2c607938
+#   pytest tests/st/distributed -v --device="0,1,2,3" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
+#
+#   cd /opt/pypto/runtime
+#   (simpler — pre-installed; rebuild only after editing source)
+#   pip install --no-build-isolation .
+#
+#   # Non-hardware unit tests (pure Python, no NPU needed — matches CI ut-cpu job):
+#   pytest tests/ut -m "not requires_hardware" -v --clone-protocol https
+#
+#   # Hardware UT — NO HCCL (level=2 + level=3 without allocate_domain):
+#   pytest tests -m requires_hardware --platform a2a3 --device 0,1,2,3 -v --ignore=tests/ut/py/test_worker/test_dynamic_alloc_hw.py --ignore=tests/ut/py/test_worker/test_platform_comm.py
+#   # Scene tests — NO HCCL (tests/st/a2a3 uses level=3 without allocate_domain):
+#   pytest tests/st/a2a3/ -v --platform a2a3 --device 0,1,2,3 --pto-session-timeout 600 --clone-protocol https --require-pto-isa --pto-isa-commit 2c607938
+#
+#   # HCCL UT — LD_PRELOAD (baked into image ENV) fixes the comm_init segfault.
+#   # NOTE: test_platform_comm and test_dynamic_alloc_hw still FAIL with
+#   #   comm_alloc_windows failed (aclrtIpcMemImportByKey -> 507899)
+#   # Root cause: CANN 9.0.0 IPC key format is rejected by driver 25.5.1.
+#   # Fix requires a compatible CANN+driver pair (see SKILL.md for details).
+#   pytest tests/ut/py/test_worker/test_dynamic_alloc_hw.py tests/ut/py/test_worker/test_platform_comm.py -m requires_hardware --platform a2a3 --device 0,1,2,3 -v
+#   # HCCL examples — allocate_domain (same IPC limitation applies):
+#   pytest examples/workers/l3/ examples/a2a3/tensormap_and_ringbuffer/deferred_notify_demo examples/a2a3/tensormap_and_ringbuffer/async_notify_demo examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo -v --platform a2a3 --device 0,1,2,3 --pto-session-timeout 600 --clone-protocol https --require-pto-isa --pto-isa-commit 2c607938
 
 # ARG before FROM: drives the base image tag.
 ARG CANN_VERSION=9.0.0
@@ -99,8 +108,12 @@ RUN apt-get update && \
 ENV CC=gcc-15 \
     CXX=g++-15
 
-# Clone latest pypto from main (shallow for speed; submodules resolve by SHA).
-RUN git clone --depth 1 --branch main https://github.com/hw-native-sys/pypto.git "${PYPTO_DIR}" && \
+# Clone pypto at the pinned commit (changing PYPTO_COMMIT busts the layer cache automatically).
+# Uses a blobless clone (--filter=blob:none) so any commit SHA can be checked out;
+# GitHub does not allow shallow-fetching arbitrary SHAs directly.
+ARG PYPTO_COMMIT=55ff78e0
+RUN git clone --filter=blob:none https://github.com/hw-native-sys/pypto.git "${PYPTO_DIR}" && \
+    git -C "${PYPTO_DIR}" checkout "${PYPTO_COMMIT}" && \
     for i in 1 2 3; do \
       git -C "${PYPTO_DIR}" submodule update --init --recursive && break || sleep 5; \
     done && \
@@ -169,9 +182,8 @@ RUN pip install \
       "pyright==1.1.407" "ruff==0.14.8" "clang-tidy==21.1.0" \
       "pre-commit==4.5.1"
 
-# Fuzz/simulation dependencies.
-RUN pip install \
-      "torch==2.6.0" --index-url https://download.pytorch.org/whl/cpu
+# Install torch dependency
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Build simpler runtime extension.
 RUN rm -rf ./runtime/build && \
@@ -191,6 +203,10 @@ ENV ASCEND_HOME_PATH=${CANN_HOME} \
     SIMPLER_ROOT=${PYPTO_DIR}/runtime \
     PTO_ISA_ROOT=${PTO_ISA_DIR}
 ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/driver:${CANN_HOME}/aarch64-linux/lib64:/usr/local/Ascend/ascend-toolkit/latest/lib64:${LD_LIBRARY_PATH:-}
+# Preload libhccl.so globally so its weak symbols in libhost_runtime.so resolve at dlopen time.
+# Without this, HcclGetRootInfo and friends stay NULL -> SIGSEGV on any HCCL comm_init call.
+# libhccl.so is NOT in libhost_runtime.so's DT_NEEDED; LD_LIBRARY_PATH alone is not enough.
+ENV LD_PRELOAD=${CANN_HOME}/aarch64-linux/lib64/libhccl.so
 ENV PATH=${PTOAS_DIR}:${PTOAS_DIR}/bin:${PATH}
 ENV PYTHONPATH=${PYPTO_DIR}/runtime/python:${PYPTO_DIR}/runtime/examples/scripts
 ENV PYTHONPATH=${PYTHONPATH}:${CANN_HOME}/python/site-packages:${CANN_HOME}/opp/built-in/op_impl/ai_core/tbe
