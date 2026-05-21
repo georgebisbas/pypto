@@ -50,15 +50,6 @@ docker run --rm -it --privileged --ipc=host \
 > shadow the image's CANN with the host's (potentially older) version.
 > Only the kernel driver at `/usr/local/Ascend/driver` is needed.
 
-### HCCL hangs
-
-If multi-device examples stall during bootstrap, HCCL may be picking the wrong
-network interface.  Set the loopback interface explicitly:
-
-```bash
-docker run ... -e HCCL_SOCKET_IFNAME=lo pypto3-hw-native-sys:cann9
-```
-
 ### Common commands
 
 ```bash

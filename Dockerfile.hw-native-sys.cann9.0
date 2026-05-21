@@ -32,12 +32,6 @@
 # NOTE: Do NOT mount /usr/local/Ascend — the image contains CANN baked in.
 #   Only the host kernel-driver user-space (/usr/local/Ascend/driver) is needed.
 #
-# TROUBLESHOOTING HCCL HANGS:
-#   If multi-device examples stall during bootstrap (HcclGetRootInfo /
-#   HcclCommInitRootInfo), HCCL may be picking the wrong network interface.
-#   Explicitly set the loopback or management interface:
-#     docker run ... -e HCCL_SOCKET_IFNAME=lo pypto3-hw-native-sys:cann9
-#
 # VERIFIED WORKING (4× Ascend 910B, driver v25.5.1, 2026-05-18):
 #   ✅ simpler L3 allreduce_distributed  (a2a3, 2-chip) → all ranks matched golden ✅
 #   ✅ simpler L3 ep_dispatch_combine    (a2a3, 2-chip) → all ranks matched golden ✅
