@@ -16,7 +16,7 @@ This scope covers:
   5. Final residual addition
 
 The original file was a standalone script executed via:
-    python tests/st/runtime/test_qwen3_decode_scope3_mixed.py -d <device>
+    python tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py -d <device>
 
 It is now structured as a standard pytest ST case so it can be collected and
 run together with the rest of tests/st/, while preserving the same program and
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_ST_DIR = Path(__file__).resolve().parents[1]
+_ST_DIR = Path(__file__).resolve().parents[2]
 if str(_ST_DIR) not in sys.path:
     sys.path.insert(0, str(_ST_DIR))
 

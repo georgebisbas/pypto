@@ -43,7 +43,7 @@ How to run
 ::
 
     # On real hardware, with profiling enabled:
-    pytest tests/st/runtime/test_pl_at_deps_pipeline.py \\
+    pytest tests/st/runtime/scheduling/test_pl_at_deps_pipeline.py \\
         --enable-l2-swimlane --platform=a2a3
 
     # Without --enable-l2-swimlane, the swimlane assertions skip and only
@@ -60,7 +60,7 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
-_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
+_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
 # Tile grid — kept small so a single run produces a readable swimlane chart.
 _M = 4

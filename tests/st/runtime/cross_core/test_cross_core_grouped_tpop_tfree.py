@@ -45,13 +45,13 @@ from pypto.runtime.device_runner import (
     validate_golden,
 )
 
-from tests.st.runtime.test_cross_core import V2CUDProgram
+from tests.st.runtime.cross_core.test_cross_core import V2CUDProgram
 
 _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
 }
 _DEFAULT_PLATFORM = "a2a3"
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _resolve_platform(config: pytest.Config) -> str:
@@ -60,7 +60,7 @@ def _resolve_platform(config: pytest.Config) -> str:
     tokens = [tok.strip() for tok in raw_platform.split(",") if tok.strip()]
     if tokens and _DEFAULT_PLATFORM not in tokens:
         raise pytest.UsageError(
-            "tests/st/runtime/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
+            "tests/st/runtime/cross_core/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
         )
     return _DEFAULT_PLATFORM
 
@@ -99,7 +99,7 @@ def _resolve_backend_type(platform: str) -> BackendType:
         return _PLATFORM_TO_BACKEND[platform]
     except KeyError as exc:
         raise pytest.UsageError(
-            "tests/st/runtime/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
+            "tests/st/runtime/cross_core/test_cross_core_grouped_tpop_tfree.py only supports --platform=a2a3"
         ) from exc
 
 
