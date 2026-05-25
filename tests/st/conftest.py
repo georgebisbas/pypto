@@ -313,6 +313,27 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # no
         terminalreporter.write_line(f"  device {dev:>3}: {_device_counter[dev]} tests")
 
 
+@pytest.fixture(autouse=True)
+def _redirect_prog_build_dir(request, tmp_path, monkeypatch):
+    """Redirect default ir.compile() output into pytest's per-test tmp dir.
+
+    Direct ``ir.compile()`` calls and the inline-compile fallback in
+    ``TestRunner`` otherwise write to ``build_output/<name>_<timestamp>``
+    relative to the working directory, leaving stale dirs behind. The
+    precompile pipeline already passes an explicit ``output_dir`` and so is
+    unaffected by ``PYPTO_PROG_BUILD_DIR``.
+
+    When ``--save-kernels`` is set the user wants artifacts preserved under
+    ``build_output/``, so redirection is skipped — and any ``PYPTO_PROG_BUILD_DIR``
+    inherited from the outer environment is cleared so the default base
+    genuinely stays ``build_output``.
+    """
+    if request.config.getoption("--save-kernels"):
+        monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
+        return
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "build_output"))
+
+
 @pytest.fixture(scope="session")
 def test_config(request) -> RunConfig:
     """Session-scoped fixture providing test configuration from CLI options.
