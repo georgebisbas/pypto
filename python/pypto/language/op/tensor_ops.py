@@ -77,6 +77,7 @@ __all__ = [
     "sort32",
     "mrgsort",
     "gather",
+    "scatter",
     "alloc",
 ]
 
@@ -1350,6 +1351,87 @@ def gather(
     if dim is None or index is None:
         raise ValueError("gather() index form requires both dim and index")
     call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
+    return Tensor(expr=call_expr)
+
+
+@overload
+def scatter(input: Tensor, dim: int, index: Tensor, src: Tensor) -> Tensor: ...
+
+
+@overload
+def scatter(input: Tensor, *, mask_pattern: int, dst: Tensor) -> Tensor: ...
+
+
+def scatter(
+    input: Tensor,
+    dim: int | None = None,
+    index: Tensor | None = None,
+    src: Tensor | None = None,
+    *,
+    mask_pattern: int | None = None,
+    dst: Tensor | None = None,
+) -> Tensor:
+    """Scatter elements of ``src`` into ``input`` (tensor-level) — index or mask form.
+
+    The tensor layer exposes a single unified ``scatter``. Based on the arguments
+    you pass, it lowers to one of two tile-level ops:
+
+    Index form (``dim`` + ``index`` + ``src``) → :func:`pl.tile.scatter` — the
+    column-wise inverse of :func:`gather`, so ``index`` has the same shape as
+    ``src`` (just like gather's index matches its output)::
+
+        output = input
+        output[b, index[b, k]] = src[b, k]   # for all b, k
+
+        MVP: rank-2 input with ``dim == -1``. ``src``/``index`` are ``[rows, K]``;
+        ``input``/output are ``[rows, S]`` with ``K <= S``. ``index`` element
+        width must match ``input``: 4-byte input → INT32, 2-byte → INT16,
+        1-byte → INT16.
+
+    Mask form (``mask_pattern=<int>`` + ``dst``) → :func:`pl.tile.scatter_mask`:
+        Writes each row of ``input`` into the columns of ``dst`` selected by the
+        hardware mask pattern. ``dst.cols`` equals ``input.cols * stride``
+        (stride = 2 for P0101/P1010, 4 for P0001..P1000, 1 for P1111).
+        Targeted at A3 / CPU-sim style backends — A5 rejects this form.
+
+    Args:
+        input: Base tensor (FP16/FP32/BF16/INT8/INT16/INT32, 2D).
+        dim: (index form) Axis along which to scatter. MVP accepts -1.
+        index: (index form) Per-element destination column indices, same shape
+            as ``src`` (INT16/INT32).
+        src: (index form) Source values tensor (same dtype as ``input``).
+        mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
+        dst: (mask form, keyword-only) Destination tensor; ``dst.cols ==
+            input.cols * stride``.
+
+    Returns:
+        Tensor representing the post-scatter result.
+
+    Examples:
+        out = scatter(input, dim=-1, index=idx, src=src_vals)
+        out = scatter(input, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+    """
+    is_index = dim is not None or index is not None or src is not None
+    is_mask = mask_pattern is not None or dst is not None
+    if is_index and is_mask:
+        raise ValueError(
+            "scatter() index form (dim, index, src) and mask form (mask_pattern, dst) "
+            "are mutually exclusive; do not mix kwargs from different forms"
+        )
+    if is_mask:
+        if mask_pattern is None or dst is None:
+            raise ValueError("scatter() mask form requires both mask_pattern and dst")
+        call_expr = _ir_ops.scatter(input.unwrap(), mask_pattern=mask_pattern, dst=dst.unwrap())
+        return Tensor(expr=call_expr)
+    if not is_index:
+        raise ValueError(
+            "scatter() requires (dim, index, src) for index form, or "
+            "(mask_pattern=<int>, dst=...) for mask form"
+        )
+    if dim is None or index is None or src is None:
+        raise ValueError("scatter() index form requires dim, index and src")
+    call_expr = _ir_ops.scatter(input.unwrap(), dim, index.unwrap(), src.unwrap())
     return Tensor(expr=call_expr)
 
 

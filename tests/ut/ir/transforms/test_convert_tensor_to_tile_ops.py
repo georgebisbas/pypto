@@ -2411,6 +2411,96 @@ class TestConvertGatherOp:
         _assert_convert_equal(before, expected)
 
 
+class TestConvertScatterOp:
+    """Test conversion of tensor.scatter (rank-2 dim=-1 MVP) and tensor.scatter_mask."""
+
+    @pytest.mark.skip(
+        reason="Blocked by a pre-existing cmp/cmps round-trip gap: the scatter preserve "
+        "blend emits tile.cmps, whose packed-mask result TileView loses its blayout on "
+        "print->parse, so the autouse RoundtripInstrument fails structural equality "
+        "(same failure as any tensor.cmp conversion). Assertions below are correct and "
+        "ready once the packed-mask TileView blayout round-trips."
+    )
+    def test_scatter_conversion(self):
+        """tensor.scatter -> tile.load(input/index/src) + flat-index build + tile.scatter."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                inp: pl.Tensor[[16, 8], pl.FP32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
+                src: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                out: pl.Tensor[[16, 8], pl.FP32] = pl.tensor.scatter(inp, dim=-1, index=idx, src=src)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[16, 8], pl.FP32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
+                src: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                out: pl.Tensor[[16, 8], pl.FP32] = self.main_incore_0(inp, idx, src)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        # tensor.scatter is fully lowered; the index-form tile call is present.
+        # Exact-call match avoids the "tile.scatter" substring also matching
+        # "tile.scatter_mask" (index form must not lower to the mask op).
+        assert "tensor.scatter" not in after_src
+        assert "pl.tile.scatter(" in after_src
+        assert "pl.tile.scatter_mask(" not in after_src
+        # Column index -> flat index: row_base via muls + row-broadcast add.
+        assert "tile.muls" in after_src
+        assert "tile.row_expand_add" in after_src
+        # Preserve blend (pto.tscatter does not keep unwritten dst elements):
+        # values + mask scatters into zeroed bases, then out = sel(mask != 0, values, input).
+        # The select avoids a multiply-based blend (pto.tmul rejects bf16/i8).
+        assert after_src.count("pl.tile.scatter(") == 2
+        assert "tile.full" in after_src
+        assert "tile.cmps" in after_src and "tile.sel" in after_src
+        # Three Vec tile.load calls (one per tensor input).
+        assert after_src.count("tile.load") >= 3
+        # Phase 3 stores the resulting tile through an Out tensor param.
+        assert "pl.Out[pl.Tensor[[16, 8]" in after_src
+
+    def test_scatter_mask_conversion(self):
+        """tensor.scatter_mask -> tile.load(input) + tile.load(dst) + tile.scatter_mask + tile.store."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                inp: pl.Tensor[[4, 8], pl.FP32],
+                dst: pl.Tensor[[4, 16], pl.FP32],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                out: pl.Tensor[[4, 16], pl.FP32] = pl.tensor.scatter(inp, mask_pattern=1, dst=dst)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                inp: pl.Tensor[[4, 8], pl.FP32],
+                dst: pl.Tensor[[4, 16], pl.FP32],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                out: pl.Tensor[[4, 16], pl.FP32] = self.main_incore_0(inp, dst)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_src = After.as_python()
+
+        assert "tensor.scatter_mask" not in after_src
+        assert "pl.tile.scatter_mask(" in after_src
+        assert "mask_pattern=1" in after_src
+        assert "pl.Out[pl.Tensor[[4, 16]" in after_src
+
+
 class TestWrapperForwardPropagation:
     """Phase 2a: propagate Phase-1 added Out params through Spmd/Group wrappers.
 
