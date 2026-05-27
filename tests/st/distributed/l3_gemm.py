@@ -31,10 +31,10 @@ from __future__ import annotations
 import pypto.language as pl
 import pypto.language.distributed as pld
 
-# Default cube-friendly tile sizes.
-M0 = 64
-K = 64
-N = 64
+from tests.st.distributed.l3_common import M0, K, N, make_cube_gemm, window_scratch_nbytes
+
+# Re-export defaults for ST imports.
+__all__ = ["M0", "K", "N", "build_l3_gemm_program"]
 
 
 def build_l3_gemm_program(*, nranks: int, m0: int = M0, k: int = K, n: int = N):
@@ -45,24 +45,13 @@ def build_l3_gemm_program(*, nranks: int, m0: int = M0, k: int = K, n: int = N):
 
     a_shape = [nranks, m0, k]
     c_shape = [nranks, m0, n]
+    gemm_fn = make_cube_gemm(m0=m0, k=k, n=n)
 
     if nranks == 1:
 
         @pl.program
         class L3GemmProgramP1:
-            @pl.function(type=pl.FunctionType.InCore)
-            def gemm(
-                self,
-                a_shard: pl.Tensor[[m0, k], pl.FP32],
-                b: pl.Tensor[[k, n], pl.FP32],
-                c_shard: pl.Out[pl.Tensor[[m0, n], pl.FP32]],
-            ) -> pl.Tensor[[m0, n], pl.FP32]:
-                tile_a_l1 = pl.load(a_shard, offsets=[0, 0], shapes=[m0, k], target_memory=pl.MemorySpace.Mat)
-                tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[k, n], target_memory=pl.MemorySpace.Mat)
-                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
-                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-                tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                return pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=c_shard)
+            gemm = gemm_fn
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def chip_orch(
@@ -87,19 +76,7 @@ def build_l3_gemm_program(*, nranks: int, m0: int = M0, k: int = K, n: int = N):
 
     @pl.program
     class L3GemmProgramPN:
-        @pl.function(type=pl.FunctionType.InCore)
-        def gemm(
-            self,
-            a_shard: pl.Tensor[[m0, k], pl.FP32],
-            b: pl.Tensor[[k, n], pl.FP32],
-            c_shard: pl.Out[pl.Tensor[[m0, n], pl.FP32]],
-        ) -> pl.Tensor[[m0, n], pl.FP32]:
-            tile_a_l1 = pl.load(a_shard, offsets=[0, 0], shapes=[m0, k], target_memory=pl.MemorySpace.Mat)
-            tile_b_l1 = pl.load(b, offsets=[0, 0], shapes=[k, n], target_memory=pl.MemorySpace.Mat)
-            tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
-            tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-            tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-            return pl.store(tile_c_l0c, offsets=[0, 0], output_tensor=c_shard)
+        gemm = gemm_fn
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
@@ -118,7 +95,7 @@ def build_l3_gemm_program(*, nranks: int, m0: int = M0, k: int = K, n: int = N):
             b: pl.Tensor[[k, n], pl.FP32],
             c: pl.Out[pl.Tensor[c_shape, pl.FP32]],  # type: ignore[valid-type]
         ) -> pl.Tensor[c_shape, pl.FP32]:  # type: ignore[valid-type]
-            scratch_buf = pld.alloc_window_buffer(4)  # 1x1 INT32
+            scratch_buf = pld.alloc_window_buffer(window_scratch_nbytes())
             for r in pl.range(pld.world_size()):
                 scratch = pld.window(scratch_buf, [1, 1], dtype=pl.INT32)
                 self.chip_orch(a[r], b, c[r], scratch, device=r)
