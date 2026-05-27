@@ -228,14 +228,6 @@ def _build_atomic_add_program():
     return AtomicAddReduce
 
 
-@pytest.mark.skip(
-    reason=(
-        "PTOAS drops the synchronisation between the stage-in tile.store and the "
-        "subsequent pld.tensor.put -- the put can issue before the local window "
-        "slice has been written, so the peer reads stale data. Re-enable once "
-        "PTOAS treats the store -> put pair as an ordered dependency."
-    )
-)
 class TestL3Put:
     """L3 distributed runtime: cross-rank write via pld.tensor.put."""
 

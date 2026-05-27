@@ -872,7 +872,16 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         global_vars[node.name] = gvar
                         func_defs.append(node)
 
-            if not func_defs:
+            # Factory-assigned kernels (e.g. ``gemm = make_cube_gemm(...)``) are already
+            # parsed ``ir.Function`` objects on the class before ``@pl.program`` runs.
+            for attr_name, attr_val in vars(c).items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_val, ir.Function) and attr_name not in global_vars:
+                    gvar = ir.GlobalVar(attr_name)
+                    global_vars[attr_name] = gvar
+
+            if not func_defs and not any(isinstance(v, ir.Function) for k, v in vars(c).items() if not k.startswith("_")):
                 raise ParserSyntaxError(
                     f"Class '{c.__name__}' contains no @pl.function decorated methods",
                     hint="Add at least one method decorated with @pl.function",
@@ -881,9 +890,17 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # Pass 2: Parse each function body with GlobalVar map for cross-function calls
             # Build a map from GlobalVar to parsed functions as we go, so later functions
             # can use return type information from earlier functions
-            functions = []
-            gvar_to_func = {}
+            functions: list[ir.Function] = []
+            gvar_to_func: dict[ir.GlobalVar, ir.Function] = {}
             external_functions: dict[str, ir.Function] = {}
+
+            for attr_name, attr_val in vars(c).items():
+                if attr_name.startswith("_"):
+                    continue
+                if isinstance(attr_val, ir.Function) and attr_name in global_vars:
+                    gvar = global_vars[attr_name]
+                    gvar_to_func[gvar] = attr_val
+                    functions.append(attr_val)
 
             # Pre-scan: collect reserve_buffer metadata from all functions so that
             # import_peer_buffer can resolve .base across functions regardless of order.

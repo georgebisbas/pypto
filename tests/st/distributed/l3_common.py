@@ -7,11 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Shared L3 distributed GEMM / allreduce building blocks for ST program factories.
+"""Shared L3 distributed GEMM / allreduce / MoE building blocks for ST program factories.
 
 Single source for cube GEMM InCore, 2-rank ``reduce_step``, window byte sizes,
-and host dispatch helpers used by ``l3_gemm``, ``l3_allreduce_gemm``,
-``l3_hier_split_k_gemm``, and ``test_l3_allreduce``.
+notify/wait barriers, and host dispatch helpers used by ``l3_gemm``,
+``l3_allreduce_gemm``, ``l3_hier_split_k_gemm``, ``l3_moe_*``, and
+``test_l3_allreduce``.
 """
 
 from __future__ import annotations
@@ -93,6 +94,46 @@ def make_reduce_step_2rank(*, m0: int, n: int):
         return pl.store(acc, [0, 0], out)
 
     return reduce_step
+
+
+def make_notify_wait_barrier():
+    """Emit notify(peer) + wait(signal) for a single handshake cell."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def notify_wait(
+        self,
+        signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+        peer: pl.Scalar[pl.INT32],
+        expected: pl.Scalar[pl.INT32],
+    ) -> None:
+        pld.system.notify(
+            signal,
+            peer=peer,
+            offsets=[0, 0],
+            value=1,
+            op=pld.NotifyOp.AtomicAdd,
+        )
+        pld.system.wait(
+            signal=signal,
+            offsets=[0, 0],
+            expected=expected,
+            cmp=pld.WaitCmp.Ge,
+        )
+
+    return notify_wait
+
+
+def moe_row_window_nbytes(hidden: int) -> int:
+    """One BF16 token row in a comm window (bytes)."""
+    return hidden * 2
+
+
+def moe_recv_x_window_nbytes(*, experts_per_rank: int, recv_max: int, hidden: int) -> int:
+    return experts_per_rank * recv_max * hidden * 2
+
+
+def moe_pub_counts_window_nbytes(*, nranks: int, experts_per_rank: int) -> int:
+    return nranks * nranks * experts_per_rank * 4
 
 
 def build_l3_allreduce_only_program(*, nranks: int, m0: int, n: int):

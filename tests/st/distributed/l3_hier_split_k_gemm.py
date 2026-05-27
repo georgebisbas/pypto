@@ -94,6 +94,8 @@ def build_l3_hier_split_k_allreduce_gemm_program(
     b_shape = [nranks, k_s, n]
     partial_shape = [nranks, m0, n]
     out_shape = [nranks, m0, n]
+    data_bytes = data_window_nbytes(m0, n)
+    sig_bytes = signal_window_nbytes()
 
     @pl.program
     class L3HierSplitKAllReduceGemmProgram:
@@ -122,8 +124,8 @@ def build_l3_hier_split_k_allreduce_gemm_program(
             partials: pl.InOut[pl.Tensor[partial_shape, pl.FP32]],  # type: ignore[valid-type]
             outputs: pl.Out[pl.Tensor[out_shape, pl.FP32]],  # type: ignore[valid-type]
         ) -> pl.Tensor[out_shape, pl.FP32]:  # type: ignore[valid-type]
-            data_buf = pld.alloc_window_buffer(data_window_nbytes(m0, n))
-            signal_buf = pld.alloc_window_buffer(signal_window_nbytes())
+            data_buf = pld.alloc_window_buffer(data_bytes)
+            signal_buf = pld.alloc_window_buffer(sig_bytes)
 
             data0 = pld.window(data_buf, [m0, n], dtype=pl.FP32)
             signal0 = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
