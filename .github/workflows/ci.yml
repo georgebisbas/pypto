@@ -198,8 +198,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
-      PTOAS_VERSION: v0.40
-      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
+      PTOAS_VERSION: v0.42
+      PTOAS_SHA256: 216c68fc9bb629a41ae2c9d1d0ec2f912b48b67c7c8f57687d6161e2f07c66a6
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -243,22 +243,33 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
             || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
           cd "$PTO_ISA_ROOT"
-          git checkout 2c607938
+          git checkout 6909e5c4
 
-      - name: Bootstrap conda + CANN env
-        # Activate conda py310 + source CANN set_env.sh, then dump the whole
-        # env into $GITHUB_ENV so later steps inherit it.
-        # LD_LIBRARY_PATH is prepended with $CONDA_PREFIX/lib because ptoas
-        # needs GLIBCXX_3.4.29 (system libstdc++ is too old).
+      - name: Bootstrap conda + per-job venv + write activate.sh
+        # Set up a per-job venv layered on conda py310 and generate
+        # activate.sh so each later step enters the env with a single
+        # `source activate.sh`
+        #
+        # LD_LIBRARY_PATH is prepended with $CONDA_PREFIX/lib because
+        # ptoas needs GLIBCXX_3.4.29 (system libstdc++ is too old).
         run: |
           source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
           conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<'EOF'
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/dist-checkout/venv/bin/activate"
           source /usr/local/Ascend/cann-9.0.0/set_env.sh
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-          env | grep -vE '^(_=|SHLVL=|PWD=|OLDPWD=|PS1=|PROMPT_COMMAND=|GITHUB_|RUNNER_|INPUT_)' >> "$GITHUB_ENV"
+          # PTO2_RING_* come from the runner's systemd Environment and
+          # break HCCL tests on this host; unset them before pytest.
+          unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL
+          EOF
 
       - name: Install project and dependencies
         run: |
+          source activate.sh
           rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
           python -m pip install --upgrade pip
           pip install scikit-build-core nanobind cmake ninja
@@ -267,7 +278,9 @@ jobs:
 
       - name: Test distributed system tests
         timeout-minutes: 10
-        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
+        run: |
+          source activate.sh
+          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=6909e5c4 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
