@@ -1432,7 +1432,10 @@ void OpConversionRegistry::RegisterGatherOps() {
 //   select blend. The surrounding pass wraps the tile result in a tile.store to
 //   the output tensor param.
 //
-// tensor.scatter_mask: same idea, simple (input, dst) → (dst, src) re-wire.
+// tensor.scatter_mask: same idea — pto.tscatter (mask form) zero-fills the whole
+//   dst before writing the selected columns, so it does not preserve dst either.
+//   We reconstruct DPS preserve with the same zeroed-scatter + mask + select
+//   blend, which also makes chaining two patterns into one dst sound.
 // ============================================================================
 
 void OpConversionRegistry::RegisterScatterOps() {
@@ -1476,6 +1479,10 @@ void OpConversionRegistry::RegisterScatterOps() {
         //   flat_idx = index + row_base   (row-broadcast add)
         auto& op_reg = OpRegistry::GetInstance();
         auto src_rows = As<ConstInt>(src_tile->shape_[0]);
+        // `cols` is the flat-layout column count of the scattered destination.
+        // input/output and the inner tile.scatter dst all share this width (S),
+        // so reading it off `input` is equivalent to the dst column count used
+        // in the `i * dst_cols` flat-index formula above.
         auto dst_cols_c = As<ConstInt>(input_tile->shape_[1]);
         CHECK(src_rows && dst_cols_c)
             << "tensor.scatter conversion requires static src rows and dst cols for index expansion";
@@ -1485,6 +1492,26 @@ void OpConversionRegistry::RegisterScatterOps() {
         // keeps satisfying the pto.tscatter element-size matching rule (INT32
         // for 4-byte dst, INT16 for 2/1-byte dst).
         const DataType idx_dtype = idx_tile->dtype_;
+
+        // INT16 flat-index range guard. For 2-byte element dtypes the flattened
+        // destination indices are INT16, whose largest representable value is
+        // 32767. The biggest index this lowering produces is
+        // (n-1)*cols + (cols-1) == n*cols - 1, so n*cols must stay <= 32768.
+        // 4-byte dtypes use INT32 indices and are effectively unbounded here.
+        // Without this check an oversized tile would silently overflow INT16 and
+        // scatter to wrong addresses instead of failing loudly.
+        if (idx_dtype == DataType::INT16) {
+          // Bound via division so the product never overflows int64_t: rows is
+          // capped so rows*cols stays <= 32768. cols is always > 0 here (a
+          // 2-byte tile has at least one column), but guard against 0 anyway.
+          const int64_t kMaxFlat = 32768;
+          const int64_t max_rows = cols == 0 ? kMaxFlat : kMaxFlat / cols;
+          CHECK(n <= max_rows) << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
+                               << " uses INT16 flattened indices, but the destination is too large: rows("
+                               << n << ") * cols(" << cols
+                               << ") exceeds the INT16 index range (max flat index 32767, rows <= "
+                               << max_rows << "). Use a smaller tile or split the scatter into chunks.";
+        }
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
           return std::make_shared<ConstInt>(v, DataType::INDEX, span);
@@ -1611,10 +1638,79 @@ void OpConversionRegistry::RegisterScatterOps() {
         CHECK(args.size() == 2) << "tensor.scatter_mask conversion expects 2 args (input, dst), got "
                                 << args.size();
         auto& op_reg = OpRegistry::GetInstance();
-        // tile.scatter_mask signature: (dst, src) + mask_pattern attr. The
-        // converter's args[1] (dst) maps to dst, args[0] (input) to src.
-        auto tile_call = op_reg.Create("tile.scatter_mask", {args[1], args[0]}, kwargs, span);
-        return ConversionResult{tile_call};
+        auto input_tile = As<TileType>(args[0]->GetType());
+        auto dst_tile = As<TileType>(args[1]->GetType());
+        CHECK(input_tile && dst_tile)
+            << "tensor.scatter_mask conversion: input/dst must be Vec tiles after bridge";
+
+        // pto.tscatter (mask form) zero-fills the entire dst tile before writing
+        // the mask-selected columns (TScatterMaskImpl calls InitUBBuffer), so it
+        // does NOT preserve dst's unselected columns — they read back as 0. To
+        // honour the DPS preserve contract (and make chaining two patterns into
+        // one dst sound), reconstruct preserve on the PyPTO side with the same
+        // zeroed-scatter + mask + select blend as the index form:
+        //
+        //   scattered = scatter_mask(zeros,   input)  # input @selected, 0 @unselected
+        //   mask      = scatter_mask(zeros_m, ones)   # 1     @selected, 0 @unselected
+        //   pred      = (mask != 0)                    # packed predicate
+        //   out       = sel(pred, scattered, dst)      # selected→scattered, else→dst
+        auto in_rows = As<ConstInt>(input_tile->shape_[0]);
+        auto in_cols = As<ConstInt>(input_tile->shape_[1]);
+        auto dst_cols_c = As<ConstInt>(dst_tile->shape_[1]);
+        CHECK(in_rows && in_cols && dst_cols_c)
+            << "tensor.scatter_mask conversion requires static shapes for the preserve blend";
+        const int64_t b = in_rows->value_;
+        const int64_t c = in_cols->value_;
+        const int64_t dst_cols = dst_cols_c->value_;
+        const DataType dt = dst_tile->dtype_;
+
+        // Mask blend dtype: a compare-friendly type within dst's element size
+        // (bf16 → f16) so tile.cmps is well-defined for any supported dtype.
+        const int dt_bytes = static_cast<int>(dt.GetBit()) / 8;
+        const DataType mask_dt = (dt_bytes == 4)   ? DataType(DataType::FP32)
+                                 : (dt_bytes == 2) ? DataType(DataType::FP16)
+                                                   : DataType(DataType::INT8);
+
+        auto make_idx = [&](int64_t v) -> ExprPtr {
+          return std::make_shared<ConstInt>(v, DataType::INDEX, span);
+        };
+        std::vector<StmtPtr> prologue;
+        auto emit = [&](const std::string& op_name, const std::vector<ExprPtr>& op_args,
+                        const std::vector<std::pair<std::string, std::any>>& op_kwargs,
+                        const std::string& name) -> VarPtr {
+          auto call = op_kwargs.empty() ? op_reg.Create(op_name, op_args, span)
+                                        : op_reg.Create(op_name, op_args, op_kwargs, span);
+          auto var = std::make_shared<Var>(name, call->GetType(), span);
+          prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+          return var;
+        };
+        auto make_full = [&](const DataType& fdt, int64_t rows, int64_t cols_, double v,
+                             const std::string& name) -> VarPtr {
+          ExprPtr val = fdt.IsFloat()
+                            ? ExprPtr(std::make_shared<ConstFloat>(v, fdt, span))
+                            : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), fdt, span));
+          return emit("tile.full", {MakeShapeTuple({make_idx(rows), make_idx(cols_)}, span), val},
+                      {{"dtype", fdt}}, name);
+        };
+
+        // scattered = input written into the mask-selected columns of a zeroed dst.
+        auto values_zero = make_full(dt, b, dst_cols, 0.0, "scatter_mask_values_zero");
+        auto scattered = emit("tile.scatter_mask", {values_zero, args[0]}, kwargs, "scatter_mask_values");
+        // mask = ones written into the same selected columns of a zeroed base.
+        auto mask_zero = make_full(mask_dt, b, dst_cols, 0.0, "scatter_mask_mask_zero");
+        auto ones_src = make_full(mask_dt, b, c, 1.0, "scatter_mask_ones");
+        auto mask = emit("tile.scatter_mask", {mask_zero, ones_src}, kwargs, "scatter_mask_mask");
+        // pred = (mask != 0)  → packed predicate (NE = cmp_type 1).
+        ExprPtr zero_scalar = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
+                                                : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
+        auto pred = emit("tile.cmps", {mask, zero_scalar}, {{"cmp_type", 1}}, "scatter_mask_pred");
+        // tmp = TSEL scratch tile (UINT8 [1, 32]).
+        auto tmp = emit("tile.create", {MakeShapeTuple({make_idx(1), make_idx(32)}, span)},
+                        {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}},
+                        "scatter_mask_sel_tmp");
+        // out = sel(pred, scattered, dst, tmp): scattered @selected, dst @unselected.
+        auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[1], tmp}, span);
+        return ConversionResult{std::move(prologue), out_call};
       },
       std::move(scatter_mask_input_reqs));
 }

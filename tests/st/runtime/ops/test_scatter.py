@@ -53,6 +53,21 @@ bf16. (INT8 is left uncovered: the 1-byte path needs a separate validation.)
 A separate FP32 case feeds **repeated** indices with distinct values to pin the
 ascending-k last-wins ordering (the round-trip version hid this by writing equal
 values to repeated targets).
+
+**Mask form (A2/A3).** ``TestScatterMaskForm`` covers ``tensor.scatter_mask``
+(``mask_pattern=<int>`` + ``dst``), the column-wise inverse of the mask-form
+gather: each compact ``input`` row is written into the mask-selected columns of
+the wider ``dst`` (``dst.cols == input.cols * stride``). The form runs on the
+A2/A3 backend (``BackendType.Ascend910B``); A5 (``Ascend950``) rejects it, so
+those cases are pinned to A2/A3 only. Column selection mirrors gather: P0101
+hits even columns (``0::2``), P1010 hits odd columns (``1::2``).
+
+The raw ``pto.tscatter`` mask instruction zero-fills the entire ``dst`` before
+writing the selected columns, so the lowering reconstructs DPS preserve with the
+same zeroed-scatter + mask + select blend as the index form. These cases pin
+that with a **non-zero sentinel** ``dst`` (unselected columns must survive), and
+the chain case writes two patterns into one ``dst`` (P0101 then P1010) so the
+second scatter must preserve the first's writes — the RoPE even/odd reassembly.
 """
 
 from typing import Any
@@ -135,6 +150,42 @@ def _scatter_specs(
         TensorSpec("idx", [b, k], idt, init_value=lambda: index_fn(b, s, k, torch_idt)),
         TensorSpec("val", [b, k], dt, init_value=lambda: _make_values(b, k, torch_dt)),
         TensorSpec("output", [b, s], dt, is_output=True),
+    ]
+
+
+def _scatter_mask_specs(b: int, c: int, stride: int, dt: DataType, torch_dt: torch.dtype) -> list[TensorSpec]:
+    """Build the (inp, dst, output) TensorSpecs for a mask-form scatter case.
+
+    ``inp`` is ``[B, C]`` of distinct positive values; ``dst`` is ``[B, C*stride]``
+    pre-filled with a **negative sentinel** (disjoint from ``inp``) rather than
+    zeros, so the case actually distinguishes preserve from zero-fill: the
+    mask-selected columns must become ``inp`` and the unselected columns must
+    keep the sentinel. A zero ``dst`` could not tell the two apart.
+    """
+    dst_cols = c * stride
+    return [
+        TensorSpec("inp", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt)),
+        TensorSpec("dst", [b, dst_cols], dt, init_value=lambda: _make_base(b, dst_cols, torch_dt)),
+        TensorSpec("output", [b, dst_cols], dt, is_output=True),
+    ]
+
+
+def _scatter_mask_chain_specs(b: int, c: int, dt: DataType, torch_dt: torch.dtype) -> list[TensorSpec]:
+    """Build the (even, odd, dst, output) TensorSpecs for the chained mask-scatter case.
+
+    Two compact ``[B, C]`` inputs are interleaved into one ``[B, 2C]`` dst by
+    chaining two mask scatters: ``even`` into the even columns (P0101) and
+    ``odd`` into the odd columns (P1010). ``even`` and ``odd`` hold disjoint
+    positive ranges so a swapped pattern or a clobbered column is caught. ``dst``
+    starts zeroed; a correct chain leaves ``dst[:, 0::2] = even`` and
+    ``dst[:, 1::2] = odd`` (the second scatter must preserve the first's writes).
+    """
+    dst_cols = 2 * c
+    return [
+        TensorSpec("even", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt)),
+        TensorSpec("odd", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt) + b * c),
+        TensorSpec("dst", [b, dst_cols], dt, init_value=lambda: torch.zeros(b, dst_cols, dtype=torch_dt)),
+        TensorSpec("output", [b, dst_cols], dt, is_output=True),
     ]
 
 
@@ -256,6 +307,77 @@ class Scatter1RowProgram:
         return output
 
 
+# --- Mask-form programs (A2/A3 only; A5/Ascend950 rejects pto.tscatter mask form) ---
+
+
+@pl.program
+class ScatterMaskP0101Program:
+    """Mask-form scatter (P0101, A2/A3): write ``inp`` into even columns of ``dst``.
+
+    ``inp [8, 8] FP32`` expands into ``dst [8, 16] FP32`` (stride 2): the inverse
+    of the P0101 mask gather, so ``dst[:, 0::2] = inp``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 8], pl.FP32],
+        dst: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(inp, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class ScatterMaskP1010Program:
+    """Mask-form scatter (P1010, A2/A3): write ``inp`` into odd columns of ``dst``.
+
+    ``inp [8, 8] FP32`` expands into ``dst [8, 16] FP32`` (stride 2): the inverse
+    of the P1010 mask gather, so ``dst[:, 1::2] = inp``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 8], pl.FP32],
+        dst: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(inp, mask_pattern=pl.tile.MaskPattern.P1010, dst=dst)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class ScatterMaskChainProgram:
+    """Chained mask-form scatter (P0101 then P1010, A2/A3): RoPE even/odd reassembly.
+
+    Writes ``even`` into the even columns (P0101) and ``odd`` into the odd columns
+    (P1010) of a single ``dst``, chaining two mask scatters into one buffer — the
+    inverse of splitting a RoPE head into even/odd halves. Validates that the
+    second scatter preserves the first's writes, so ``dst[:, 0::2] = even`` and
+    ``dst[:, 1::2] = odd``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        even: pl.Tensor[[16, 32], pl.FP32],
+        odd: pl.Tensor[[16, 32], pl.FP32],
+        dst: pl.Tensor[[16, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(even, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+            out = pl.tensor.scatter(odd, mask_pattern=pl.tile.MaskPattern.P1010, dst=out)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
 # --- Test cases ---
 
 
@@ -358,6 +480,85 @@ class Scatter1RowTestCase(_ScatterBaseTestCase):
         return Scatter1RowProgram
 
 
+class _ScatterMaskBaseTestCase(PTOTestCase):
+    """Base for mask-form scatter cases. Pinned to A2/A3 (Ascend910B).
+
+    Subclasses set ``_start`` (0 for P0101, 1 for P1010) and ``_stride`` (2);
+    ``compute_expected`` writes ``inp`` into the ``[start::stride]`` columns of
+    ``dst`` while **preserving** ``dst``'s other (sentinel) columns — so the case
+    fails if the lowering zero-fills the unselected columns instead.
+    """
+
+    __test__ = False
+    _start: int = 0
+    _stride: int = 2
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        # Mask-form pto.tscatter is an A2/A3 feature; A5 (Ascend950) rejects it.
+        return BackendType.Ascend910B
+
+    def compute_expected(self, tensors, params=None):
+        # Preserve dst's unselected (sentinel) columns; write inp into the
+        # mask-selected columns. Discriminates preserve from zero-fill.
+        out = tensors["dst"].clone()
+        out[:, self._start :: self._stride] = tensors["inp"]
+        tensors["output"][:] = out
+
+
+class ScatterMaskP0101TestCase(_ScatterMaskBaseTestCase):
+    _start = 0  # P0101 selects even columns
+
+    def get_name(self) -> str:
+        return "scatter_mask_p0101"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_mask_specs(8, 8, 2, DataType.FP32, torch.float32)
+
+    def get_program(self) -> Any:
+        return ScatterMaskP0101Program
+
+
+class ScatterMaskP1010TestCase(_ScatterMaskBaseTestCase):
+    _start = 1  # P1010 selects odd columns
+
+    def get_name(self) -> str:
+        return "scatter_mask_p1010"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_mask_specs(8, 8, 2, DataType.FP32, torch.float32)
+
+    def get_program(self) -> Any:
+        return ScatterMaskP1010Program
+
+
+class ScatterMaskChainTestCase(_ScatterMaskBaseTestCase):
+    """Chain P0101 then P1010 into one dst (RoPE even/odd reassembly).
+
+    Unlike the single-pattern cases, this writes two compact inputs into one
+    interleaved ``dst`` via two chained scatters, pinning that the second
+    pattern's scatter preserves the first's writes.
+    """
+
+    def get_name(self) -> str:
+        return "scatter_mask_chain"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_mask_chain_specs(16, 32, DataType.FP32, torch.float32)
+
+    def get_program(self) -> Any:
+        return ScatterMaskChainProgram
+
+    def compute_expected(self, tensors, params=None):
+        b, dst_cols = tensors["output"].shape
+        out = torch.zeros(b, dst_cols, dtype=tensors["even"].dtype)
+        out[:, 0::2] = tensors["even"]  # P0101 → even columns
+        out[:, 1::2] = tensors["odd"]  # P1010 → odd columns
+        tensors["output"][:] = out
+
+
 # --- Tests ---
 
 
@@ -397,6 +598,32 @@ class TestScatterIndexForm:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_1row(self, test_runner, platform):
         result = test_runner.run(Scatter1RowTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestScatterMaskForm:
+    """Mask-form row scatter — A2/A3 only (A5/Ascend950 rejects the mask form).
+
+    Each compact ``inp`` row is written into the mask-selected columns of the
+    wider ``dst`` (``dst.cols == inp.cols * stride``); column selection mirrors
+    the mask gather (P0101 → even, P1010 → odd). The chain case writes two inputs
+    into one ``dst`` (P0101 then P1010) to pin that the second scatter preserves
+    the first's writes — the RoPE even/odd reassembly tail.
+    """
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_mask_p0101(self, test_runner, platform):
+        result = test_runner.run(ScatterMaskP0101TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_mask_p1010(self, test_runner, platform):
+        result = test_runner.run(ScatterMaskP1010TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_mask_chain(self, test_runner, platform):
+        result = test_runner.run(ScatterMaskChainTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
