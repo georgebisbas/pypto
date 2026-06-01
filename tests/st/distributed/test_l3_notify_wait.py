@@ -29,22 +29,8 @@ rank 1's tag (2) and rank 1 reads rank 0's tag (1), so ``outputs == [2, 1]``.
 A missing/incorrect wait would let the read race ahead of the peer's notify
 and observe the zero-initialised cell.
 
-The test is currently **skipped** — the InCore PTO codegen for
-``pld.system.notify`` / ``pld.system.wait`` is in place (N6 P1), but the
-host-side glue still has open work:
-
-* **N7** distributed_codegen.cpp must emit one
-  ``chip_args.add_scalar(ctx.device_ctx[group_idx])`` per
-  ``DistributedTensor`` formal parameter, plus the
-  ``ContinuousTensor.make(..., child_memory=True)`` wrapper for each
-  ``DistributedTensor`` arg.
-* **N8** distributed_codegen must thread ``HostBufferStaging`` onto the
-  ``orch.allocate_domain(...)`` block for the inferred CommGroup so the
-  runtime knows which physical buffer to bind to each rank's window slot.
-
-Drop ``pytest.mark.skip`` once the above land — the program below and the
-golden check are the canonical e2e contract for ``pld.system.notify`` /
-``pld.system.wait``.
+Runs on 2 devices via ``DistributedConfig(device_ids=device_ids[:2], ...)``.
+Pytest skips only when fewer than 2 devices are available.
 """
 
 import sys
@@ -61,8 +47,7 @@ def _build_signal_handshake_program():
     """Build the notify/wait handshake program at call time.
 
     Deferred construction lets this file collect even if the embedded body
-    is rejected by the parser; the skip marker on ``TestL3NotifyWait``
-    ensures the body never runs until the pending host-side work lands.
+    is rejected by the parser.
     """
 
     @pl.program
