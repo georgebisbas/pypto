@@ -1026,6 +1026,13 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
 
     ``output_dir`` is forwarded only when set, so an unset value defers to
     ``ir.compile()``'s own default.
+
+    ``distributed_config`` is likewise forwarded only when set. When supplied it
+    makes ``ir.compile()`` emit a ``DistributedCompiledProgram`` (HOST-level
+    ``@pl.jit.host`` kernels), which ``__call__`` then dispatches per-rank. An
+    unset value defers to ``ir.compile()``'s default (a single-chip
+    ``CompiledProgram``) and keeps it out of the cache key for non-distributed
+    callers.
     """
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
@@ -1036,6 +1043,8 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
+    if run_config.distributed_config is not None:
+        kwargs["distributed_config"] = run_config.distributed_config
     return kwargs
 
 
@@ -1053,9 +1062,12 @@ class JITFunction:
             ``'host'`` is the HOST-level orchestrator produced by
             ``@pl.jit.host`` — it owns ``pld.alloc_window_buffer`` /
             ``pld.window`` / ``pld.world_size()`` and the per-rank
-            ``device=`` dispatch loop. End-to-end runtime dispatch for a
-            ``'host'`` entry needs a ``distributed_config`` plumbed through
-            :meth:`_compile`; that wiring is tracked as follow-up work.
+            ``device=`` dispatch loop. End-to-end runtime dispatch works when
+            the caller supplies ``config=RunConfig(distributed_config=...)``:
+            the config is forwarded through :meth:`_compile` → ``ir.compile()``
+            (see :func:`_run_config_compile_kwargs`), which yields a
+            ``DistributedCompiledProgram`` that :meth:`__call__` dispatches
+            per-rank.
         _level: pl.Level or None.
         _dep_graph: Lazily-computed transitive JIT dep graph rooted here —
             ``(deps_topo, callers_by_dep_id, callees_by_func_id,
@@ -1314,6 +1326,10 @@ class JITFunction:
 
         platform = run_config.platform if run_config is not None else None
         strategy = run_config.strategy if run_config is not None else OptimizationStrategy.Default
+        # distributed_config is baked into the DistributedCompiledProgram and
+        # drives per-rank dispatch, so it must split the cache: two @pl.jit.host
+        # calls with different device_ids compile to distinct artifacts.
+        distributed_config = run_config.distributed_config if run_config is not None else None
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
@@ -1323,6 +1339,7 @@ class JITFunction:
             scalar_values=scalar_values,
             platform=platform,
             strategy=strategy,
+            distributed_config=distributed_config,
         )
 
         # L1 cache lookup
