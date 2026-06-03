@@ -36,8 +36,10 @@ SSA 值而存在。
   不出现在 DSL 表面。因此它是 `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.tensor.put`** 读写 *tensor*（GM）操作数 —— `dst` 和 `src` 都是窗口绑定的
-  `DistributedTensor` 视图,TPUT 中转用的 VEC staging tile 在 codegen 阶段合成,
-  不出现在 DSL 表面。因此它是 `pld.tensor.alloc_window_buffer` /
+  `DistributedTensor` 视图。TPUT 中转用的 VEC staging tile **不出现在** DSL 表面：
+  `ConvertTensorToTileOps` 将其物化为 `tile.create` 加内部 `pld.tile.put`，以便
+  内存分配器在 codegen 之前分配 UB（`MakePutCodegenPTO` 用该 stage 发出
+  `pto.comm.tput`）。因此它是 `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
   同步,无数据操作数 —— 因此归入 `pld.system`。
@@ -118,17 +120,20 @@ DSL（`python/pypto/language/distributed/op/tile_ops.py`）把 `target` / `peer`
 
 ```text
 pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
 同步地把本地窗口绑定的 `src` 写入 `peer` rank 的窗口绑定 `dst` 切片。两个操作数
-都是 GM 层级的 `DistributedTensor` 视图；VEC staging tile 在 codegen 时合成
-（`src/backend/common/pto_ops_common.cpp` 中的 `MakePutCodegenPTO`）,不出现在
-DSL 表面。
+都是 GM 层级的 `DistributedTensor` 视图。VEC staging tile **隐藏在** DSL 表面之外，
+由 `ConvertTensorToTileOps` 物化为 `tile.create` 加内部 `pld.tile.put`；后端 codegen
+（`src/backend/common/pto_ops_common.cpp` 中的 `MakePutCodegenPTO`）用已分配的 stage
+发出 `pto.comm.tput` —— **不会**在 codegen 阶段合成 stage tile（与 `pld.tensor.get` /
+TGET 不同）。
 
 Verifier：`dst` / `src` 必须都是 `DistributedTensorType`；`peer` 必须是
-`ScalarType`；`dst` 与 `src` 必须 element type 相同且形状为相同的**正的静态
-（positive static）**形状（staging VEC 缓冲需要编译期范围）。`atomic` 选择覆盖
-还是原子加（见 `AtomicType`）。
+`ScalarType`；`dst` 与 `src` 必须 element type 相同。全切片 put 要求形状为相同的**正的静态
+（positive static）**形状；子区域 put 须同时提供静态 `dst_offsets`、`src_offsets` 与
+`shape` 元组，staging tile 按 `shape` 定尺寸。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。
 
 ### `pld.tensor.get`（TGET）
 

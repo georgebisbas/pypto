@@ -40,9 +40,11 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
   surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window`, **not** of the tile-producing `remote_load`.
 - **`pld.tensor.put`** reads and writes *tensor* (GM) operands — both `dst` and
-  `src` are window-bound `DistributedTensor` views and the VEC staging tile
-  that TPUT bounces through is synthesised at codegen, never on the DSL
-  surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
+  `src` are window-bound `DistributedTensor` views. The VEC staging tile that
+  TPUT bounces through is **not** on the DSL surface: `ConvertTensorToTileOps`
+  materializes it as `tile.create` plus internal `pld.tile.put` so the memory
+  allocator assigns UB before codegen (`MakePutCodegenPTO` emits
+  `pto.comm.tput` with that stage). Sibling of `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window`, **not** of the tile-producing `remote_load`.
 - **`pld.system.notify` / `pld.system.wait`** drive the per-rank signal slot —
   pure control-plane synchronisation with no data operand — so they live in
@@ -130,18 +132,24 @@ positional, matching `tile.store`.
 
 ```text
 pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
 Synchronously writes the local window-bound `src` into the `peer` rank's slice
 of the window-bound `dst`. Both operands are GM-level `DistributedTensor`
-views; the VEC staging tile is synthesised at codegen
-(`MakePutCodegenPTO` in `src/backend/common/pto_ops_common.cpp`) and never
-appears on the DSL surface.
+views. The VEC staging tile is **hidden from the DSL surface** and is
+materialized by `ConvertTensorToTileOps` as `tile.create` plus internal
+`pld.tile.put`; backend codegen (`MakePutCodegenPTO` in
+`src/backend/common/pto_ops_common.cpp`) emits `pto.comm.tput` using that
+allocated stage — it does **not** synthesize the stage tile at codegen (unlike
+`pld.tensor.get` / TGET).
 
 Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
-`ScalarType`; `dst` and `src` must share element type and identical **positive
-static** shape (the staging VEC buffer needs compile-time extents). `atomic`
-selects overwrite vs atomic-add (see `AtomicType`).
+`ScalarType`; `dst` and `src` must share element type. Full-slice puts require
+identical **positive static** shape; subregion puts supply static
+`dst_offsets`, `src_offsets`, and `shape` tuples (all three together) and the
+staging tile is sized to `shape`. `atomic` selects overwrite vs atomic-add
+(see `AtomicType`).
 
 ### `pld.tensor.get` (TGET)
 
