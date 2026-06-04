@@ -166,6 +166,15 @@ class DistributedCodegen : public CodegenBase {
   // with-blocks emitted (== number of DecreaseIndent calls the caller owes).
   int EmitCommDomainAllocations();
 
+  /// Collect AssignStmt defs from a HOST orchestrator body so comm-slot size
+  /// lowering can unwrap CSE/SSA temps (e.g. ``t = pld.system.world_size()``)
+  /// before ``EmitCommDomainAllocations`` runs ahead of the body walk.
+  void CollectHostOrchVarDefs(const ir::FunctionPtr& func);
+
+  /// Lower a CommGroup slot ``size_`` expression for ``window_size`` /
+  /// ``CommBufferSpec`` emission, unwrapping hoisted scalar temps.
+  [[nodiscard]] std::string GetCommSlotSizeAsCode(const ir::ExprPtr& size_expr);
+
   // Scalar-expression Python-emission helpers (see distributed_scalar_expr_codegen.cpp).
   // Each writes the rendered Python expression into ``current_expr_value_``.
   void EmitInfixBinaryOp(const ir::BinaryExprPtr& op, const char* symbol);
@@ -247,6 +256,10 @@ class DistributedCodegen : public CodegenBase {
   // EmitCallToWorker when the callee has a TupleType return; consumed by
   // VisitStmt_(AssignStmt) when it encounters TupleGetItemExpr unpacking.
   std::map<std::pair<std::string, int>, std::string> tuple_element_tensors_;
+
+  // HOST orchestrator AssignStmt defs, populated before comm-domain emission.
+  std::unordered_map<const ir::Var*, ir::ExprPtr> host_orch_var_defs_;
+  bool unwrap_hoisted_var_refs_{false};
 };
 
 }  // namespace codegen

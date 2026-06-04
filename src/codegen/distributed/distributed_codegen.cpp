@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,6 +70,8 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   used_levels_.clear();
   hoisted_allocs_.clear();
   host_orch_body_after_hoist_ = false;
+  host_orch_var_defs_.clear();
+  unwrap_hoisted_var_refs_ = false;
   tuple_element_tensors_.clear();
 
   // Build a WindowBuffer* → group_idx lookup so EmitCallToWorker can route
@@ -251,6 +254,7 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   // popped after the body to balance the wrapper(s).
   int with_blocks = 0;
   if (func->level_.has_value() && ir::LevelToLinquLevel(*func->level_) >= 3) {
+    CollectHostOrchVarDefs(func);
     with_blocks = EmitCommDomainAllocations();
   }
 
@@ -265,6 +269,39 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   emitter_.DecreaseIndent();
   emitter_.EmitLine("");
   is_worker_context_ = false;
+}
+
+namespace {
+
+class HostOrchVarDefCollector : public ir::IRVisitor {
+ public:
+  explicit HostOrchVarDefCollector(std::unordered_map<const ir::Var*, ir::ExprPtr>& defs) : defs_(defs) {}
+
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    if (auto var = ir::As<ir::Var>(op->var_)) {
+      defs_[var.get()] = op->value_;
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const ir::Var*, ir::ExprPtr>& defs_;
+};
+
+}  // namespace
+
+void DistributedCodegen::CollectHostOrchVarDefs(const ir::FunctionPtr& func) {
+  host_orch_var_defs_.clear();
+  if (!func->body_) return;
+  HostOrchVarDefCollector collector(host_orch_var_defs_);
+  collector.VisitStmt(func->body_);
+}
+
+std::string DistributedCodegen::GetCommSlotSizeAsCode(const ir::ExprPtr& size_expr) {
+  unwrap_hoisted_var_refs_ = true;
+  std::string result = GetExprAsCode(size_expr);
+  unwrap_hoisted_var_refs_ = false;
+  return result;
 }
 
 int DistributedCodegen::EmitCommDomainAllocations() {
@@ -297,7 +334,7 @@ int DistributedCodegen::EmitCommDomainAllocations() {
     std::vector<std::string> slot_nbytes;
     slot_nbytes.reserve(group->slots_.size());
     for (const auto& slot : group->slots_) {
-      slot_nbytes.push_back(GetExprAsCode(slot->size_));
+      slot_nbytes.push_back(GetCommSlotSizeAsCode(slot->size_));
     }
 
     // window_size = sum of all slot byte expressions. Parenthesise each summand
@@ -620,6 +657,25 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
 
 void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null Var";
+  if (unwrap_hoisted_var_refs_) {
+    const ir::Var* cur = op.get();
+    std::unordered_set<const ir::Var*> visited;
+    while (true) {
+      auto it = host_orch_var_defs_.find(cur);
+      if (it == host_orch_var_defs_.end() || !it->second) {
+        break;
+      }
+      if (!visited.insert(cur).second) {
+        break;
+      }
+      if (auto next_var = ir::As<ir::Var>(it->second)) {
+        cur = next_var.get();
+        continue;
+      }
+      VisitExpr(it->second);
+      return;
+    }
+  }
   current_expr_value_ = SanitizeName(op->name_hint_);
 }
 

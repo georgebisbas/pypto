@@ -316,6 +316,37 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
     assert "len(contexts)" not in code, code
 
 
+def test_hoisted_world_size_temp_in_alloc_size_lowers_to_kwarg():
+    """Post-SSA ``n = pld.world_size(); alloc(n * 4)`` must not reference ``n``
+    inside ``allocate_domain`` before the body assigns it.
+
+    ``EmitCommDomainAllocations`` runs before the function-body walk, so slot
+    sizes must unwrap CSE/SSA temps back to ``world_size`` (mirrors
+    ``CollectCommGroups``' ``UnwrapStopExpr`` for loop bounds).
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, signal: pld.DistributedTensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+            return signal  # type: ignore[return-value]
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self) -> pl.Tensor[[1], pl.INT32]:
+            n = pld.world_size()
+            buf = pld.alloc_window_buffer(n * 4)
+            signal = pld.window(buf, [1], dtype=pl.INT32)
+            for r in pl.range(n):
+                self.chip_orch(signal, device=r)
+            return signal  # type: ignore[return-value]
+
+    code = _lower(Prog)
+    assert re.search(r"window_size=\(.*\bworld_size\b.*\),", code), code
+    assert re.search(r"CommBufferSpec\(.*\bworld_size\b.*\),", code), code
+    alloc_block = code.split("with orch.allocate_domain(")[1].split(") as __comm_d0:")[0]
+    assert "n__ssa_v0" not in alloc_block and " n " not in alloc_block and " n*" not in alloc_block, code
+
+
 # ---------------------------------------------------------------------------
 # Multi-CommGroup: two allocs dispatched to disjoint device subsets emit
 # nested ``with orch.allocate_domain(...)`` blocks and route each
