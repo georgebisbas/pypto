@@ -3110,20 +3110,22 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         return "";
       });
 
-  // ``pld.system.rank(ctx) -> ui32``: low 32 bits of the (rankId, rankNum)
-  // u64 slot. Emits ``pto.load_scalar`` (via EmitLoadRankPair) + arith.trunci.
+  // ``pld.system.rank(ctx)``: IR ``ScalarType(UINT32)``; MLIR lowers to signless
+  // ``i32`` (PTOAS rejects ``arith.trunci`` to ``ui32``). Low 32 bits of the
+  // (rankId, rankNum) u64 slot via ``pto.load_scalar`` + ``arith.trunci``.
   reg("pld.system.rank", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
     auto& cg = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.size() == 1) << "pld.system.rank expects exactly 1 argument, got " << op->args_.size();
     std::string ctx_ssa = cg.GetExprAsCode(op->args_[0]);
     std::string rk_pair = EmitLoadRankPair(cg, ctx_ssa);
     std::string rk = cg.GetCurrentResultTarget();
-    cg.Emit(rk + " = arith.trunci " + rk_pair + " : i64 to ui32");
+    cg.Emit(rk + " = arith.trunci " + rk_pair + " : i64 to i32");
     cg.SetCurrentExprValue(rk);
     return "";
   });
 
-  // ``pld.system.nranks(ctx) -> ui32``: high 32 bits of the same slot —
+  // ``pld.system.nranks(ctx)``: same UINT32 IR / signless-i32 MLIR convention.
+  // High 32 bits of the same slot —
   // ``kRankNumOffset == kRankIdOffset + 4`` lets us shift the already-loaded
   // i64 right by 32 instead of issuing a second pto.load_scalar.
   reg("pld.system.nranks", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
@@ -3138,7 +3140,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string rn_i64 = cg.NewTemp();
     cg.Emit(rn_i64 + " = arith.shrui " + rk_pair + ", " + c32 + " : i64");
     std::string rn = cg.GetCurrentResultTarget();
-    cg.Emit(rn + " = arith.trunci " + rn_i64 + " : i64 to ui32");
+    cg.Emit(rn + " = arith.trunci " + rn_i64 + " : i64 to i32");
     cg.SetCurrentExprValue(rn);
     return "";
   });

@@ -415,8 +415,8 @@ def test_get_comm_ctx_emits_no_mlir_aliases_ctx_arg():
 
 
 def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
-    """``pld.system.rank(ctx) -> ui32`` reads slot 2 (= kRankIdOffset /
-    kWindowSlotStride = 16/8) of the ctx ptr then truncates to ui32.
+    """``pld.system.rank(ctx)`` reads slot 2 (= kRankIdOffset /
+    kWindowSlotStride = 16/8) then truncates to signless ``i32`` for PTOAS.
 
     Asserts that the emitted MLIR contains ``pto.load_scalar %argN[%cK] :
     !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
@@ -435,13 +435,14 @@ def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
     body = mlir.split("func.func @kernel", 1)[1]
     # rank lowering line.
     assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
-    assert "arith.trunci" in body and "to ui32" in body, body
+    assert "arith.trunci" in body and "to i32" in body, body
+    assert "to ui32" not in body, body
     # rank does not shrui — only nranks does.
     assert "arith.shrui" not in body, body
 
 
 def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
-    """``pld.system.nranks(ctx) -> ui32`` reads the SAME slot 2 then
+    """``pld.system.nranks(ctx)`` reads the SAME slot 2 then
     ``arith.shrui ..., 32`` (high 32 bits = rankNum) then ``arith.trunci``.
 
     Uses the static_asserted invariant ``kRankNumOffset == kRankIdOffset
@@ -462,7 +463,8 @@ def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
     # nranks lowering: pto.load_scalar + arith.shrui + arith.trunci.
     assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
     assert "arith.shrui" in body, body
-    assert "arith.trunci" in body and "to ui32" in body, body
+    assert "arith.trunci" in body and "to i32" in body, body
+    assert "to ui32" not in body, body
 
 
 def test_put_emits_comm_tput_with_attr_and_staging_tile():
