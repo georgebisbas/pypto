@@ -15,6 +15,7 @@
 #include <string>
 
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -28,6 +29,20 @@ namespace codegen {
 using ir::As;
 using ir::BinaryExprPtr;
 using ir::ScalarType;
+
+namespace {
+
+std::string ScalarArithMlirType(::pypto::DataType dtype) {
+  if (dtype == ::pypto::DataType::INDEX) {
+    return "index";
+  }
+  if (dtype.IsFloat()) {
+    return DataTypeToMLIR(dtype);
+  }
+  return DataTypeToMLIRSignlessScalar(dtype);
+}
+
+}  // namespace
 
 // ========================================================================
 // Expression visitor helpers - arithmetic and comparison
@@ -74,7 +89,7 @@ std::string PTOCodegen::EmitArithOperand(const ir::ExprPtr& expr, const std::str
     return ssa;
   }
 
-  std::string have_mlir = (dt == ::pypto::DataType::INDEX) ? "index" : GetTypeString(dt);
+  std::string have_mlir = ScalarArithMlirType(dt);
   if (have_mlir == wanted_mlir_type) {
     return ssa;
   }
@@ -109,7 +124,7 @@ void PTOCodegen::VisitBinaryArithExpr(const BinaryExprPtr& op, const std::string
       result_type = GetTypeString(scalar_type->dtype_);
       mlir_op = float_op;
     } else if (scalar_type->dtype_ != ::pypto::DataType::INDEX) {
-      result_type = GetTypeString(scalar_type->dtype_);
+      result_type = ScalarArithMlirType(scalar_type->dtype_);
     }
   }
 
@@ -135,7 +150,7 @@ void PTOCodegen::VisitCmpExpr(const BinaryExprPtr& op, const std::string& predic
       operand_type = GetTypeString(scalar_type->dtype_);
       is_float = true;
     } else if (scalar_type->dtype_ != ::pypto::DataType::INDEX) {
-      operand_type = GetTypeString(scalar_type->dtype_);
+      operand_type = ScalarArithMlirType(scalar_type->dtype_);
     }
   }
 
@@ -216,10 +231,6 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
 
   ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
   ::pypto::DataType dst_dtype = ir::GetScalarDtype(op);
-  std::string src_type = GetTypeString(src_dtype);
-  std::string dst_type = GetTypeString(dst_dtype);
-
-  std::string result = NewTemp();
   bool src_is_index = (src_dtype == ::pypto::DataType::INDEX);
   bool dst_is_index = (dst_dtype == ::pypto::DataType::INDEX);
   bool src_is_float = src_dtype.IsFloat();
@@ -228,31 +239,29 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
   bool src_is_uint = src_dtype.IsUnsignedInt();
   bool dst_is_uint = dst_dtype.IsUnsignedInt();
 
+  std::string src_type = src_is_float ? GetTypeString(src_dtype) : ScalarArithMlirType(src_dtype);
+  std::string dst_type = dst_is_float ? GetTypeString(dst_dtype) : ScalarArithMlirType(dst_dtype);
+
+  std::string result = NewTemp();
   std::string mlir_op;
   if (src_dtype == dst_dtype) {
     fs_.current_expr_value = src;
     return;
   } else if (src_is_index || dst_is_index) {
     CHECK(!src_is_float && !dst_is_float) << "Cast between float and index types is not supported";
-    // arith.index_cast requires signless integer types. For unsigned source/destination,
-    // bridge via builtin.unrealized_conversion_cast (mirrors GetOrEmitConstant in pto_codegen.cpp).
+    // arith.index_cast requires signless integer types. For index -> uiN consumers that need
+    // typed MLIR, bridge via builtin.unrealized_conversion_cast (mirrors GetOrEmitConstant).
     if (dst_is_uint) {
-      // index -> uiN : arith.index_cast index -> iN, then bridge iN -> uiN
-      std::string signless_dst = dst_type.substr(1);  // "ui32" -> "i32"
+      std::string typed_dst = GetTypeString(dst_dtype);
       std::string signless_tmp = NewTemp();
-      Emit(signless_tmp + " = arith.index_cast " + src + " : " + src_type + " to " + signless_dst);
-      Emit(result + " = builtin.unrealized_conversion_cast " + signless_tmp + " : " + signless_dst + " to " +
-           dst_type);
+      Emit(signless_tmp + " = arith.index_cast " + src + " : index to " + dst_type);
+      Emit(result + " = builtin.unrealized_conversion_cast " + signless_tmp + " : " + dst_type + " to " +
+           typed_dst);
       fs_.current_expr_value = result;
       return;
     }
     if (src_is_uint) {
-      // uiN -> index : bridge uiN -> iN, then arith.index_cast iN -> index
-      std::string signless_src = src_type.substr(1);  // "ui32" -> "i32"
-      std::string signless_tmp = NewTemp();
-      Emit(signless_tmp + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " +
-           signless_src);
-      Emit(result + " = arith.index_cast " + signless_tmp + " : " + signless_src + " to " + dst_type);
+      Emit(result + " = arith.index_cast " + src + " : " + src_type + " to index");
       fs_.current_expr_value = result;
       return;
     }
@@ -282,7 +291,7 @@ std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string
         << " for var '" << var->name_hint_ << "')";
     if (scalar_type->dtype_ != DataType::INDEX) {
       std::string idx_name = NewNamedTemp(var->name_hint_ + "_idx");
-      std::string src_type = GetTypeString(scalar_type->dtype_);
+      std::string src_type = ScalarArithMlirType(scalar_type->dtype_);
       Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
       return idx_name;
     }
@@ -299,7 +308,7 @@ std::string PTOCodegen::EmitCastToIndex(const ir::ExprPtr& expr, const std::stri
                                           << GetTypeString(scalar_type->dtype_) << ")";
     if (scalar_type->dtype_ != DataType::INDEX) {
       std::string idx_name = NewTemp();
-      std::string src_type = GetTypeString(scalar_type->dtype_);
+      std::string src_type = ScalarArithMlirType(scalar_type->dtype_);
       Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
       return idx_name;
     }
@@ -313,7 +322,7 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
                                           << GetTypeString(scalar_type->dtype_) << ")";
     if (scalar_type->dtype_ != DataType::INT32) {
       std::string i32_name = NewTemp();
-      std::string src_type = GetTypeString(scalar_type->dtype_);
+      std::string src_type = ScalarArithMlirType(scalar_type->dtype_);
       // Use arith.index_cast for index→i32, arith.trunci/extui for int→int
       std::string mlir_op;
       if (scalar_type->dtype_ == DataType::INDEX) {
@@ -377,10 +386,11 @@ void PTOCodegen::VisitExpr_(const ir::NotPtr& op) {
   VisitExpr(op->operand_);
   std::string src = fs_.current_expr_value;
   ::pypto::DataType src_dtype = ir::GetScalarDtype(op->operand_);
-  std::string src_type = GetTypeString(src_dtype);
+  std::string src_type = ScalarArithMlirType(src_dtype);
   std::string zero = NewTemp();
   std::string result = NewTemp();
   if (src_dtype.IsFloat()) {
+    src_type = GetTypeString(src_dtype);
     Emit(zero + " = arith.constant 0.0 : " + src_type);
     Emit(result + " = arith.cmpf oeq, " + src + ", " + zero + " : " + src_type);
   } else {
@@ -394,9 +404,10 @@ void PTOCodegen::VisitExpr_(const ir::NegPtr& op) {
   VisitExpr(op->operand_);
   std::string src = fs_.current_expr_value;
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
-  std::string type_str = GetTypeString(dtype);
+  std::string type_str = ScalarArithMlirType(dtype);
   std::string result = NewTemp();
   if (dtype.IsFloat()) {
+    type_str = GetTypeString(dtype);
     Emit(result + " = arith.negf " + src + " : " + type_str);
   } else {
     std::string zero = NewTemp();
@@ -410,9 +421,10 @@ void PTOCodegen::VisitExpr_(const ir::AbsPtr& op) {
   VisitExpr(op->operand_);
   std::string src = fs_.current_expr_value;
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
-  std::string type_str = GetTypeString(dtype);
+  std::string type_str = ScalarArithMlirType(dtype);
   std::string result = NewTemp();
   if (dtype.IsFloat()) {
+    type_str = GetTypeString(dtype);
     Emit(result + " = math.absf " + src + " : " + type_str);
   } else {
     Emit(result + " = math.absi " + src + " : " + type_str);
@@ -424,7 +436,7 @@ void PTOCodegen::VisitExpr_(const ir::BitNotPtr& op) {
   VisitExpr(op->operand_);
   std::string src = fs_.current_expr_value;
   ::pypto::DataType dtype = ir::GetScalarDtype(op);
-  std::string type_str = GetTypeString(dtype);
+  std::string type_str = ScalarArithMlirType(dtype);
   std::string all_ones = NewTemp();
   Emit(all_ones + " = arith.constant -1 : " + type_str);
   std::string result = NewTemp();

@@ -1016,7 +1016,10 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
         << "alloc_tile valid_row/valid_col operand must be integer or index typed, got "
         << GetTypeString(scalar_type->dtype_);
     std::string idx = NewTemp();
-    Emit(idx + " = arith.index_cast " + ssa + " : " + GetTypeString(scalar_type->dtype_) + " to index");
+    const std::string src_type = scalar_type->dtype_ == DataType::INDEX
+                                     ? "index"
+                                     : DataTypeToMLIRSignlessScalar(scalar_type->dtype_);
+    Emit(idx + " = arith.index_cast " + ssa + " : " + src_type + " to index");
     return idx;
   };
 
@@ -1792,7 +1795,7 @@ std::pair<std::string, std::string> PTOCodegen::GetCurrentResultTpopValidShapeOp
       return ssa;
     }
     std::string idx = NewTemp();
-    std::string src_type = GetTypeString(scalar_type->dtype_);
+    const std::string src_type = DataTypeToMLIRSignlessScalar(scalar_type->dtype_);
     Emit(idx + " = arith.index_cast " + ssa + " : " + src_type + " to index");
     return idx;
   };

@@ -25,6 +25,13 @@ namespace codegen {
 /// Convert DataType to MLIR type string (e.g., FP32 -> "f32", INT32 -> "i32")
 std::string DataTypeToMLIR(DataType dtype);
 
+/// MLIR type for scalar ``arith.*`` / ``arith.cmpi`` / ``arith.index_cast`` operands.
+///
+/// Unsigned IR scalars (e.g. ``UINT32`` from ``pld.system.rank``) lower to signless
+/// integers in MLIR (``ui32`` -> ``i32``) so SSA values match PTOAS and rank/nranks
+/// codegen. Use ``DataTypeToMLIR`` for tensor element types and typed bridges.
+std::string DataTypeToMLIRSignlessScalar(DataType dtype);
+
 /// Convert MemorySpace to PTO address space string (e.g., Vec -> "vec", DDR -> "gm")
 std::string MemorySpaceToMLIR(ir::MemorySpace space);
 

@@ -467,6 +467,43 @@ def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
     assert "to ui32" not in body, body
 
 
+def test_rank_var_reuse_no_ui32_in_notify_and_compare():
+    """``pld.rank`` SSA stays signless ``i32`` when reused in compare and notify offsets.
+
+    Mirrors ``test_l3_allreduce`` ``reduce_step`` barrier pattern: without this,
+    ``EmitCastToIndex`` / ``VisitCmpExpr`` treat IR ``UINT32`` as ``ui32`` while
+    rank lowering defines the var as ``i32``, and PTOAS rejects mixed uses.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[16, 16], pl.FP32],
+            signal: pld.DistributedTensor[[2, 1], pl.INT32],
+        ):
+            ctx = pld.system.get_comm_ctx(data)
+            my_rank = pld.system.rank(ctx)
+            for peer in pl.range(2):
+                if peer != my_rank:
+                    pld.system.notify(
+                        signal,
+                        peer=peer,
+                        offsets=[my_rank, 0],
+                        value=1,
+                        op=pld.NotifyOp.AtomicAdd,
+                    )
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert "arith.trunci" in body and "to i32" in body, body
+    assert "ui32" not in body, body
+    assert "unrealized_conversion_cast" not in body, body
+    assert "my_rank" in body, body
+    assert "arith.index_cast" in body and "i32 to index" in body, body
+
+
 def test_put_emits_comm_tput_with_attr_and_staging_tile():
     """put codegen emits pto.comm.tput with #pto<atomic_type …> attr + an IR-allocated VEC staging tile."""
 

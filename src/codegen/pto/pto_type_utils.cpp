@@ -61,6 +61,14 @@ std::string DataTypeToMLIR(DataType dtype) {
   }
 }
 
+std::string DataTypeToMLIRSignlessScalar(DataType dtype) {
+  std::string mlir = DataTypeToMLIR(dtype);
+  if (dtype.IsUnsignedInt() && !mlir.empty() && mlir[0] == 'u') {
+    return mlir.substr(1);
+  }
+  return mlir;
+}
+
 std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type) {
   auto extent = As<ir::ConstInt>(array_type.extent());
   CHECK(extent) << "array element extent must be a compile-time ConstInt for incore codegen";
