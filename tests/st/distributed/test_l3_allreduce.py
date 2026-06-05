@@ -191,11 +191,13 @@ class TestL3AllReduce:
         )
         _emit_compile_profile(compiled)
 
-        inputs = _make_rank_inputs(n_ranks)
-        outputs = torch.zeros((n_ranks, 1, SIZE), dtype=torch.float32)
+        inputs = _make_rank_inputs(n_ranks).share_memory_()
+        outputs = torch.zeros((n_ranks, 1, SIZE), dtype=torch.float32).share_memory_()
 
-        print(f"PYPTO_RUNTIME_BEGIN n_ranks={n_ranks}", flush=True)
-        compiled(inputs, outputs)
+        print(f"PYPTO_RUNTIME_INIT_BEGIN n_ranks={n_ranks}", flush=True)
+        with compiled.prepare() as prepared:
+            print(f"PYPTO_RUNTIME_EXECUTE_BEGIN n_ranks={n_ranks}", flush=True)
+            prepared(inputs, outputs)
 
         expected = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected), (
