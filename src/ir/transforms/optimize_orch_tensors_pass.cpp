@@ -986,12 +986,14 @@ class IterArgReuseOptimizer {
         new_return_type = std::make_shared<TupleType>(new_func->return_types_);
       }
 
-      std::shared_ptr<Call> new_call;
-      if (new_return_type) {
-        new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, new_return_type, call->span_);
-      } else {
-        new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
-      }
+      // Preserve attrs_ (e.g. kAttrDumpVars) through the arg-subset rewrite —
+      // mirrors the base IRMutator. Only a merged Out param is removed; any
+      // dump/dep Var the tag references is a surviving In arg, so a verbatim
+      // attr copy stays valid. Fall back to UnknownType for a void-return callee
+      // so the rewritten Call's type_ matches the prior 4-arg ctor path.
+      auto new_call =
+          std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_,
+                                 new_return_type ? new_return_type : GetUnknownType(), call->span_);
 
       auto new_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
       var_remap_[op->var_.get()] = new_var;

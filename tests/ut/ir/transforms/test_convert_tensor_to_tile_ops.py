@@ -593,6 +593,57 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_dump_vars_attr_preserved_through_call_site_update(self):
+        """Regression: ``pl.dump_tag`` on an orchestration call must survive the
+        output-appending rewrite.
+
+        When the InCore callee gains a runtime-allocated ``Out`` param, the
+        call-site rewrite (``CallSiteUpdateMutator``) rebuilds the ``Call`` with
+        the extra arg. Previously it routed through a ``Call`` ctor that
+        default-inits ``attrs_`` to empty, silently dropping ``dump_vars`` so the
+        dumped tensor never reached the device manifest. The rewrite must copy
+        ``attrs_`` verbatim.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP32],
+                rhs: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                result: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(lhs, rhs)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.FP32],
+                rhs: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                pl.dump_tag(lhs)
+                result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(lhs, rhs)
+                return result
+
+        # Sanity: the dump tag rides the orchestration call before the pass.
+        before_main = Before.get_function("main")
+        assert before_main is not None
+        before_call = _find_first_call_to(before_main, "main_incore_0")
+        assert before_call is not None
+        assert {v.name_hint for v in before_call.attrs["dump_vars"]} == {"lhs"}
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+
+        # The call gains the ``ret0__out`` arg, but its dump_vars attr must
+        # survive the rewrite.
+        after_main = After.get_function("main")
+        assert after_main is not None
+        after_call = _find_first_call_to(after_main, "main_incore_0")
+        assert after_call is not None
+        assert "dump_vars" in after_call.attrs
+        assert {v.name_hint for v in after_call.attrs["dump_vars"]} == {"lhs"}
+
     def test_matmul_nd_dispatches_to_batch_matmul(self):
         """tensor.matmul with any operand of rank > 2 must lower to tile.batch_matmul.
 

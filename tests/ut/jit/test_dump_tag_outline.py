@@ -227,6 +227,52 @@ def test_dump_tag_reaches_for_form_spmd_dispatch():
     assert ".dump(c_view" in dump_lines[0], dump_lines[0]
 
 
+@pl.jit.inline
+def _cluster_mixed_writeback(
+    a: pl.Tensor[[64, 64], pl.FP32],
+    b: pl.Tensor[[64, 64], pl.FP32],
+    bias: pl.Tensor[[64, 64], pl.FP32],
+    c: pl.Tensor[[64, 64], pl.FP32],
+):
+    """``pl.dump_tag(a)`` consumed by a MixedKernel dispatched through a Cluster
+    Group (so ExpandMixedKernel's RewriteGroupCaller rewrites the Group->InCore
+    call into AIC/AIV — the rewrite that must carry attrs forward)."""
+    pl.dump_tag(a)
+    with pl.cluster():
+        with pl.incore():
+            mm = pl.matmul(a, b, out_dtype=pl.FP32)
+            c = pl.add(mm, bias)
+    return c
+
+
+@pl.jit
+def _cluster_mixed_with_dump_tag(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, c: pl.Out[pl.Tensor]):
+    c = _cluster_mixed_writeback(a, b, bias, c)
+    return c
+
+
+def test_dump_tag_survives_cluster_group_mixed_split():
+    """A ``pl.dump_tag`` on a value consumed by a MixedKernel dispatched through
+    a Cluster Group survives ExpandMixedKernel's ``RewriteGroupCaller``: the
+    rewritten AIC/AIV call must still carry the tagged Var.
+
+    Regression: ``RewriteGroupCaller`` rebuilt the Group->InCore call via a Call
+    constructor that drops ``attrs_``, so ``kAttrDumpVars`` was lost when the
+    Group was split into AIC/AIV lanes."""
+    torch = pytest.importorskip("torch")
+    _cluster_mixed_with_dump_tag._cache.clear()
+
+    a = torch.randn(64, 64, dtype=torch.float32)
+    b = torch.randn(64, 64, dtype=torch.float32)
+    bias = torch.randn(64, 64, dtype=torch.float32)
+    c = torch.zeros(64, 64, dtype=torch.float32)
+    program = _cluster_mixed_with_dump_tag.compile_for_test(a, b, bias, c)
+
+    dumps = _dispatch_dump_vars(program)
+    tagged = sorted({_base(n) for dv in dumps.values() for n in dv})
+    assert "a" in tagged, f"expected some AIC/AIV dispatch to dump 'a', got {dumps}"
+
+
 def test_no_dump_tag_yields_no_dispatch_dump_vars():
     """Without any marker, no dispatch carries dump_vars (selective dump off)."""
     torch = pytest.importorskip("torch")
