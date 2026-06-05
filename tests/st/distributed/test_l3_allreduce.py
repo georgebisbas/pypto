@@ -32,6 +32,8 @@ N-rank program body.
 """
 
 import sys
+from pathlib import Path
+import json
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -150,6 +152,24 @@ def _build_allreduce_program(n_ranks: int):
     return AllReduceNRank
 
 
+def _emit_compile_profile(compiled) -> None:
+    report_path = Path(compiled.output_dir) / "report" / "pipeline_profile.json"
+    if not report_path.is_file():
+        print(f"PYPTO_COMPILE_PROFILE_MISSING path={report_path}", flush=True)
+        return
+
+    profile = json.loads(report_path.read_text(encoding="utf-8"))
+    stage_seconds = {stage["name"]: float(stage["seconds"]) for stage in profile.get("stages", [])}
+    print(
+        "PYPTO_COMPILE_PROFILE "
+        f"total={float(profile.get('total_seconds', 0.0)):.6f} "
+        f"passes={stage_seconds.get('passes', 0.0):.6f} "
+        f"codegen={stage_seconds.get('codegen', 0.0):.6f} "
+        f"path={report_path}",
+        flush=True,
+    )
+
+
 class TestL3AllReduce:
     """L3 distributed runtime: N-rank allreduce via stage-in + notify/wait + remote_load."""
 
@@ -159,6 +179,7 @@ class TestL3AllReduce:
         if len(device_ids) < n_ranks:
             pytest.skip(f"allreduce P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
+        print(f"PYPTO_COMPILE_BEGIN n_ranks={n_ranks}", flush=True)
         program = _build_allreduce_program(n_ranks)
         compiled = ir.compile(
             program,
@@ -168,16 +189,19 @@ class TestL3AllReduce:
                 num_sub_workers=0,
             ),
         )
+        _emit_compile_profile(compiled)
 
         inputs = _make_rank_inputs(n_ranks)
         outputs = torch.zeros((n_ranks, 1, SIZE), dtype=torch.float32)
 
+        print(f"PYPTO_RUNTIME_BEGIN n_ranks={n_ranks}", flush=True)
         compiled(inputs, outputs)
 
         expected = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected), (
             f"allreduce P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
+        print(f"PYPTO_ALLREDUCE_OK n_ranks={n_ranks}", flush=True)
 
 
 if __name__ == "__main__":
