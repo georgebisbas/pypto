@@ -293,11 +293,11 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
       << op->return_vars_.size() << ")";
 
   INTERNAL_CHECK_SPAN(op->kind_ != ir::ForKind::Unroll, op->span_)
-      << "Internal error: ForKind::Unroll reached codegen — UnrollLoops pass (pass 2) "
+      << "Internal error: ForKind::Unroll reached codegen — UnrollLoops pass "
       << "should have expanded it. The pipeline is incomplete.";
   INTERNAL_CHECK_SPAN(op->kind_ != ir::ForKind::Pipeline, op->span_)
-      << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops (pass 25) "
-      << "and CanonicalizeIOOrder (pass 26) should have demoted it to Sequential. "
+      << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops "
+      << "and CanonicalizeIOOrder should have demoted it to Sequential. "
       << "The pipeline is incomplete.";
 
   // Evaluate loop bounds and ensure they are index-typed for scf.for.

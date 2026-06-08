@@ -49,7 +49,7 @@ inline const PassProperties kMaterializeRuntimeScopesProperties{
 
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
-inline const PassProperties kUnrollLoopsProperties{};
+inline const PassProperties kUnrollLoopsProperties{.produced = {IRProperty::UnrollResolved}};
 
 // -- Control flow structuring pass (runs before SSA, after unrolling) ---------
 

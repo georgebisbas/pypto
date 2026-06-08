@@ -345,11 +345,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
     INTERNAL_CHECK_SPAN(for_stmt->kind_ != ForKind::Unroll, for_stmt->span_)
-        << "Internal error: ForKind::Unroll reached codegen — UnrollLoops pass (pass 2) "
+        << "Internal error: ForKind::Unroll reached codegen — UnrollLoops pass "
         << "should have expanded it. The pipeline is incomplete.";
     INTERNAL_CHECK_SPAN(for_stmt->kind_ != ForKind::Pipeline, for_stmt->span_)
-        << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops (pass 25) "
-        << "and CanonicalizeIOOrder (pass 26) should have demoted it to Sequential. "
+        << "Internal error: ForKind::Pipeline reached codegen — LowerPipelineLoops "
+        << "and CanonicalizeIOOrder should have demoted it to Sequential. "
         << "The pipeline is incomplete.";
 
     std::string loop_var = GetVarName(for_stmt->loop_var_);
