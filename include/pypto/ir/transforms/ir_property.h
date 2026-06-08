@@ -70,6 +70,7 @@ enum class IRProperty : uint64_t {
                                     ///< value->GetType()) — covers dtype, shape, tile_view/tensor_view, and
                                     ///< TileType memory_space (memref excluded as an allocation detail;
                                     ///< memory_space exists only on TileType, not TensorType)
+  UnrollResolved,                   ///< No ForKind::Unroll survives; produced by UnrollLoops
   kCount                            ///< Sentinel (must be last)
 };
 
