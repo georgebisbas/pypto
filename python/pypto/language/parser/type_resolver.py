@@ -844,7 +844,7 @@ class TypeResolver:
                     f"Shape variable '{source_name}' is a Scalar with no underlying expression",
                     span=span,
                 )
-            return expr
+            return ir.dim_expr(expr, span)
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
