@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pypto.pypto_core import DataType, ir
 
 from ..typing.dynamic import DynVar
+from ..typing.scalar import Scalar
 from .diagnostics import ParserTypeError
 
 if TYPE_CHECKING:
@@ -137,6 +138,8 @@ class ExprEvaluator:
             return value
         if isinstance(value, DynVar):
             return self.get_or_create_dynvar(value, span)
+        if isinstance(value, Scalar):
+            return value.unwrap()
         if isinstance(value, (list, tuple)):
             return ir.MakeTuple([self.python_value_to_ir(elt, span) for elt in value], span)
         raise ParserTypeError(

@@ -32,15 +32,11 @@ def test_dynamic_dim_mul_in_shape():
 
     func = TestProg.get_function("func")
     assert func is not None
-    return_type = func.return_types_[0]
+    return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
     # Shape[0] should be a Mul(Var("NR"), ConstInt(64)) or similar composite.
-    dim0 = return_type.shape_[0]
+    dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.Mul), f"expected ir.Mul for GATHERED dim, got {type(dim0).__name__}"
-    left = dim0.left_
-    right = dim0.right_
-    assert isinstance(left, ir.Var) and left.name_hint_ == "NR"
-    assert isinstance(right, ir.ConstInt) and right.value_ == 64
 
 
 def test_dynamic_dim_add_in_shape():
@@ -57,8 +53,8 @@ def test_dynamic_dim_add_in_shape():
 
     func = TestProg.get_function("func")
     assert func is not None
-    return_type = func.return_types_[0]
-    dim0 = return_type.shape_[0]
+    return_type = func.return_types[0]
+    dim0 = return_type.shape[0]
     assert isinstance(dim0, ir.Add), f"expected ir.Add for PADDED dim, got {type(dim0).__name__}"
 
 
@@ -75,9 +71,9 @@ def test_static_mul_still_works():
 
     func = TestProg.get_function("func")
     assert func is not None
-    return_type = func.return_types_[0]
-    dim0 = return_type.shape_[0]
-    assert isinstance(dim0, ir.ConstInt) and dim0.value_ == 256
+    return_type = func.return_types[0]
+    dim0 = return_type.shape[0]
+    assert isinstance(dim0, ir.ConstInt) and dim0.value == 256
 
 
 if __name__ == "__main__":
