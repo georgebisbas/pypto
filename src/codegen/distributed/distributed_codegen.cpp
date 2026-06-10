@@ -838,7 +838,6 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
           // Composite expression (e.g. ``NR * 64``).  Lower via visitor chain.
           shape += GetExprAsCode(dim);
         }
-        }
       }
       if (ret_type->shape_.size() == 1) shape += ",";
       shape += ")";
