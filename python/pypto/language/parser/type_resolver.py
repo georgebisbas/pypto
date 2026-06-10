@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from pypto.language.typing.dynamic import DynVar
+from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
@@ -833,6 +834,17 @@ class TypeResolver:
             elif value.name not in self._dyn_var_cache:
                 self._dyn_var_cache[value.name] = value._ir_var
             return value._ir_var
+        # Accept Scalar expressions produced by DynVar arithmetic (e.g. ``NR * 64``
+        # where NR is a ``pl.dynamic()`` dim).  The underlying ir.Expr (ir.Mul,
+        # ir.Add, …) is directly used as the shape dimension.
+        if isinstance(value, Scalar):
+            expr = value.unwrap()
+            if not isinstance(expr, ir.Expr):
+                raise ParserTypeError(
+                    f"Shape variable '{source_name}' is a Scalar with no underlying expression",
+                    span=span,
+                )
+            return expr
         raise ParserTypeError(
             f"Shape variable '{source_name}' must be int or pl.dynamic(), got {type(value).__name__}",
             span=span,
