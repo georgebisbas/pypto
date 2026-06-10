@@ -286,6 +286,19 @@ PropertyVerifierPtr CreatePipelineLoopValidPropertyVerifier();
 PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating UnrollResolved property verifier
+ *
+ * Verifies the post-split-chunked-loops invariant: no ``ForStmt`` may carry
+ * ``kind_ == ForKind::Unroll``. Non-chunked Unroll loops are expanded by
+ * ``UnrollLoops``; chunked Unroll loops are demoted to Sequential by
+ * ``SplitChunkedLoops``. Any ``ForKind::Unroll`` surviving past
+ * SplitChunkedLoops indicates a pass defect.
+ *
+ * @return Shared pointer to UnrollResolved PropertyVerifier
+ */
+PropertyVerifierPtr CreateUnrollResolvedPropertyVerifier();
+
+/**
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully

@@ -12,6 +12,7 @@ This pass transforms a for loop created with `chunk=C` into a pair of nested loo
 Both policies run after SSA conversion and propagate `iter_args` through the generated loops.
 
 **Requires**: `TypeChecked`, `SSAForm`.
+**Produces**: `UnrollResolved` property — no `ForKind::Unroll` survives after this pass (chunked Unroll loops are demoted to Sequential).
 
 **When to use**: Runs automatically in the default pipeline after `FlattenCallExpr` and before `InterchangeChunkLoops`. Use `chunk=` on `pl.range()`, `pl.parallel()`, or `pl.unroll()` inside a `with pl.auto_incore():` scope. Chunked loops outside `auto_incore` are not split.
 

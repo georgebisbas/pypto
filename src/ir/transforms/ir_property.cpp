@@ -87,6 +87,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "RuntimeScopesMaterialized";
     case IRProperty::AssignTypeSymmetry:
       return "AssignTypeSymmetry";
+    case IRProperty::UnrollResolved:
+      return "UnrollResolved";
     default:
       return "Unknown";
   }

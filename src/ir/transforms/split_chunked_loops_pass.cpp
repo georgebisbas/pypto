@@ -484,10 +484,10 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto inner_for = std::make_shared<ForStmt>(
           in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{}, inner_body, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+          op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
       auto outer_for = std::make_shared<ForStmt>(
           out_var, zero, n_full, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
-          op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+          op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
       result_stmts.push_back(outer_for);
     }
 
@@ -508,7 +508,7 @@ class ChunkedLoopSplitter : public IRMutator {
       RestoreSubstitutions(prev_def_subs);
 
       auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body,
-                                               std::vector<VarPtr>{}, sp, op->kind_, std::nullopt,
+                                               std::vector<VarPtr>{}, sp, op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt,
                                                MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkRemainder));
       result_stmts.push_back(rem_for);
     }

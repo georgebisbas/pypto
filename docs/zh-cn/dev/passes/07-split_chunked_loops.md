@@ -12,6 +12,7 @@
 两种策略都在 SSA 转换之后运行，并将 `iter_args` 传播到生成的循环中。
 
 **前置条件**: `TypeChecked`、`SSAForm`。
+**产出属性**: `UnrollResolved` — 此 Pass 之后不再存在 `ForKind::Unroll`（分块 Unroll 循环被降级为 Sequential）。
 
 **使用时机**: 在默认流水线中自动运行，位于 `FlattenCallExpr` 之后、`InterchangeChunkLoops` 之前。在 `with pl.auto_incore():` 作用域内的 `pl.range()`、`pl.parallel()`、`pl.unroll()` 上使用 `chunk=`。`auto_incore` 之外的分块循环不会被拆分。
 
