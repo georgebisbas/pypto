@@ -284,7 +284,7 @@ class TestChunkingWithKind:
     @pytest.mark.filterwarnings("ignore:.*RoundtripInstrument.*IR not printable:UserWarning")
     def test_unroll_chunk(self):
         """Chunk an unroll loop: SplitChunkedLoops demotes ForKind::Unroll
-        to Sequential on the generated inner/outer loops.
+        to Sequential on the generated inner/outer loops."""
 
         @pl.program
         class Input:
