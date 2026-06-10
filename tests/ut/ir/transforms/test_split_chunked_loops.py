@@ -283,12 +283,8 @@ class TestChunkingWithKind:
 
     @pytest.mark.filterwarnings("ignore:.*RoundtripInstrument.*IR not printable:UserWarning")
     def test_unroll_chunk(self):
-        """Chunk an unroll loop: both inner and outer loops are Unroll.
-
-        Since the DSL does not support pl.unroll() with init_values,
-        we verify the IR structure properties directly instead of
-        using structural equality.
-        """
+        """Chunk an unroll loop: SplitChunkedLoops demotes ForKind::Unroll
+        to Sequential on the generated inner/outer loops.
 
         @pl.program
         class Input:
@@ -314,7 +310,7 @@ class TestChunkingWithKind:
 
         # Inside the scope is the outer for loop
         outer_for = cast(ir.ForStmt, scope.body)
-        assert outer_for.kind == ir.ForKind.Unroll
+        assert outer_for.kind == ir.ForKind.Sequential
         assert len(outer_for.iter_args) == 1
         assert len(outer_for.return_vars) == 1
 
@@ -325,7 +321,7 @@ class TestChunkingWithKind:
         # Inner loop is inside outer body (SeqStmts: [inner_for, yield])
         outer_body_stmts = _body_stmts(outer_for.body)
         inner_for = cast(ir.ForStmt, outer_body_stmts[0])
-        assert inner_for.kind == ir.ForKind.Unroll
+        assert inner_for.kind == ir.ForKind.Sequential
         assert len(inner_for.iter_args) == 1
         assert len(inner_for.return_vars) == 1
 
