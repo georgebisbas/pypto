@@ -174,10 +174,13 @@ class TestL3AllGather:
             f"allgather P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
-        # Sanity: output must be concatenation, not any single input passed through.
-        for r in range(n_ranks):
-            assert not torch.allclose(outputs[r, 0, :SIZE], inputs[r, 0]), (
-                f"allgather P={n_ranks}: rank {r} output[:SIZE] must not equal"
+        # Sanity: output is concatenation of all inputs, not a single-input
+        # passthrough.  For r=0, output[:SIZE] naturally equals inputs[0]
+        # (rank 0 is first in the concatenation order); for r>0, output[:SIZE]
+        # should be rank 0's data, not rank r's.
+        if n_ranks >= 2:
+            assert not torch.allclose(outputs[1, 0, :SIZE], inputs[1, 0]), (
+                f"allgather P={n_ranks}: rank 1 output[:SIZE] must not equal"
                 f" its own input (concatenation required)"
             )
 

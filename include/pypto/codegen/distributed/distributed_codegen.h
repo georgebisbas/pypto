@@ -168,6 +168,12 @@ class DistributedCodegen : public CodegenBase {
   /// when the scope's ``window_size`` / ``CommBufferSpec`` lines are written.
   void CollectHostOrchVarDefs(const ir::FunctionPtr& func);
 
+  /// Scan tensor type shapes (params + return types) for Var nodes inside
+  /// DimExpr bodies and emit Python variable definitions at the top of the
+  /// generated orchestrator — extracting the value from the first tensor
+  /// param that carries the Var in its shape.
+  void EmitShapeDimVarDefs(const ir::FunctionPtr& func);
+
   /// Lower a comm-domain slot ``size_`` expression for ``window_size`` /
   /// ``CommBufferSpec`` emission, unwrapping hoisted scalar temps via
   /// ``host_orch_var_defs_``.
