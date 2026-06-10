@@ -191,6 +191,19 @@ static void CollectDeclaredNames(const StmtPtr& stmt, std::unordered_set<std::st
 }
 
 /**
+ * @brief Demote ForKind::Unroll to Sequential; pass through all other kinds.
+ *
+ * ForKind::Unroll is a compile-time marker for UnrollLoops. Chunked Unroll
+ * loops are intentionally skipped by UnrollLoops and decomposed here; the
+ * inner loop iterates a compile-time-constant chunk_size and should run
+ * sequentially at runtime. Demoting to Sequential encodes that resolution
+ * directly in the IR so no Unroll survives past SplitChunkedLoops.
+ */
+static ForKind DemoteUnrollKind(ForKind kind) {
+  return kind == ForKind::Unroll ? ForKind::Sequential : kind;
+}
+
+/**
  * @brief Convert a vector of statements into a single StmtPtr.
  *
  * Returns an empty SeqStmts for empty input, the single statement for
@@ -484,10 +497,10 @@ class ChunkedLoopSplitter : public IRMutator {
 
       auto inner_for = std::make_shared<ForStmt>(
           in_var, zero, chunk_expr, one, std::vector<IterArgPtr>{}, inner_body, std::vector<VarPtr>{}, sp,
-          op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkInner));
       auto outer_for = std::make_shared<ForStmt>(
           out_var, zero, n_full, one, std::vector<IterArgPtr>{}, inner_for, std::vector<VarPtr>{}, sp,
-          op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
+          DemoteUnrollKind(op->kind_), std::nullopt, MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkOuter));
       result_stmts.push_back(outer_for);
     }
 
@@ -508,7 +521,7 @@ class ChunkedLoopSplitter : public IRMutator {
       RestoreSubstitutions(prev_def_subs);
 
       auto rem_for = std::make_shared<ForStmt>(rem_var, zero, n_rem, one, std::vector<IterArgPtr>{}, rem_body,
-                                               std::vector<VarPtr>{}, sp, op->kind_ == ForKind::Unroll ? ForKind::Sequential : op->kind_, std::nullopt,
+                                               std::vector<VarPtr>{}, sp, DemoteUnrollKind(op->kind_), std::nullopt,
                                                MakeLoopAttrs(op->attrs_, LoopOrigin::ChunkRemainder));
       result_stmts.push_back(rem_for);
     }
