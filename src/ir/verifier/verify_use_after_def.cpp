@@ -76,15 +76,11 @@ class UseAfterDefChecker : public IRVisitor {
                                 static_cast<int>(use_after_def::ErrorType::USE_BEFORE_DEF), msg.str(),
                                 op->span_);
     }
-    // Visit variable references in type expressions (valid_shape, stride, etc.)
-    // to detect undefined vars in type metadata.  Guard against recursion:
-    // vars found inside type expressions are typically scalars whose types
-    // don't contain further view expressions, but the flag ensures safety.
-    if (!visiting_type_) {
-      visiting_type_ = true;
-      var_collectors::VisitTypeExprFields(*this, op->GetType());
-      visiting_type_ = false;
-    }
+    // Skip VisitTypeExprFields: type-dynamic vars (e.g. M in Tensor[[M, N*2]])
+    // are already registered via CollectTypeVars before body walk. Walking type
+    // shapes again during body traversal causes false positives when composite
+    // dim expressions (Mul, Add, etc.) contain Var nodes that exist only in
+    // the function signature type, not as independent SSA values in the body.
   }
 
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -211,7 +207,6 @@ class UseAfterDefChecker : public IRVisitor {
   std::unordered_set<const Var*> in_scope_;
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
-  bool visiting_type_ = false;
 };
 
 class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
