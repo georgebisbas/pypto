@@ -207,8 +207,11 @@ void SSAVerifier::VisitVarLike_(const VarPtr& op) {
     msg << "Variable '" << op->name_hint_ << "' used outside its defining scope";
     RecordError(ssa::ErrorType::SCOPE_VIOLATION, msg.str(), op->span_);
   }
-  // Call base implementation to visit type shape expressions
-  IRVisitor::VisitVarLike_(op);
+  // Intentionally skip IRVisitor::VisitVarLike_ — type-embedded Vars are
+  // already registered via RegisterTypeVars for params, return types, and
+  // local var assignments.  Walking type shapes during body traversal would
+  // re-encounter composite-dim Vars (e.g. Var("NR") inside ir.Mul) that are
+  // not per-function SSA values and would falsely trigger scope errors.
 }
 
 void SSAVerifier::CheckVariableAssignment(const VarPtr& var) {
