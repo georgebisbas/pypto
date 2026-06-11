@@ -1078,13 +1078,13 @@ void BindIR(nb::module_& m) {
   // DimExpr — compile-time composite dimension expression in type shapes.
   // body_ is IgnoreField so visitors and verifiers skip the wrapped expression,
   // keeping type-annotation variables out of runtime SSA scope checks.
-  auto dimexpr_class = nb::class_<DimExpr, Expr>(
-      ir, "DimExpr",
-      "Compile-time composite dimension expression in type shapes.\n"
-      "\n"
-      "Wraps arithmetic on pl.dynamic() scalars (e.g. ``N * 2``) so the\n"
-      "compiler's visitors and SSA verifier treat them as opaque type-level\n"
-      "annotations, not runtime SSA values. Unwrap via ``expr.body``.");
+  auto dimexpr_class =
+      nb::class_<DimExpr, Expr>(ir, "DimExpr",
+                                "Compile-time composite dimension expression in type shapes.\n"
+                                "\n"
+                                "Wraps arithmetic on pl.dynamic() scalars (e.g. ``N * 2``) so the\n"
+                                "compiler's visitors and SSA verifier treat them as opaque type-level\n"
+                                "annotations, not runtime SSA values. Unwrap via ``expr.body``.");
   BindFields<DimExpr>(dimexpr_class);
   dimexpr_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("body"), nb::arg("span"),
                     "Wrap an expression for use as a compile-time dimension");

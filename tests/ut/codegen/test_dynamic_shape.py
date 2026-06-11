@@ -368,6 +368,7 @@ def test_bare_var_in_dimexpr():
     assert func is not None
 
     param_type = func.params[0].type
+    assert isinstance(param_type, ir.TensorType)
     dim0 = param_type.shape[0]  # M * 2 — composite, should be DimExpr-wrapped
     dim1 = param_type.shape[1]  # N — bare Var, NOT DimExpr-wrapped
 
