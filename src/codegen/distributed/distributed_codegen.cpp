@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>

@@ -943,6 +943,12 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
     return false;
   }
 
+  // Unwrap DimExpr before the TypeName check — the parser wraps reparsed
+  // composite dims in DimExpr, so one side may have Add while the other has
+  // DimExpr(Add).  Normalize to the inner expression for comparison.
+  if (auto lhs_dim = As<DimExpr>(lhs)) return Equal(lhs_dim->body_, rhs);
+  if (auto rhs_dim = As<DimExpr>(rhs)) return Equal(lhs, rhs_dim->body_);
+
   if (lhs->TypeName() != rhs->TypeName()) {
     if constexpr (AssertMode) {
       std::ostringstream msg;
