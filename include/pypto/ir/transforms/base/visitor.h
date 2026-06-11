@@ -93,7 +93,6 @@ class IRVisitor : public IRFunctor<void> {
   void VisitExpr_(const NotPtr& op) override;
   void VisitExpr_(const BitNotPtr& op) override;
   void VisitExpr_(const CastPtr& op) override;
-  void VisitExpr_(const DimExprPtr& op) override;
 
   // Statement types
   void VisitStmt_(const AssignStmtPtr& op) override;

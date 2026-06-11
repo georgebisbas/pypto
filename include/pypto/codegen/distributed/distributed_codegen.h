@@ -126,7 +126,6 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::BitNotPtr& op) override;
   void VisitExpr_(const ir::AbsPtr& op) override;
   void VisitExpr_(const ir::CastPtr& op) override;
-  void VisitExpr_(const ir::DimExprPtr& op) override;
 
  private:
   // Code structure emission
@@ -169,9 +168,9 @@ class DistributedCodegen : public CodegenBase {
   void CollectHostOrchVarDefs(const ir::FunctionPtr& func);
 
   /// Scan tensor type shapes (params + return types) for Var nodes inside
-  /// DimExpr bodies and emit Python variable definitions at the top of the
-  /// generated orchestrator — extracting the value from the first tensor
-  /// param that carries the Var in its shape.
+  /// composite shape expressions and emit Python variable definitions at
+  /// the top of the generated orchestrator — extracting the value from
+  /// the first tensor param that carries the Var in its shape.
   void EmitShapeDimVarDefs(const ir::FunctionPtr& func);
 
   /// Lower a comm-domain slot ``size_`` expression for ``window_size`` /

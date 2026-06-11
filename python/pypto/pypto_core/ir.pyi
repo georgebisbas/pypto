@@ -3590,9 +3590,6 @@ def neg(operand: Expr, span: Span = ...) -> Expr:
 def cast(operand: Expr, dtype: DataType, span: Span = ...) -> Expr:
     """Cast operator (cast operand to dtype)."""
 
-def dim_expr(body: Expr, span: Span = ...) -> Expr:
-    """Wrap a dimension expression so the SSA verifier treats it as program-scoped."""
-
 def bit_and(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise and operator (lhs & rhs)."""
 

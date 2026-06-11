@@ -34,10 +34,9 @@ def test_dynamic_dim_mul_in_shape():
     assert func is not None
     return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
-    # Shape[0] should be DimExpr wrapping Mul(Var("NR"), ConstInt(64)).
+    # Shape[0] should be ir.Mul wrapping Var("NR") and ConstInt(64).
     dim0 = return_type.shape[0]
-    assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
-    assert isinstance(dim0.body, ir.Mul), f"expected ir.Mul body, got {type(dim0.body).__name__}"
+    assert isinstance(dim0, ir.Mul), f"expected ir.Mul, got {type(dim0).__name__}"
 
 
 def test_dynamic_dim_add_in_shape():
@@ -57,8 +56,7 @@ def test_dynamic_dim_add_in_shape():
     return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
-    assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
-    assert isinstance(dim0.body, ir.Add), f"expected ir.Add body, got {type(dim0.body).__name__}"
+    assert isinstance(dim0, ir.Add), f"expected ir.Add, got {type(dim0).__name__}"
 
 
 def test_dynamic_dim_sub_in_shape():
@@ -78,8 +76,7 @@ def test_dynamic_dim_sub_in_shape():
     return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
-    assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
-    assert isinstance(dim0.body, ir.Sub), f"expected ir.Sub body, got {type(dim0.body).__name__}"
+    assert isinstance(dim0, ir.Sub), f"expected ir.Sub, got {type(dim0).__name__}"
 
 
 def test_dynamic_dim_floordiv_in_shape():
@@ -99,8 +96,7 @@ def test_dynamic_dim_floordiv_in_shape():
     return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
-    assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
-    assert isinstance(dim0.body, ir.FloorDiv), f"expected ir.FloorDiv body, got {type(dim0.body).__name__}"
+    assert isinstance(dim0, ir.FloorDiv), f"expected ir.FloorDiv, got {type(dim0).__name__}"
 
 
 def test_dynamic_dim_mod_in_shape():
@@ -120,8 +116,7 @@ def test_dynamic_dim_mod_in_shape():
     return_type = func.return_types[0]
     assert isinstance(return_type, ir.TensorType)
     dim0 = return_type.shape[0]
-    assert isinstance(dim0, ir.DimExpr), f"expected ir.DimExpr, got {type(dim0).__name__}"
-    assert isinstance(dim0.body, ir.FloorMod), f"expected ir.FloorMod body, got {type(dim0.body).__name__}"
+    assert isinstance(dim0, ir.FloorMod), f"expected ir.FloorMod, got {type(dim0).__name__}"
 
 
 def test_static_mul_still_works():

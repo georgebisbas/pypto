@@ -301,33 +301,29 @@ void DistributedCodegen::CollectHostOrchVarDefs(const ir::FunctionPtr& func) {
 namespace {
 
 // Recursively collect all ir::Var nodes inside a shape expression,
-// unwrapping DimExpr and binary/unary nodes.
-void CollectVarsFromDimExpr(const ir::ExprPtr& expr, std::vector<ir::VarPtr>& out,
+// unwrapping binary/unary nodes.
+void CollectVarsFromShapeExpr(const ir::ExprPtr& expr, std::vector<ir::VarPtr>& out,
                             std::set<const ir::Var*>& seen) {
   if (!expr) return;
   if (auto var = ir::As<ir::Var>(expr)) {
     if (seen.insert(var.get()).second) out.push_back(var);
     return;
   }
-  if (auto dim_expr = ir::As<ir::DimExpr>(expr)) {
-    CollectVarsFromDimExpr(dim_expr->body_, out, seen);
-    return;
-  }
   if (auto binary = ir::As<ir::BinaryExpr>(expr)) {
-    CollectVarsFromDimExpr(binary->left_, out, seen);
-    CollectVarsFromDimExpr(binary->right_, out, seen);
+    CollectVarsFromShapeExpr(binary->left_, out, seen);
+    CollectVarsFromShapeExpr(binary->right_, out, seen);
     return;
   }
   if (auto unary = ir::As<ir::UnaryExpr>(expr)) {
-    CollectVarsFromDimExpr(unary->operand_, out, seen);
+    CollectVarsFromShapeExpr(unary->operand_, out, seen);
     return;
   }
   if (auto call = ir::As<ir::Call>(expr)) {
-    for (const auto& arg : call->args_) CollectVarsFromDimExpr(arg, out, seen);
+    for (const auto& arg : call->args_) CollectVarsFromShapeExpr(arg, out, seen);
     return;
   }
   if (auto tget = ir::As<ir::TupleGetItemExpr>(expr)) {
-    CollectVarsFromDimExpr(tget->tuple_, out, seen);
+    CollectVarsFromShapeExpr(tget->tuple_, out, seen);
     return;
   }
 }
@@ -335,8 +331,8 @@ void CollectVarsFromDimExpr(const ir::ExprPtr& expr, std::vector<ir::VarPtr>& ou
 }  // namespace
 
 void DistributedCodegen::EmitShapeDimVarDefs(const ir::FunctionPtr& func) {
-  // Collect all Var nodes that appear inside DimExpr bodies in tensor type
-  // shapes (params + return types), and map each Var to the first tensor
+  // Collect all Var nodes that appear in tensor type shape expressions
+  // (params + return types), and map each Var to the first tensor
   // param that carries it — that tensor's runtime .shape[] provides the value.
   std::map<const ir::Var*, std::pair<std::string, size_t>> var_source;  // var → (tensor_name, dim_idx)
   std::vector<ir::VarPtr> ordered_vars;
@@ -347,7 +343,7 @@ void DistributedCodegen::EmitShapeDimVarDefs(const ir::FunctionPtr& func) {
     if (!shaped) return;
     for (size_t i = 0; i < shaped->shape_.size(); ++i) {
       std::vector<ir::VarPtr> vars;
-      CollectVarsFromDimExpr(shaped->shape_[i], vars, seen);
+      CollectVarsFromShapeExpr(shaped->shape_[i], vars, seen);
       for (const auto& v : vars) {
         if (var_source.find(v.get()) == var_source.end()) {
           var_source[v.get()] = {tensor_name, i};
@@ -364,7 +360,7 @@ void DistributedCodegen::EmitShapeDimVarDefs(const ir::FunctionPtr& func) {
     process_type(ret_type, "");  // return types don't have a name; skip
   }
 
-  // Emit definitions for each dynamic var found inside DimExpr bodies.
+  // Emit definitions for each dynamic var found inside shape expressions.
   for (const auto& var : ordered_vars) {
     std::string name = SanitizeName(var->name_hint_);
     if (declared_vars_.count(name)) continue;  // already defined
