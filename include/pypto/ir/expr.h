@@ -1182,8 +1182,9 @@ class TupleGetItemExpr : public Expr {
 using TupleGetItemExprPtr = std::shared_ptr<const TupleGetItemExpr>;
 
 /**
- * @brief Compare two ExprPtr values: ConstInt by value, binary ops structurally
- * (same kind, recursively equal operands), otherwise by pointer identity
+ * @brief Compare two ExprPtr values: DimExpr by body (unwrapped), ConstInt by
+ * value, binary ops structurally (same kind, recursively equal operands),
+ * otherwise by pointer identity
  */
 bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2);
 

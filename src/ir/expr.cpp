@@ -56,6 +56,12 @@ TupleGetItemExpr::TupleGetItemExpr(ExprPtr tuple, int index, Span span)
 bool AreExprsEqual(const ExprPtr& e1, const ExprPtr& e2) {
   if (e1 == e2) return true;
   if (!e1 || !e2) return false;
+  // Unwrap DimExpr — composite dim wrappers are type-annotation metadata not
+  // structural differences.  ShapeExprListsEquivalent uses AreExprsEqual to
+  // decide TileView presence, and reparsed DimExpr(Mul) must be seen as
+  // equivalent to the original bare Mul.
+  if (auto d1 = As<DimExpr>(e1)) return AreExprsEqual(d1->body_, e2);
+  if (auto d2 = As<DimExpr>(e2)) return AreExprsEqual(e1, d2->body_);
   auto c1 = As<ConstInt>(e1);
   auto c2 = As<ConstInt>(e2);
   if (c1 && c2) return c1->value_ == c2->value_;
