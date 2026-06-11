@@ -249,6 +249,9 @@ per-window `WindowBuffer` records that the runtime binds physical buffers to.
 - **End-to-end (ST)**: `tests/st/distributed/test_l3_allreduce.py` (mesh
   allreduce with dynamic rank dim `NR = pl.dynamic("NR")`; **P=2** default,
   **P=4** on any four devices (e.g. `--device=0,1,2,3` or `--device=0-3`)),
+  `test_l3_ring_allreduce.py` (ring allreduce — chunked reduce-scatter +
+  allgather schedule, monolithic InCore kernel; same golden, different
+  algorithm: O(N/P) per-step remote traffic vs mesh O(N)),
   `test_l3_allgather.py`,
   `test_l3_reduce_scatter.py`, `test_l3_broadcast.py`, `test_l3_gemm.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
