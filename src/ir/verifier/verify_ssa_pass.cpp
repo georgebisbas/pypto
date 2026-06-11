@@ -10,6 +10,7 @@
  */
 
 #include <cstddef>
+#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -217,8 +218,15 @@ class SSAVerifier : public IRVisitor {
 
 void SSAVerifier::VisitVarLike_(const VarPtr& op) {
   if (!op) return;
+  // Diagnostic: log every Var encounter after ConvertToSSA to trace scope failures.
+  bool in_scope = IsVarInScope(op.get());
+  if (func_name_ == "add_kernel") {
+    std::cerr << "[SSAVerify] VisitVar '" << op->name_hint_ << "' (ptr=" << op.get()
+              << ") in_scope=" << in_scope << " scope_depth=" << scope_stack_.size()
+              << " func='" << func_name_ << "'" << std::endl;
+  }
   // Check that the variable is visible in the current scope
-  if (!IsVarInScope(op.get())) {
+  if (!in_scope) {
     std::ostringstream msg;
     msg << "Variable '" << op->name_hint_ << "' used outside its defining scope";
     RecordError(ssa::ErrorType::SCOPE_VIOLATION, msg.str(), op->span_);
