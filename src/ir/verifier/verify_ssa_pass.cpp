@@ -117,17 +117,33 @@ class SSAVerifier : public IRVisitor {
   std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
 
   /**
-   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType)
+   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType).
+   *
+   * Recursively walks composite shape expressions (BinaryExpr, UnaryExpr) to
+   * find Var nodes nested inside arithmetic on pl.dynamic() dims.
+   * Safe because VisitVarLike_ no longer walks type shapes during body
+   * traversal, so registered composite-dim Vars won't be re-encountered.
    */
   void RegisterTypeVars(const TypePtr& type) {
     if (!type) return;
     if (auto tensor_type = As<TensorType>(type)) {
       for (const auto& dim : tensor_type->shape_) {
-        if (auto var = As<Var>(dim)) {
-          DefineVar(var);
-        }
+        RegisterTypeVarsFromExpr(dim);
       }
     }
+  }
+
+  void RegisterTypeVarsFromExpr(const ExprPtr& expr) {
+    if (!expr) return;
+    if (auto var = As<Var>(expr)) {
+      DefineVar(var);
+    } else if (auto binary = As<BinaryExpr>(expr)) {
+      RegisterTypeVarsFromExpr(binary->left_);
+      RegisterTypeVarsFromExpr(binary->right_);
+    } else if (auto unary = As<UnaryExpr>(expr)) {
+      RegisterTypeVarsFromExpr(unary->operand_);
+    }
+    // ConstInt, ConstFloat, ConstBool — leaf nodes, no Var to register.
   }
 
   /**

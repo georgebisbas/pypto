@@ -18,6 +18,7 @@ from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import codegen as _cg
+from pypto.pypto_core import passes as _core_passes
 
 M = pl.dynamic("M")
 N = pl.dynamic("N")
@@ -252,6 +253,25 @@ def test_composite_dim_collect_vars_from_shape():
     assert "N" in var_names, f"collect_vars_from_shape_expr should find N inside Mul, got {var_names}"
     assert "M" not in var_names, "M should not be in dim1's vars"
     assert len(vars_) == 1, f"expected exactly 1 var (N), got {var_names}"
+
+
+def test_composite_dim_param_passes_ssa_verification():
+    """Full pipeline with SSA verification: composite dim [N * 2] in param type.
+
+    Regression: before the recursive RegisterTypeVars + VisitVarLike_ fixes,
+    the SSA verifier would reject composite shape dims (Var inside ir.Mul)
+    as ``used outside its defining scope`` at chip/InCore levels.
+    """
+    func = CompositeDimShapeKernel.get_function("add_kernel")
+    assert func is not None
+    program = ir.Program([func], "test_composite_dim", ir.Span.unknown())
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        # Must not raise any verification error.
+        pm.run_passes(program)
 
 
 if __name__ == "__main__":
