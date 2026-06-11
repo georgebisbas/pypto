@@ -363,24 +363,30 @@ def test_nested_composite_dims():
 
 
 def test_bare_var_in_dimexpr():
-    """Bare Var wrapped in DimExpr: collect_vars must unwrap DimExpr to find it."""
+    """Bare Var in a composite context: dim0 (M*2) gets DimExpr, dim1 (bare N) stays Var."""
     func = BareVarInDimExprKernel.get_function("add_kernel")
     assert func is not None
 
     param_type = func.params[0].type
-    dim1 = param_type.shape[1]  # N — bare Var, should be DimExpr-wrapped
-    assert isinstance(dim1, ir.DimExpr), f"expected DimExpr wrapping bare Var, got {type(dim1).__name__}"
+    dim0 = param_type.shape[0]  # M * 2 — composite, should be DimExpr-wrapped
+    dim1 = param_type.shape[1]  # N — bare Var, NOT DimExpr-wrapped
 
+    # Composite dims get DimExpr
+    assert isinstance(dim0, ir.DimExpr), f"composite dim expected DimExpr, got {type(dim0).__name__}"
+    # Bare Var stays as Var
+    assert isinstance(dim1, ir.Var), f"bare var expected Var, got {type(dim1).__name__}"
+    assert dim1.name_hint == "N"
+
+    # collect_vars works on both: DimExpr (unwraps) and Var (direct)
+    assert _cg.collect_vars_from_shape_expr(dim0)
     vars_ = _cg.collect_vars_from_shape_expr(dim1)
-    var_names = [v.name_hint for v in vars_]
-    assert "N" in var_names, f"expected N inside DimExpr, got {var_names}"
-    assert len(vars_) == 1, f"expected exactly 1 var, got {var_names}"
+    assert vars_[0].name_hint == "N"
 
 
 def test_collect_vars_unwraps_dimexpr():
     """collect_vars_from_shape_expr on hand-built DimExpr → only Var objects (no DimExpr/IntImm)."""
-    v = ir.Var("M", ir.ScalarType(ir.DataType.DT_INT64), ir.Span.unknown())
-    body = ir.mul(v, ir.ConstInt(2, ir.DataType.DT_INT64, ir.Span.unknown()))
+    v = ir.Var("M", ir.ScalarType(ir.DataType.INT64), ir.Span.unknown())
+    body = ir.mul(v, ir.ConstInt(2, ir.DataType.INDEX, ir.Span.unknown()))
     dimexpr = ir.dim_expr(body)
 
     vars_ = _cg.collect_vars_from_shape_expr(dimexpr)
