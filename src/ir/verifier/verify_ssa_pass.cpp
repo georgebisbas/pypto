@@ -10,7 +10,6 @@
  */
 
 #include <cstddef>
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -156,10 +155,6 @@ class SSAVerifier : public IRVisitor {
    */
   void DefineVar(const VarPtr& var) {
     if (!var || scope_stack_.empty()) return;
-    if (func_name_ == "add_kernel") {
-      std::cerr << "[SSAVerify] DefineVar '" << var->name_hint_ << "' (ptr=" << var.get()
-                << ") scope_depth=" << scope_stack_.size() << std::endl;
-    }
     scope_stack_.back().insert(var.get());
   }
 
@@ -172,10 +167,6 @@ class SSAVerifier : public IRVisitor {
    */
   void DefineTypeDynamicVar(const VarPtr& var) {
     if (!var || scope_stack_.empty()) return;
-    if (func_name_ == "add_kernel") {
-      std::cerr << "[SSAVerify] DefineTypeDynamicVar '" << var->name_hint_ << "' (ptr=" << var.get()
-                << ") scope_depth=" << scope_stack_.size() << std::endl;
-    }
     scope_stack_.back().insert(var.get());
     type_dynamic_names_.insert(var->name_hint_);
   }
@@ -243,15 +234,8 @@ class SSAVerifier : public IRVisitor {
 
 void SSAVerifier::VisitVarLike_(const VarPtr& op) {
   if (!op) return;
-  // Diagnostic: log every Var encounter after ConvertToSSA to trace scope failures.
-  bool in_scope = IsVarInScope(op.get());
-  if (func_name_ == "add_kernel") {
-    std::cerr << "[SSAVerify] VisitVar '" << op->name_hint_ << "' (ptr=" << op.get()
-              << ") in_scope=" << in_scope << " scope_depth=" << scope_stack_.size()
-              << " func='" << func_name_ << "'" << std::endl;
-  }
   // Check that the variable is visible in the current scope
-  if (!in_scope) {
+  if (!IsVarInScope(op.get())) {
     // Type-dynamic vars may have pointer mismatch between type-tree and
     // body-expression Var objects — fall back to name-based lookup.
     if (type_dynamic_names_.count(op->name_hint_)) {
