@@ -423,29 +423,28 @@ class TestScalarFloorDivTruediv:
         assert "100.0 / a" in printed
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
-    def test_floordiv_operator_matches_ir(self):
-        """a // b produces the same IR regardless of literal position."""
+    def test_floordiv_mixed_literal_positions(self):
+        """// with literal on either side roundtrips correctly."""
 
         @pl.program
-        class Forward:
+        class Before:
             @pl.function
             def main(
                 self,
-                config: pl.Tensor[[2], pl.INT64],
+                config: pl.Tensor[[1], pl.INT64],
                 out: pl.Tensor[[2, 16, 128], pl.FP32],
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
-                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
                 c: pl.Scalar[pl.INT64] = 128 // a
                 d: pl.Scalar[pl.INT64] = a // 128
                 _ = c + d
                 return out
 
-        assert isinstance(Forward, ir.Program)
-        printed = Forward.as_python()
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
         assert "128 // a" in printed
         assert "a // 128" in printed
-        ir.assert_structural_equal(Forward, pl.parse_program(printed))
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
 
     def test_truediv_operator_matches_ir(self):
         """a / b produces the same IR as pl.div(a, b)."""
