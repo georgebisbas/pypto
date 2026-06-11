@@ -65,10 +65,20 @@ class UseAfterDefChecker : public IRVisitor {
     if (var) in_scope_.insert(var);
   }
 
+  /// Register a type-dynamic Var by name (not pointer) — body expressions
+  /// may reference different Var objects than those in type shapes.
+  void AddTypeDynamicDefinition(const Var* var) {
+    if (var) type_dynamic_var_names_.insert(var->name_hint_);
+  }
+
  protected:
   void VisitVarLike_(const VarPtr& op) override {
     if (!op) return;
-    if (!in_scope_.count(op.get())) {
+    // Check pointer-based scope (SSA vars) AND name-based scope (type-dynamic vars).
+    // Type-dynamic vars (e.g. M in Tensor[[M, N*2]]) exist only in the
+    // function signature; body expressions may reference different Var objects
+    // with the same name.  Use name-based lookup as fallback.
+    if (!in_scope_.count(op.get()) && !type_dynamic_var_names_.count(op->name_hint_)) {
       std::ostringstream msg;
       msg << "Variable '" << op->name_hint_ << "' used before definition"
           << " in function '" << func_name_ << "'";
@@ -205,6 +215,7 @@ class UseAfterDefChecker : public IRVisitor {
 
  private:
   std::unordered_set<const Var*> in_scope_;
+  std::unordered_set<std::string> type_dynamic_var_names_;
   std::vector<Diagnostic>& diagnostics_;
   std::string func_name_;
 };
@@ -226,19 +237,18 @@ class UseAfterDefPropertyVerifierImpl : public PropertyVerifier {
         if (param) checker.AddDefinition(param.get());
       }
 
-      // Type-dynamic vars in this function's parameter and return types are
-      // implicitly in scope.  E.g., Tensor[[N, M], FP32] where N, M are
-      // dynamic shape vars that exist only in the function signature.
+      // Type-dynamic vars — registered by name (not pointer) since body
+      // expressions may reference different Var objects than type shapes.
       for (const auto& param : func->params_) {
         if (param) {
           for (const auto* v : var_collectors::CollectTypeVars(param->GetType())) {
-            checker.AddDefinition(v);
+            checker.AddTypeDynamicDefinition(v);
           }
         }
       }
       for (const auto& ret_type : func->return_types_) {
         for (const auto* v : var_collectors::CollectTypeVars(ret_type)) {
-          checker.AddDefinition(v);
+          checker.AddTypeDynamicDefinition(v);
         }
       }
 
