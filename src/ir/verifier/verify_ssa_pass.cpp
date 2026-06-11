@@ -152,6 +152,10 @@ class SSAVerifier : public IRVisitor {
    */
   void DefineVar(const VarPtr& var) {
     if (!var || scope_stack_.empty()) return;
+    if (func_name_ == "add_kernel") {
+      std::cerr << "[SSAVerify] DefineVar '" << var->name_hint_ << "' (ptr=" << var.get()
+                << ") scope_depth=" << scope_stack_.size() << std::endl;
+    }
     scope_stack_.back().insert(var.get());
   }
 
