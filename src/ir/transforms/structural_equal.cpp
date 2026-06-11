@@ -943,6 +943,12 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
     return false;
   }
 
+  // Unwrap DimExpr before the TypeName check — the parser wraps reparsed
+  // composite dims in DimExpr, so one side may have Add while the other has
+  // DimExpr(Add).  Normalize to the inner expression for comparison.
+  if (auto lhs_dim = As<DimExpr>(lhs)) return Equal(lhs_dim->body_, rhs);
+  if (auto rhs_dim = As<DimExpr>(rhs)) return Equal(lhs, rhs_dim->body_);
+
   if (lhs->TypeName() != rhs->TypeName()) {
     if constexpr (AssertMode) {
       std::ostringstream msg;
@@ -968,15 +974,6 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   if (auto lhs_var = As<Var>(lhs)) {
     bool result = EqualVar(lhs_var, std::static_pointer_cast<const Var>(rhs));
     return result;
-  }
-
-  // DimExpr: unwrap body_ before comparing — body_ is IgnoreField so the
-  // automatic EqualWithFields path would skip it, returning true for any
-  // two DimExpr nodes regardless of content.  Unwrap here so the wrapped
-  // expression (e.g. Add vs Add) is compared structurally.
-  if (auto lhs_dim = As<DimExpr>(lhs)) {
-    auto rhs_dim = As<DimExpr>(rhs);
-    return rhs_dim && Equal(lhs_dim->body_, rhs_dim->body_);
   }
 
   // All other types use generic field-based comparison
