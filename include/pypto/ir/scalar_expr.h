@@ -312,14 +312,25 @@ DEFINE_UNARY_EXPR_NODE(Cast, "Cast expression (cast operand to dtype)")
 #undef DEFINE_UNARY_EXPR_NODE
 
 // ============================================================================
-// DimExpr — wraps a composite dimension expression so the SSA verifier
-//           treats it as program-scoped (opaque to Var scope checking).
-//           Used for ``pl.dynamic()`` arithmetic in type annotations.
+// DimExpr — compile-time composite dimension expression in type shapes.
+//
+// Encodes the semantic distinction between:
+//   - Compile-time composite:  DimExpr(N * 2) in Tensor[[M, N * 2], FP32]
+//   - Runtime dynamic:         A bare Var in the same position.
+//
+// IgnoreField on body_ prevents all visitors (reflection, structural
+// equality, serialization) and verifiers (SSA scope, use-before-def)
+// from walking into the wrapped expression. This keeps type-annotation
+// variables out of runtime SSA scope checks.
+//
+// Passes needing the expression unwrap via As<DimExpr>(expr)->body_.
 // ============================================================================
 
 class DimExpr : public Expr {
  public:
-  ExprPtr body_;  ///< The wrapped dimension expression (e.g. ir.Mul)
+  /// The wrapped dimension expression (e.g. ir.Mul, ir.Add, or bare ir.Var).
+  /// Marked IgnoreField so visitors skip it during tree walks.
+  ExprPtr body_;
 
   DimExpr(ExprPtr body, Span span) : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
 

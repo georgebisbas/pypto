@@ -1939,18 +1939,29 @@ class Cast(UnaryExpr):
         """
 
 class DimExpr(Expr):
-    """Opaque wrapper around a composite dimension expression (e.g. NR * 64).
+    """Compile-time composite dimension expression in type shapes.
 
-    The SSA verifier treats DimExpr as program-scoped — it does not recurse
-    into the body.  This enables composite dim expressions in type annotations
-    at any IR function level (not just HOST).
+    Wraps arithmetic on ``pl.dynamic()`` scalars (e.g. ``N * 2``) so the
+    compiler treats them as opaque type-level annotations, not runtime SSA
+    values.  ``body_`` is ``IgnoreField``: visitors, verifiers, and SSA
+    scope checks skip the wrapped expression entirely.
+
+    Use ``ir.dim_expr(body)`` to construct one, or rely on the DSL's
+    ``pl.Tensor[[M * 2, N], ...]`` lowering which wraps composite dims
+    automatically.
     """
 
-    body: Expr
-    """The wrapped dimension expression (e.g. ir.Mul)."""
+    @property
+    def body(self) -> Expr:
+        """The wrapped dimension expression (e.g. ``ir.Mul(N.dim, 2)``).
+
+        ``body`` is a DWIM getter — it returns the expression, not an
+        ``ExprRef`` — so you can inspect or unwrap the DimExpr.
+        """
+    ...
 
     def __init__(self, body: Expr, span: Span) -> None:
-        """Wrap an expression as a program-scoped dim expression.
+        """Wrap an expression as a compile-time DimExpr.
 
         Args:
             body: The composite dimension expression (e.g. ir.Mul(…))
@@ -3591,7 +3602,13 @@ def cast(operand: Expr, dtype: DataType, span: Span = ...) -> Expr:
     """Cast operator (cast operand to dtype)."""
 
 def dim_expr(body: Expr, span: Span = ...) -> Expr:
-    """Wrap a dimension expression so the SSA verifier treats it as program-scoped."""
+    """Wrap an expression as a DimExpr for compile-time shape arithmetic.
+
+    The returned DimExpr is treated as a type-level annotation — visitors,
+    verifiers, and SSA scope checks skip the wrapped expression entirely
+    (``body_`` is ``IgnoreField``). Use inside ``pl.Tensor`` shape annotations
+    to express composite dynamic dimensions like ``M * 2``.
+    """
 
 def bit_and(lhs: Expr, rhs: Expr, span: Span = ...) -> Expr:
     """Bitwise and operator (lhs & rhs)."""

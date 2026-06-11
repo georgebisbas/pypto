@@ -117,17 +117,40 @@ class SSAVerifier : public IRVisitor {
   std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
 
   /**
-   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType)
+   * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType).
+   *
+   * Recursively walks composite shape expressions (BinaryExpr, UnaryExpr)
+   * and unwraps DimExpr wrappers to find Var nodes nested inside arithmetic
+   * on pl.dynamic() dims (e.g. Var("N") inside DimExpr(Mul(N, 2))).
    */
   void RegisterTypeVars(const TypePtr& type) {
     if (!type) return;
     if (auto tensor_type = As<TensorType>(type)) {
       for (const auto& dim : tensor_type->shape_) {
-        if (auto var = As<Var>(dim)) {
-          DefineVar(var);
-        }
+        RegisterTypeVarsFromExpr(dim);
       }
     }
+  }
+
+  /**
+   * @brief Recursively find Var references inside a shape-dim expression.
+   *
+   * Walks into BinaryExpr (left/right), UnaryExpr (operand), and unwraps
+   * DimExpr to reach Vars inside composite dimension expressions.
+   */
+  void RegisterTypeVarsFromExpr(const ExprPtr& expr) {
+    if (!expr) return;
+    if (auto var = As<Var>(expr)) {
+      DefineVar(var);
+    } else if (auto dim = As<DimExpr>(expr)) {
+      RegisterTypeVarsFromExpr(dim->body_);
+    } else if (auto binary = As<BinaryExpr>(expr)) {
+      RegisterTypeVarsFromExpr(binary->left_);
+      RegisterTypeVarsFromExpr(binary->right_);
+    } else if (auto unary = As<UnaryExpr>(expr)) {
+      RegisterTypeVarsFromExpr(unary->operand_);
+    }
+    // ConstInt, ConstFloat, ConstBool — leaf nodes, no Var to register.
   }
 
   /**
