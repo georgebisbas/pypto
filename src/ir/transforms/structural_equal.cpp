@@ -970,6 +970,15 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
     return result;
   }
 
+  // DimExpr: unwrap body_ before comparing — body_ is IgnoreField so the
+  // automatic EqualWithFields path would skip it, returning true for any
+  // two DimExpr nodes regardless of content.  Unwrap here so the wrapped
+  // expression (e.g. Add vs Add) is compared structurally.
+  if (auto lhs_dim = As<DimExpr>(lhs)) {
+    auto rhs_dim = As<DimExpr>(rhs);
+    return rhs_dim && Equal(lhs_dim->body_, rhs_dim->body_);
+  }
+
   // All other types use generic field-based comparison
   EQUAL_DISPATCH(ConstInt)
   EQUAL_DISPATCH(ConstFloat)
