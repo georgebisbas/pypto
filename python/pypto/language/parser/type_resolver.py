@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from pypto.language.typing.dynamic import DynVar
+from pypto.language.typing.scalar import Scalar
 from pypto.pypto_core import DataType, ir
 
 from .diagnostics import ParserTypeError
