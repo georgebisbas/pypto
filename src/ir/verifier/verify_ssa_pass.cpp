@@ -135,19 +135,32 @@ class SSAVerifier : public IRVisitor {
   /**
    * @brief Recursively find Var references inside a shape-dim expression.
    *
-   * Walks into BinaryExpr (left/right), UnaryExpr (operand), and unwraps
-   * DimExpr to reach Vars inside composite dimension expressions.
+   * Shape dimensions like ``N * 2`` are lowered to
+   * DimExpr(Mul(Var("N"), ConstInt(2))).  A plain As&lt;Var&gt; cast on such a
+   * dim returns null (it sees a DimExpr, not a Var), so the Var inside is
+   * never registered.  This helper unwraps those layers to reach the
+   * actual Var references.
+   *
+   * Walk rules:
+   * - Var          → register it (leaf — the goal)
+   * - DimExpr      → unwrap body_ and recurse (composite dim wrapper)
+   * - BinaryExpr   → recurse into left_ and right_ (Mul, Add, Sub, etc.)
+   * - UnaryExpr    → recurse into operand_ (Neg, Not)
+   * - ConstInt / ConstFloat / ConstBool → stop (no Var to register)
    */
   void RegisterTypeVarsFromExpr(const ExprPtr& expr) {
     if (!expr) return;
     if (auto var = As<Var>(expr)) {
       DefineVar(var);
     } else if (auto dim = As<DimExpr>(expr)) {
+      // Composite dim: unwrap to body (e.g. DimExpr(Mul(...)) → recurse into Mul)
       RegisterTypeVarsFromExpr(dim->body_);
     } else if (auto binary = As<BinaryExpr>(expr)) {
+      // Arithmetic on shapes: recurse into both sides (e.g. Mul(Var, ConstInt))
       RegisterTypeVarsFromExpr(binary->left_);
       RegisterTypeVarsFromExpr(binary->right_);
     } else if (auto unary = As<UnaryExpr>(expr)) {
+      // Unary negation/not on shapes: recurse into operand
       RegisterTypeVarsFromExpr(unary->operand_);
     }
     // ConstInt, ConstFloat, ConstBool — leaf nodes, no Var to register.
