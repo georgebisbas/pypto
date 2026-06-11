@@ -10,6 +10,7 @@
  */
 
 #include <cstddef>
+#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -151,6 +152,11 @@ class SSAVerifier : public IRVisitor {
    */
   void DefineVar(const VarPtr& var) {
     if (!var || scope_stack_.empty()) return;
+    // Diagnostic: trace when dynamic dim Vars enter scope
+    if (var->name_hint_ == "NR" || var->name_hint_ == "M" || var->name_hint_ == "N") {
+      std::cerr << "[SSAVerify] DefineVar: '" << var->name_hint_ << "' (ptr=" << var.get()
+                << ") in func='" << func_name_ << "'" << std::endl;
+    }
     scope_stack_.back().insert(var.get());
   }
 
@@ -221,6 +227,17 @@ void SSAVerifier::VisitVarLike_(const VarPtr& op) {
   if (!IsVarInScope(op.get())) {
     std::ostringstream msg;
     msg << "Variable '" << op->name_hint_ << "' used outside its defining scope";
+    // Diagnostic: dump all Vars currently in scope to help debug
+    msg << " -- scoped Vars: {";
+    bool first = true;
+    for (const auto& scope : scope_stack_) {
+      for (const auto* v : scope) {
+        if (!first) msg << ", ";
+        msg << "'" << v->name_hint_ << "'";
+        first = false;
+      }
+    }
+    msg << "}";
     RecordError(ssa::ErrorType::SCOPE_VIOLATION, msg.str(), op->span_);
   }
   // Intentionally skip IRVisitor::VisitVarLike_ — type-embedded Vars are
