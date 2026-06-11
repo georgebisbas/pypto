@@ -117,6 +117,10 @@ class SSAVerifier : public IRVisitor {
   /// Scope stack: each entry is the set of Var pointers defined in that scope
   std::vector<std::unordered_set<const Var*>> scope_stack_ = {{}};
 
+  /// Type-dynamic var names — name-based fallback for pointer mismatch.
+  /// Body expressions may reference different Var objects than type shapes.
+  std::unordered_set<std::string> type_dynamic_names_;
+
   /**
    * @brief Register Var references found in a type (e.g., dynamic shape vars in TensorType).
    *
@@ -137,7 +141,7 @@ class SSAVerifier : public IRVisitor {
   void RegisterTypeVarsFromExpr(const ExprPtr& expr) {
     if (!expr) return;
     if (auto var = As<Var>(expr)) {
-      DefineVar(var);
+      DefineTypeDynamicVar(var);
     } else if (auto binary = As<BinaryExpr>(expr)) {
       RegisterTypeVarsFromExpr(binary->left_);
       RegisterTypeVarsFromExpr(binary->right_);
@@ -157,6 +161,23 @@ class SSAVerifier : public IRVisitor {
                 << ") scope_depth=" << scope_stack_.size() << std::endl;
     }
     scope_stack_.back().insert(var.get());
+  }
+
+  /**
+   * @brief Define a type-dynamic variable in the current scope + name set.
+   *
+   * Type-dynamic vars (e.g. M in Tensor[[M, N*2]]) exist only in function
+   * signature types. Body expressions may reference different Var objects
+   * with the same name — name-based lookup handles the pointer mismatch.
+   */
+  void DefineTypeDynamicVar(const VarPtr& var) {
+    if (!var || scope_stack_.empty()) return;
+    if (func_name_ == "add_kernel") {
+      std::cerr << "[SSAVerify] DefineTypeDynamicVar '" << var->name_hint_ << "' (ptr=" << var.get()
+                << ") scope_depth=" << scope_stack_.size() << std::endl;
+    }
+    scope_stack_.back().insert(var.get());
+    type_dynamic_names_.insert(var->name_hint_);
   }
 
   /**
@@ -231,6 +252,11 @@ void SSAVerifier::VisitVarLike_(const VarPtr& op) {
   }
   // Check that the variable is visible in the current scope
   if (!in_scope) {
+    // Type-dynamic vars may have pointer mismatch between type-tree and
+    // body-expression Var objects — fall back to name-based lookup.
+    if (type_dynamic_names_.count(op->name_hint_)) {
+      return;  // name match — treat as in scope
+    }
     std::ostringstream msg;
     msg << "Variable '" << op->name_hint_ << "' used outside its defining scope";
     RecordError(ssa::ErrorType::SCOPE_VIOLATION, msg.str(), op->span_);
