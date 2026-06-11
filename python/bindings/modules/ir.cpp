@@ -1075,14 +1075,19 @@ void BindIR(nb::module_& m) {
 
 #undef BIND_UNARY_EXPR
 
-  // DimExpr - opaque wrapper around a composite dimension expression.
-  // body_ is IgnoreField so the SSA verifier treats the entire DimExpr
-  // as program-scoped.
+  // DimExpr — compile-time composite dimension expression in type shapes.
+  // body_ is IgnoreField so visitors and verifiers skip the wrapped expression,
+  // keeping type-annotation variables out of runtime SSA scope checks.
   auto dimexpr_class = nb::class_<DimExpr, Expr>(
-      ir, "DimExpr", "Opaque wrapper around a composite dimension expression (e.g. NR * 64)");
+      ir, "DimExpr",
+      "Compile-time composite dimension expression in type shapes.\n"
+      "\n"
+      "Wraps arithmetic on pl.dynamic() scalars (e.g. ``N * 2``) so the\n"
+      "compiler's visitors and SSA verifier treat them as opaque type-level\n"
+      "annotations, not runtime SSA values. Unwrap via ``expr.body``.");
   BindFields<DimExpr>(dimexpr_class);
   dimexpr_class.def(nb::init<const ExprPtr&, const Span&>(), nb::arg("body"), nb::arg("span"),
-                    "Wrap an expression as a program-scoped dim expression");
+                    "Wrap an expression for use as a compile-time dimension");
 
   // Bind structural hash and equality functions
   // structural_hash overloads share the same auto-mapping semantics:
@@ -1816,7 +1821,12 @@ void BindIR(nb::module_& m) {
   ir.def("cast", &MakeCast, nb::arg("operand"), nb::arg("dtype"), nb::arg("span") = Span::unknown(),
          "Cast operator");
   ir.def("dim_expr", &MakeDimExpr, nb::arg("body"), nb::arg("span") = Span::unknown(),
-         "Wrap a dimension expression so the SSA verifier treats it as program-scoped");
+         "Wrap an expression as a DimExpr for compile-time shape arithmetic.\n"
+         "\n"
+         "Use inside type annotations (e.g. Tensor[(N * 2,)] ) to express\n"
+         "composite dynamic dimensions. The DimExpr tells the SSA verifier\n"
+         "that the expression is a compile-time type annotation, not a\n"
+         "runtime value — it is not visited during SSA scoping passes.");
   ir.def("bit_and", &MakeBitAnd, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),
          "Bitwise and operator");
   ir.def("bit_or", &MakeBitOr, nb::arg("lhs"), nb::arg("rhs"), nb::arg("span") = Span::unknown(),

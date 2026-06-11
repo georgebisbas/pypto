@@ -21,6 +21,7 @@ from pypto.pypto_core import codegen as _cg
 
 M = pl.dynamic("M")
 N = pl.dynamic("N")
+K = pl.dynamic("K")
 
 
 @pl.program
@@ -253,6 +254,146 @@ def test_dimexpr_collect_vars_from_shape():
     assert "N" in var_names, f"collect_vars_from_shape_expr should find N inside DimExpr, got {var_names}"
     assert "M" not in var_names, "M should not be in dim1's vars"
     assert len(vars_) == 1, f"expected exactly 1 var (N), got {var_names}"
+
+
+@pl.program
+class AllCompositeDimKernel:
+    """Kernel where ALL shape dims are composite expressions (DimExpr-wrapped)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        inp: pl.Tensor[[M * 2, N * 3], pl.FP32],
+        out: pl.Out[pl.Tensor[[M * 2, N * 3], pl.FP32]],
+    ) -> pl.Tensor[[M * 2, N * 3], pl.FP32]:
+        out_tile = pl.load(inp, [0, 0], [M * 2, N * 3])
+        return pl.store(out_tile, [0, 0], out)
+
+
+@pl.program
+class VarTimesVarKernel:
+    """Kernel with Var × Var composite dim (not Var × ConstInt)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        inp: pl.Tensor[[M * N, K], pl.FP32],
+        out: pl.Out[pl.Tensor[[M * N, K], pl.FP32]],
+    ) -> pl.Tensor[[M * N, K], pl.FP32]:
+        out_tile = pl.load(inp, [0, 0], [M * N, K])
+        return pl.store(out_tile, [0, 0], out)
+
+
+@pl.program
+class NestedCompositeDimKernel:
+    """Kernel with nested arithmetic composite dims like (M + 1) * 2."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        inp: pl.Tensor[[(M + 1) * 2, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[(M + 1) * 2, N], pl.FP32]],
+    ) -> pl.Tensor[[(M + 1) * 2, N], pl.FP32]:
+        out_tile = pl.load(inp, [0, 0], [(M + 1) * 2, N])
+        return pl.store(out_tile, [0, 0], out)
+
+
+@pl.program
+class BareVarInDimExprKernel:
+    """Kernel with a bare Var wrapped in DimExpr (edge case)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def add_kernel(
+        self,
+        inp: pl.Tensor[[M * 2, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M * 2, N], pl.FP32]],
+    ) -> pl.Tensor[[M * 2, N], pl.FP32]:
+        out_tile = pl.load(inp, [0, 0], [M * 2, N])
+        return pl.store(out_tile, [0, 0], out)
+
+
+def test_all_composite_dims():
+    """All shape dims composite: [M * 2, N * 3] — every dim is DimExpr-wrapped."""
+    func = AllCompositeDimKernel.get_function("add_kernel")
+    assert func is not None
+
+    param_type = func.params[0].type
+    assert isinstance(param_type, ir.TensorType)
+    for i in range(2):
+        dim = param_type.shape[i]
+        assert isinstance(dim, ir.DimExpr), f"dim[{i}] expected DimExpr, got {type(dim).__name__}"
+
+    # collect_vars_from_shape_expr must find M and N inside DimExpr wrappers
+    all_vars: set[str] = set()
+    for dim in param_type.shape:
+        for v in _cg.collect_vars_from_shape_expr(dim):
+            all_vars.add(v.name_hint)
+    assert all_vars == {"M", "N"}, f"expected {{M, N}}, got {all_vars}"
+
+
+def test_var_times_var():
+    """Composite dim M * N (Var × Var, not Var × ConstInt)."""
+    func = VarTimesVarKernel.get_function("add_kernel")
+    assert func is not None
+
+    param_type = func.params[0].type
+    assert isinstance(param_type, ir.TensorType)
+    dim0 = param_type.shape[0]
+    assert isinstance(dim0, ir.DimExpr), f"expected DimExpr, got {type(dim0).__name__}"
+    assert isinstance(dim0.body, ir.Mul), f"expected Mul body, got {type(dim0.body).__name__}"
+
+    vars_ = _cg.collect_vars_from_shape_expr(dim0)
+    var_names = {v.name_hint for v in vars_}
+    assert var_names == {"M", "N"}, f"expected {{M, N}}, got {var_names}"
+
+
+def test_nested_composite_dims():
+    """Nested arithmetic: (M + 1) * 2 — collect_vars must find M only (not literals)."""
+    func = NestedCompositeDimKernel.get_function("add_kernel")
+    assert func is not None
+
+    param_type = func.params[0].type
+    assert isinstance(param_type, ir.TensorType)
+    dim0 = param_type.shape[0]
+    assert isinstance(dim0, ir.DimExpr), f"expected DimExpr, got {type(dim0).__name__}"
+
+    vars_ = _cg.collect_vars_from_shape_expr(dim0)
+    var_names = {v.name_hint for v in vars_}
+    assert var_names == {"M"}, f"expected {{M}}, got {var_names}"
+
+
+def test_bare_var_in_dimexpr():
+    """Bare Var in a composite context: dim0 (M*2) gets DimExpr, dim1 (bare N) stays Var."""
+    func = BareVarInDimExprKernel.get_function("add_kernel")
+    assert func is not None
+
+    param_type = func.params[0].type
+    dim0 = param_type.shape[0]  # M * 2 — composite, should be DimExpr-wrapped
+    dim1 = param_type.shape[1]  # N — bare Var, NOT DimExpr-wrapped
+
+    # Composite dims get DimExpr
+    assert isinstance(dim0, ir.DimExpr), f"composite dim expected DimExpr, got {type(dim0).__name__}"
+    # Bare Var stays as Var
+    assert isinstance(dim1, ir.Var), f"bare var expected Var, got {type(dim1).__name__}"
+    assert dim1.name_hint == "N"
+
+    # collect_vars works on both: DimExpr (unwraps) and Var (direct)
+    assert _cg.collect_vars_from_shape_expr(dim0)
+    vars_ = _cg.collect_vars_from_shape_expr(dim1)
+    assert vars_[0].name_hint == "N"
+
+
+def test_collect_vars_unwraps_dimexpr():
+    """collect_vars_from_shape_expr on hand-built DimExpr → only Var objects (no DimExpr/IntImm)."""
+    v = ir.Var("M", ir.ScalarType(ir.DataType.INT64), ir.Span.unknown())
+    body = ir.mul(v, ir.ConstInt(2, ir.DataType.INDEX, ir.Span.unknown()))
+    dimexpr = ir.dim_expr(body)
+
+    vars_ = _cg.collect_vars_from_shape_expr(dimexpr)
+    assert len(vars_) == 1, f"expected exactly 1 var, got {[x.name_hint for x in vars_]}"
+    result = vars_[0]
+    assert isinstance(result, ir.Var), f"expected Var, got {type(result).__name__}"
+    assert result.name_hint == "M", f"expected M, got {result.name_hint}"
 
 
 if __name__ == "__main__":
