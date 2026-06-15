@@ -112,6 +112,9 @@ std::string CodegenBase::GenerateExprString(const ir::ExprPtr& expr) const {
   if (auto tuple_get = As<TupleGetItemExpr>(expr)) {
     return GenerateExprString(tuple_get->tuple_) + "_" + std::to_string(tuple_get->index_);
   }
+  if (auto dim_expr = As<DimExpr>(expr)) {
+    return GenerateExprString(dim_expr->body_);
+  }
   throw pypto::NotImplementedError("GenerateExprString not implemented for expression type: " +
                                    expr->TypeName());
 }

@@ -166,6 +166,10 @@ void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>&
   if (As<ir::ConstInt>(expr) || As<ir::ConstFloat>(expr) || As<ir::ConstBool>(expr)) {
     return;
   }
+  if (auto dim_expr = As<ir::DimExpr>(expr)) {
+    CollectVarsFromShapeExprImpl(dim_expr->body_, seen, out);
+    return;
+  }
   INTERNAL_UNREACHABLE_SPAN(expr->span_) << "CollectVarsFromShapeExpr: unsupported shape expression node";
 }
 
@@ -1491,6 +1495,9 @@ std::string PTOCodegen::GetExprAsCode(const ExprPtr& expr) {
   }
   if (auto const_float = As<ir::ConstFloat>(expr)) {
     return GetOrEmitConstant(const_float->value_, const_float->dtype());
+  }
+  if (auto dim_expr = As<ir::DimExpr>(expr)) {
+    return GetExprAsCode(dim_expr->body_);
   }
 
   // Fall back to visitor pattern for complex expressions (arithmetic, comparisons)

@@ -81,6 +81,7 @@ DEFINE_KIND_TRAIT(Neg, ObjectKind::Neg)
 DEFINE_KIND_TRAIT(Not, ObjectKind::Not)
 DEFINE_KIND_TRAIT(BitNot, ObjectKind::BitNot)
 DEFINE_KIND_TRAIT(Cast, ObjectKind::Cast)
+DEFINE_KIND_TRAIT(DimExpr, ObjectKind::DimExpr)
 
 // Statement types
 DEFINE_KIND_TRAIT(AssignStmt, ObjectKind::AssignStmt)
@@ -182,8 +183,13 @@ struct KindTrait<Expr> {
       ObjectKind::Xor, ObjectKind::BitAnd, ObjectKind::BitOr, ObjectKind::BitXor, ObjectKind::BitShiftLeft,
       ObjectKind::BitShiftRight,
       // Unary expressions (5 kinds)
-      ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast};
-  static constexpr size_t count = 38;
+      ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast,
+      // Composite dim expression (DimExpr) — wraps a shape dimension that
+      // requires deferred evaluation (e.g. NR * SIZE).  Must appear in the
+      // Expr trait so As<Expr>(DimExprPtr) succeeds and the printer / type
+      // annotation path unwraps it via the VisitExpr_ visitor.
+      ObjectKind::DimExpr};
+  static constexpr size_t count = 39;
 };
 
 // BinaryExpr base class - matches any binary expression kind

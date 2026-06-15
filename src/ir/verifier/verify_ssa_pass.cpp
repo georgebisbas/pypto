@@ -134,6 +134,12 @@ class SSAVerifier : public IRVisitor {
     if (!dim) return;
     if (auto var = As<Var>(dim)) {
       DefineVar(var);
+    } else if (auto dim_expr = As<DimExpr>(dim)) {
+      // Composite dim: DimExpr wraps an arithmetic expression on
+      // pl.dynamic() vars (e.g. DimExpr(Mul(Var("NR"), ConstInt(64)))).
+      // Unwrap to the inner expression so the Vars inside are registered
+      // in the outermost scope.
+      RegisterShapeExprVars(dim_expr->body_);
     } else if (auto binary = As<BinaryExpr>(dim)) {
       RegisterShapeExprVars(binary->left_);
       RegisterShapeExprVars(binary->right_);
