@@ -73,7 +73,7 @@ def test_dimexpr_survives_print_parse_roundtrip():
     assert func is not None
 
     printed = ir.python_print(func)
-    reparsed_func = ir.parse(printed)
+    reparsed_func = pl.parse(printed)
     assert reparsed_func is not None
 
     dim0 = reparsed_func.return_types[0].shape[0]
