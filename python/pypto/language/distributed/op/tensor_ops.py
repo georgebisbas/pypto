@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
 from pypto.language.typing import IntLike, Ptr
 from pypto.language.typing.tensor import Tensor
+from pypto.language.typing.tile import Tile
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr, ReduceOp
@@ -389,34 +390,40 @@ def broadcast(
 
 
 def allgather(
+    local_data: Tile,
     target: DistributedTensor,
     signal: DistributedTensor,
-) -> DistributedTensor:
-    """Gather data from all ranks into every rank's window.
+) -> Tile:
+    """Gather data from all ranks, returning the concatenated result as a Tile.
 
-    ``target`` has shape [NR, SIZE] — one row per rank.  Each rank must
-    stage its chunk in its own row before calling::
+    ``local_data`` is a Tile [1, SIZE] with this rank's chunk.
+    ``target`` has shape [NR, SIZE] — used internally as a staging window
+    (the intrinsic handles the stage-in).  ``signal`` is a window-bound
+    INT32 barrier tensor.
 
-        data = pl.store(local, [my_rank, 0], data)
-        data = pld.tensor.allgather(data, sig)
-        # data[0:NR, 0:SIZE] now holds all gathered rows on every rank.
+    Usage::
+
+        chunk = pl.load(inp, [0, 0], [1, SIZE])
+        result = pld.tensor.allgather(chunk, data, sig)
+        return pl.store(result, [0, 0], out)  # result is Tile [1, NR*SIZE]
 
     Args:
+        local_data: Tile [1, SIZE] — this rank's chunk to gather.
         target: Window-bound :class:`pld.DistributedTensor` of shape
-            [NR, SIZE] where NR is the number of ranks.  Each rank stages
-            its chunk at [my_rank, 0:SIZE] before the call.
+            [NR, SIZE] used as the internal staging window.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
-            cross-rank barrier.  Single-shot per call.
+            cross-rank barrier.
 
     Returns:
-        The rebound :class:`pld.DistributedTensor` — every rank's local
-        copy now holds the data from all NR ranks.
+        A :class:`Tile` containing the rank-ordered concatenation of all
+        gathered chunks — identical on every rank.
     """
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allgather", target=target, signal=signal
     )
-    call = _ir_tensor.allgather(target_expr, signal_expr)
-    return DistributedTensor(expr=call)
+    local_data_expr = _unwrap(local_data)
+    call = _ir_tensor.allgather(local_data_expr, target_expr, signal_expr)
+    return Tile(expr=call)
 
 
 def reduce_scatter(

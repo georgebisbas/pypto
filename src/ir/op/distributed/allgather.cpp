@@ -13,19 +13,21 @@
  * @file allgather.cpp
  * @brief Distributed tensor-level allgather — pld.tensor.allgather.
  *
- * Composite collective op: gather data from all ranks into every rank's
- * window.  The target DistributedTensor has shape [NR, SIZE] (one row per
- * rank).  Each rank stages its data in its own row before the call; the
- * intrinsic remote_loads every other rank's row and stores it locally,
- * so every rank ends up with the full gathered dataset.
+ * Composite collective op: gather data from all ranks and return the
+ * concatenated result as a local Tile.  The intrinsic accepts the local
+ * chunk (Tile), a DistributedTensor staging window [NR, SIZE], and a
+ * signal window.  It stages the local chunk, synchronises, and assembles
+ * the gathered data via remote_load + tile.concat.
  *
  * IR signature:
  *
- *     pld.tensor.allgather(target, signal)  -> DistributedTensorType (rebind of target)
+ *     pld.tensor.allgather(local_data, target, signal)  -> TileType
  *
- * LowerCompositeOps expands this into a notify-all / wait-all barrier
- * followed by per-peer remote_load + tile.store.  Single barrier — no
- * post-gather barrier needed (read-only after staging).
+ * LowerCompositeOps expands this into:
+ *   - tile.store(local_data, [my_rank, 0], target)
+ *   - notify-all / wait-all
+ *   - remote_load + tile.concat for every peer
+ * This Call never survives past that pass.
  */
 
 #include <cstddef>
@@ -48,29 +50,36 @@ namespace {
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 2) << "pld.tensor.allgather requires exactly 2 positional arguments "
-                             "(target, signal), but got "
+  CHECK(args.size() == 3) << "pld.tensor.allgather requires exactly 3 positional arguments "
+                             "(local_data, target, signal), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
 
-  auto target_type = As<DistributedTensorType>(args[0]->GetType());
+  // arg 0: local_data — Tile [1, SIZE] with this rank's chunk
+  auto local_type = As<TileType>(args[0]->GetType());
+  CHECK(local_type) << "pld.tensor.allgather local_data must be a Tile, got "
+                    << args[0]->GetType()->TypeName();
+
+  // arg 1: target — DistributedTensor [NR, SIZE] staging window
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
   CHECK(target_type) << "pld.tensor.allgather target must be a DistributedTensor (window-bound), got "
-                     << args[0]->GetType()->TypeName();
+                     << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.allgather target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
 
-  auto signal_type = As<DistributedTensorType>(args[1]->GetType());
+  // arg 2: signal — DistributedTensor INT32
+  auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << "pld.tensor.allgather signal must be a DistributedTensor (window-bound), got "
-                     << args[1]->GetType()->TypeName();
+                     << args[2]->GetType()->TypeName();
   CHECK(signal_type->dtype_ == DataType::INT32)
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Result type: same as target (in-place rebind — every rank's local copy
-  // now holds all gathered rows).
-  return args[0]->GetType();
+  // Result: Tile with the same shape as target (NR rows × SIZE cols).
+  // The lowering assembles gathered chunks into a Tile via tile.concat.
+  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
 }
 
 }  // namespace
@@ -81,13 +90,14 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("pld.tensor.allgather")
     .set_description(
-        "All-gather: gather data from all ranks into every rank's window-bound "
-        "DistributedTensor. `target` has shape [NR, SIZE] — each rank stages its chunk in "
-        "its own row before the call. After the call every rank's local copy of `target` "
-        "holds the data from all ranks. `signal` is a window-bound INT32 matrix used as "
-        "the cross-rank barrier. Lowered to notify-all / wait-all + per-peer remote_load "
-        "+ tile.store by LowerCompositeOps; this op never survives past that pass.")
+        "All-gather: gather data from all ranks, returning the concatenated result as "
+        "a local Tile. `local_data` is the rank's chunk (Tile [1, SIZE]). `target` is "
+        "a window-bound DistributedTensor[NR, SIZE] used as the staging area. `signal` is "
+        "a window-bound INT32 DistributedTensor used as the cross-rank barrier. Lowered to "
+        "tile.store + notify-all / wait-all + remote_load + tile.concat by LowerCompositeOps; "
+        "this op never survives past that pass.")
     .set_op_category("DistributedOp")
+    .add_argument("local_data", "Local tile [1, SIZE] — this rank's data (Input)")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
     .no_memory_spec()

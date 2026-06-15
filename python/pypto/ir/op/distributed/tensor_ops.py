@@ -222,23 +222,25 @@ def broadcast(
 
 
 def allgather(
+    local_data: Expr,
     target: Expr,
     signal: Expr,
     *,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tensor.allgather(target, signal)`` Call.
+    """Build a ``pld.tensor.allgather(local_data, target, signal)`` Call.
 
-    All-gather: gather data from all ranks into every rank's local window.
-    ``target`` has shape [NR, SIZE] — each rank stages its chunk in its own
-    row before the call.  The result type is ``target``'s
-    :class:`ir.DistributedTensorType` (in-place rebind).
+    All-gather: gather data from all ranks, returning the concatenated
+    result as a local Tile.  ``local_data`` is a Tile [1, SIZE] with this
+    rank's chunk.  ``target`` has shape [NR, SIZE] — used internally as
+    a staging window.  ``signal`` is a window-bound INT32 barrier tensor.
 
-    LowerCompositeOps expands this into notify-all / wait-all + per-peer
-    remote_load + tile.store; this Call never survives past that pass.
+    The result is a Tile (not a DistributedTensor).  LowerCompositeOps
+    expands this into tile.store + notify-all / wait-all + remote_load +
+    tile.concat; this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.allgather", [target, signal], {}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.allgather", [local_data, target, signal], {}, actual_span)
 
 
 def reduce_scatter(

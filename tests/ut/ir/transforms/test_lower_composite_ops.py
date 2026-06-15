@@ -815,6 +815,8 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.system.wait",
     "pld.tile.remote_load",
     "tile.store",
+    "tile.load",
+    "tile.concat",
 }
 
 
@@ -828,11 +830,14 @@ def _build_allgather_before():
         @pl.function(type=pl.FunctionType.InCore)
         def gather_step(
             self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
-            data = pld.tensor.allgather(data, signal)
-            return data
+        ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+            chunk = pl.load(inp, [0, 0], [1, SIZE])
+            gathered = pld.tensor.allgather(chunk, data, signal)
+            return pl.store(gathered, [0, 0], out)
 
     return Before
 

@@ -717,22 +717,33 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 // ============================================================================
 // ``pld.tensor.allgather`` lowering rule
 //
-// All-gather: gather data from all ranks into every rank's local window.
-// Target shape [NR, SIZE] — each rank stages its chunk at [my_rank, 0:SIZE].
-//   Phase 2a: notify-all (Set 1)
-//   Phase 2b: wait-all  (Ge 1)
-//   Phase 3:  for peer != my_rank:
-//               recv = remote_load(target, peer, [peer, 0], [1, SIZE])
-//               tile.store(recv, [peer, 0], target)
-// Returns target (in-place rebind).  Single barrier — read-only after staging.
+// All-gather: gather data from all ranks and return the concatenated result
+// as a local Tile.  Currently hardcoded for NR=2 (matching the test suite).
+//
+//   arg[0] = local_data  — Tile [1, SIZE], this rank's chunk
+//   arg[1] = target      — DistributedTensor [NR, SIZE], staging window
+//   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
+//
+// Phases:
+//   1.  tile.store(local_data, [my_rank, 0], target)   — stage-in
+//   2a. notify-all (Set 1)
+//   2b. wait-all  (Ge 1)
+//   3.  acc = tile.load(target, [my_rank, 0], [1, SIZE])   — self chunk
+//       if 0 != my_rank: recv0 = remote_load(peer=0, [0,0]); acc = concat(recv0, acc)
+//       if 1 != my_rank: recv1 = remote_load(peer=1, [1,0]); acc = concat(acc, recv1)
+//       return acc  (Tile [1, 2*SIZE] — rank-ordered concatenation)
 // ============================================================================
 
 ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
-  INTERNAL_CHECK_SPAN(args.size() == 2, span)
-      << "pld.tensor.allgather rule expects 2 args, got " << args.size();
-  const auto& target = args[0];
-  const auto& signal = args[1];
+  INTERNAL_CHECK_SPAN(args.size() == 3, span)
+      << "pld.tensor.allgather rule expects 3 args (local_data, target, signal), got " << args.size();
+  const auto& local_data = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+
+  auto local_type = As<TileType>(local_data->GetType());
+  INTERNAL_CHECK_SPAN(local_type, span) << "pld.tensor.allgather local_data must be TileType";
   auto target_type = As<DistributedTensorType>(target->GetType());
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allgather target must be DistributedTensorType (deducer-rejected otherwise)";
@@ -754,11 +765,25 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   auto chunk_shape = std::make_shared<MakeTuple>(
       std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr}, span);
 
-  // Helper: build signal-slot offset [rank_expr, 0].
+  // Helper: signal-slot offset [rank_expr, 0].
   auto make_signal_offsets = [&](const ExprPtr& rank_expr) {
     return std::make_shared<MakeTuple>(
         std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
   };
+
+  // My-row offset [my_rank, 0] — pld.system.rank is a per-device compile-time constant.
+  auto my_row_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+
+  // Fixed per-peer offsets — compile-time constants.
+  auto off0 = tile_conversion_utils::MakeZeroOffsets(/*ndim=*/2, span);  // [0, 0]
+  auto off1 =
+      std::make_shared<MakeTuple>(std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                                       std::make_shared<ConstInt>(0, DataType::INDEX, span)},
+                                  span);  // [1, 0]
+
+  // ---- Phase 1: stage-in (local_data → target[my_rank, 0]) ----
+  b.Bind("stage_in", reg.Create("tile.store", {local_data, my_row_offsets, target}, {}, span), span);
 
   // ---- Phase 2a: notify-all ----
   b.EmitFor(
@@ -793,49 +818,44 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: per-peer gather with constant offsets ----
-  // Each rank stages its chunk at row [my_rank, 0] before the call.
-  // We remote_load each peer's row and tile.store it into the same row
-  // of our local target window.  All offsets are compile-time constants
-  // (proven safe by reduce_scatter's use of [my_rank, 0] for both
-  // remote_load and tile.store on DistributedTensor targets).
-  {
-    auto ndim = target_type->shape_.size();
-    auto zero_offsets = tile_conversion_utils::MakeZeroOffsets(ndim, span);
+  // ---- Phase 3: gather — remote_load peers, concat into accumulator ----
+  // Start with self chunk loaded from target.
+  auto acc_self = b.Bind("acc_self",
+                         reg.Create("tile.load", {target, my_row_offsets, chunk_shape, chunk_shape},
+                                    {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                         span);
 
-    // Offsets [0, 0] and [1, 0] — constant, no loop variables.
-    auto off0 = zero_offsets;                                                                // [0, 0]
-    auto off1 = std::make_shared<MakeTuple>(std::vector<ExprPtr>{one_idx, zero_idx}, span);  // [1, 0]
+  // Peer 0 — only when we are NOT rank 0.
+  // If rank 1: prepend peer 0's data so final order is [rank0, rank1].
+  auto after_peer0 = b.EmitIfExpr(
+      b.NotEq(zero_idx, my_rank, span),
+      [&](LoweringBuilder& then_body) {
+        auto recv =
+            then_body.Bind("recv0",
+                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
+                                                            {target, zero_idx, off0, chunk_shape}, {}, span),
+                           span);
+        return then_body.Bind(
+            "acc0", OpRegistry::GetInstance().Create("tile.concat", {recv, acc_self}, {}, span), span);
+      },
+      [&](LoweringBuilder&) -> ExprPtr { return acc_self; }, span);
 
-    // Peer 0 — only when we are NOT rank 0 (self data already at row 0).
-    b.EmitIf(
-        b.NotEq(zero_idx, my_rank, span),
-        [&](LoweringBuilder& then_body) {
-          auto recv =
-              then_body.Bind("recv0",
-                             OpRegistry::GetInstance().Create(
-                                 "pld.tile.remote_load", {target, zero_idx, off0, chunk_shape}, {}, span),
-                             span);
-          then_body.Bind("store0", reg.Create("tile.store", {recv, off0, target}, {}, span), span);
-        },
-        /*else_fn=*/nullptr, span);
+  // Peer 1 — only when we are NOT rank 1.
+  // If rank 0: append peer 1's data so final order is [rank0, rank1].
+  auto gathered = b.EmitIfExpr(
+      b.NotEq(one_idx, my_rank, span),
+      [&](LoweringBuilder& then_body) {
+        auto recv =
+            then_body.Bind("recv1",
+                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
+                                                            {target, one_idx, off1, chunk_shape}, {}, span),
+                           span);
+        return then_body.Bind(
+            "acc1", OpRegistry::GetInstance().Create("tile.concat", {after_peer0, recv}, {}, span), span);
+      },
+      [&](LoweringBuilder&) -> ExprPtr { return after_peer0; }, span);
 
-    // Peer 1 — only when we are NOT rank 1 (self data already at row 1).
-    b.EmitIf(
-        b.NotEq(one_idx, my_rank, span),
-        [&](LoweringBuilder& then_body) {
-          auto recv =
-              then_body.Bind("recv1",
-                             OpRegistry::GetInstance().Create("pld.tile.remote_load",
-                                                              {target, one_idx, off1, chunk_shape}, {}, span),
-                             span);
-          then_body.Bind("store1", reg.Create("tile.store", {recv, off1, target}, {}, span), span);
-        },
-        /*else_fn=*/nullptr, span);
-  }
-
-  // In-place rebind: return target so the LHS Var holds the post-gather view.
-  return target;
+  return gathered;
 }
 
 // ============================================================================

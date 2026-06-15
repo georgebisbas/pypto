@@ -12,8 +12,10 @@
 Validates the composite allgather intrinsic produces the same rank-ordered
 concatenation on every rank as the hand-written ``test_l3_allgather.py``.
 
-Target shape [NR, SIZE] — each rank stages its chunk at [my_rank, 0:SIZE].
-The intrinsic gathers all rows into every rank's local window.
+The intrinsic accepts three arguments: ``local_data`` (Tile [1, SIZE]),
+``target`` (DistributedTensor [NR, SIZE] staging window), and ``signal``.
+It handles stage-in internally, synchronises, remote-loads peers, and
+returns the concatenated result as a Tile.
 """
 
 import sys
@@ -49,16 +51,14 @@ def _build_allgather_program():
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             my_rank: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, NR * SIZE], pl.FP32]:
-            # Stage-in: write my chunk at my rank's row.
-            local = pl.load(inp, [0, 0], [1, SIZE])
-            pl.store(local, [my_rank, 0], data)
+            # Prepare local chunk as a Tile.
+            chunk = pl.load(inp, [0, 0], [1, SIZE])
 
-            # Allgather — one call.
-            data = pld.tensor.allgather(data, signal)
+            # Allgather — intrinsic handles stage-in, sync, remote-loads.
+            gathered = pld.tensor.allgather(chunk, data, signal)
 
-            # Stage-out: all rows now populated.
-            acc = pl.load(data, [0, 0], [NR, SIZE])
-            return pl.store(acc, [0, 0], out)
+            # Stage-out: store the concatenated Tile to output.
+            return pl.store(gathered, [0, 0], out)
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
