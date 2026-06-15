@@ -2406,6 +2406,8 @@ static std::unordered_map<const Var*, std::string> CollectDynVarMapping(const Pr
     if (!expr) return;
     if (auto var = As<Var>(expr)) {
       try_insert(var.get());
+    } else if (auto dim_expr = As<DimExpr>(expr)) {
+      collect_vars_from_expr(dim_expr->body_);
     } else if (auto bin = As<BinaryExpr>(expr)) {
       collect_vars_from_expr(bin->left_);
       collect_vars_from_expr(bin->right_);
