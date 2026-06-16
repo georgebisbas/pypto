@@ -823,11 +823,11 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // so the IfStmt is type-consistent.
   auto acc_self = b.Bind("acc_self",
                          reg.Create("tile.load", {target, my_row_offsets, chunk_shape, chunk_shape},
-                                    {{"target_memory", MemorySpace::Vec}, {"transpose": false}}, span),
+                                    {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
                          span);
 
   auto gathered = b.EmitIfExpr(
-      b.Eq(my_rank, zero_idx, span),
+      MakeEq(my_rank, zero_idx, span),
       [&](LoweringBuilder& then_body) {
         // We are rank 0: concat(self, remote_load from rank 1).
         auto recv1 =

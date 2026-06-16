@@ -78,7 +78,7 @@ TypePtr DeduceBuiltinTensorAllReduceType(const std::vector<ExprPtr>& args,
   CHECK(dtype == src_type->dtype_) << kOpName << " dtype kwarg (" << dtype.ToString()
                                    << ") must match src dtype (" << src_type->dtype_.ToString() << ")";
   CheckSupportedBuiltinVariant(op_value, dtype, kOpName);
-  return MakeType<DistributedTensorType>(signal_type->shape_, src_type->dtype_);
+  return args[0]->GetType();
 }
 
 }  // namespace
