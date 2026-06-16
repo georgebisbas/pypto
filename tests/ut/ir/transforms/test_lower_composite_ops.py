@@ -857,8 +857,8 @@ def test_allgather_is_decomposed_to_primitives():
 
 
 def test_allgather_emits_for_and_if_control_flow():
-    """Allgather emits 2 ForStmts + 4 IfStmts: notify-all, wait-all,
-    plus two explicit per-peer gather blocks (no gather loop)."""
+    """Allgather emits 2 ForStmts + 3 IfStmts: notify-all, wait-all,
+    plus one root-aware gather (both branches produce same shape)."""
     Before = _build_allgather_before()
     After = passes.lower_composite_ops()(Before)
     collector = _StmtKindCollector()
@@ -867,8 +867,8 @@ def test_allgather_emits_for_and_if_control_flow():
     assert collector.for_count == 2, (
         f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
     )
-    assert collector.if_count == 4, (
-        f"expected 4 IfStmts (2 nested in notify/wait + 2 standalone gather), "
+    assert collector.if_count == 3, (
+        f"expected 3 IfStmts (2 nested in notify/wait + 1 gather), "
         f"got {collector.if_count}"
     )
 

@@ -26,6 +26,7 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64
+NR = 2  # rank count for cross-rank signal slots
 ROOT_RANK = 0
 
 
@@ -46,7 +47,7 @@ def _build_broadcast_program():
             inp: pl.Tensor[[1, SIZE], pl.FP32],
             out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             my_rank: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: root only stages data.
@@ -67,7 +68,7 @@ def _build_broadcast_program():
             inp: pl.Tensor[[1, SIZE], pl.FP32],
             out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             my_rank: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             return self.broadcast_step(inp, out, data, signal, my_rank)
@@ -79,11 +80,11 @@ def _build_broadcast_program():
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
             data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(4)
+            signal_buf = pld.alloc_window_buffer(NR * 4)  # NR×1 × INT32
 
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
-                sig = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 self.chip_orch(inputs[r], outputs[r], data, sig, r, device=r)
             return outputs
 

@@ -339,14 +339,8 @@ def barrier(
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``signal``.
     """
-    signal_expr = _unwrap(signal)
-    if not isinstance(signal_expr, Expr) or not isinstance(signal_expr.type, _ir.DistributedTensorType):
-        got = (
-            _ir.python_print_type(signal_expr.type)
-            if isinstance(signal_expr, Expr)
-            else type(signal_expr).__name__
-        )
-        raise TypeError(f"pld.tensor.barrier expects a DistributedTensor signal (window-bound); got {got}")
+    signal_expr: Expr
+    (signal_expr,) = _unwrap_distributed_tensors("pld.tensor.barrier", signal=signal)
     call = _ir_tensor.barrier(signal_expr)
     return DistributedTensor(expr=call)
 

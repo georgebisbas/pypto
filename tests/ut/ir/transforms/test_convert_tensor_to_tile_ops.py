@@ -3462,7 +3462,9 @@ class TestWindowSliceIncoreConversion:
         ir.assert_structural_equal(After, Expected)
 
     def test_allgather_upgrades_target_and_signal_to_inout(self):
-        """``pld.tensor.allgather(target, signal)`` upgrades both params to InOut."""
+        """``pld.tensor.allgather(local_data, target, signal)`` upgrades both
+        ``target`` and ``signal`` params to InOut. ``local_data`` remains In
+        (read-only)."""
         SIZE = 16
         nr = 2
 
@@ -3471,22 +3473,24 @@ class TestWindowSliceIncoreConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
+                local_data: pl.Tensor[[1, SIZE], pl.FP32],
                 target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-            ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
-                target = pld.tensor.allgather(target, signal)
-                return target
+            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+                gathered = pld.tensor.allgather(local_data, target, signal)
+                return gathered
 
         @pl.program
         class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
+                local_data: pl.Tensor[[1, SIZE], pl.FP32],
                 target: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
                 signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
-                target = pld.tensor.allgather(target, signal)
-                return target
+            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+                gathered = pld.tensor.allgather(local_data, target, signal)
+                return gathered
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)

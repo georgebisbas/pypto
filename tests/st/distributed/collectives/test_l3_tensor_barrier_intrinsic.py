@@ -27,6 +27,7 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64
+NR = 2  # rank count for cross-rank signal slots
 
 
 def _expected_peer_swap(inputs: torch.Tensor) -> torch.Tensor:
@@ -45,7 +46,7 @@ def _build_barrier_peer_swap_program():
             inp: pl.Tensor[[1, SIZE], pl.FP32],
             out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             peer: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Stage-in: write my data into the window.
@@ -65,7 +66,7 @@ def _build_barrier_peer_swap_program():
             inp: pl.Tensor[[1, SIZE], pl.FP32],
             out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             peer: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             return self.swap_step(inp, out, data, signal, peer)
@@ -77,11 +78,11 @@ def _build_barrier_peer_swap_program():
             outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
             data_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32
-            signal_buf = pld.alloc_window_buffer(4)  # 1x1 x INT32
+            signal_buf = pld.alloc_window_buffer(NR * 4)  # NR×1 × INT32
 
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
-                sig = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 self.chip_orch(
                     inputs[r],
                     outputs[r],

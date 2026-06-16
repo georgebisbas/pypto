@@ -818,42 +818,37 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: gather — remote_load peers, concat into accumulator ----
-  // Start with self chunk loaded from target.
+  // ---- Phase 3: gather — assemble [rank0_chunk, rank1_chunk] ----
+  // Both branches produce the same shape [2, SIZE] via tile.concat,
+  // so the IfStmt is type-consistent.
   auto acc_self = b.Bind("acc_self",
                          reg.Create("tile.load", {target, my_row_offsets, chunk_shape, chunk_shape},
-                                    {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+                                    {{"target_memory", MemorySpace::Vec}, {"transpose": false}}, span),
                          span);
 
-  // Peer 0 — only when we are NOT rank 0.
-  // If rank 1: prepend peer 0's data so final order is [rank0, rank1].
-  auto after_peer0 = b.EmitIfExpr(
-      b.NotEq(zero_idx, my_rank, span),
-      [&](LoweringBuilder& then_body) {
-        auto recv =
-            then_body.Bind("recv0",
-                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
-                                                            {target, zero_idx, off0, chunk_shape}, {}, span),
-                           span);
-        return then_body.Bind(
-            "acc0", OpRegistry::GetInstance().Create("tile.concat", {recv, acc_self}, {}, span), span);
-      },
-      [&](LoweringBuilder&) -> ExprPtr { return acc_self; }, span);
-
-  // Peer 1 — only when we are NOT rank 1.
-  // If rank 0: append peer 1's data so final order is [rank0, rank1].
   auto gathered = b.EmitIfExpr(
-      b.NotEq(one_idx, my_rank, span),
+      b.Eq(my_rank, zero_idx, span),
       [&](LoweringBuilder& then_body) {
-        auto recv =
+        // We are rank 0: concat(self, remote_load from rank 1).
+        auto recv1 =
             then_body.Bind("recv1",
                            OpRegistry::GetInstance().Create("pld.tile.remote_load",
                                                             {target, one_idx, off1, chunk_shape}, {}, span),
                            span);
         return then_body.Bind(
-            "acc1", OpRegistry::GetInstance().Create("tile.concat", {after_peer0, recv}, {}, span), span);
+            "gathered", OpRegistry::GetInstance().Create("tile.concat", {acc_self, recv1}, {}, span), span);
       },
-      [&](LoweringBuilder&) -> ExprPtr { return after_peer0; }, span);
+      [&](LoweringBuilder& else_body) {
+        // We are rank 1: concat(remote_load from rank 0, self).
+        auto recv0 =
+            else_body.Bind("recv0",
+                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
+                                                            {target, zero_idx, off0, chunk_shape}, {}, span),
+                           span);
+        return else_body.Bind(
+            "gathered", OpRegistry::GetInstance().Create("tile.concat", {recv0, acc_self}, {}, span), span);
+      },
+      span);
 
   return gathered;
 }

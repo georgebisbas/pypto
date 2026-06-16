@@ -774,11 +774,11 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (op_name == "pld.tensor.allreduce" && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.allgather(target, signal): writes gathered chunks into
-  // target on every rank (Phase 3 tile.store).  target (args_[0]) is the
-  // primary write target.
-  if (op_name == "pld.tensor.allgather" && !call->args_.empty()) {
-    return call->args_[0];
+  // pld.tensor.allgather(local_data, target, signal): writes gathered
+  // chunks into target on every rank (Phase 1 store).  target (args_[1])
+  // is the primary write target; local_data (args_[0]) is read-only.
+  if (op_name == "pld.tensor.allgather" && call->args_.size() >= 2) {
+    return call->args_[1];
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
@@ -786,9 +786,13 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (op_name == "pld.tensor.reduce_scatter" && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.barrier(signal): pure synchronisation — no data write target.
-  // signal is read+write (notify/wait) but there's no primary data target.
-  // No entry needed here; the AnalyzeCallAccess handler marks signal InOut.
+  // pld.tensor.barrier(signal): returns a rebind of signal — the result
+  // aliases signal so that ``sig2 = barrier(sig1)`` propagates origins
+  // through GetAliasOrigins().  The AnalyzeCallAccess handler separately
+  // marks signal read+write for param-direction inference.
+  if (op_name == "pld.tensor.barrier" && !call->args_.empty()) {
+    return call->args_[0];
+  }
   // pld.tensor.broadcast(target, signal, *, root): writes root's data into
   // target on every rank via remote_load + store.  target (args_[0]) is
   // the primary write target.
@@ -950,11 +954,16 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (op_name == "pld.tensor.allgather") {
-    // pld.tensor.allgather(target, signal): target (args_[0]) is read
-    // (Phase 3 remote_load from peers) and written (Phase 3 tile.store
-    // into own window).  signal (args_[1]) is written (notify) and read
-    // (wait).  Both InOut.
-    for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
+    // pld.tensor.allgather(local_data, target, signal):
+    //   local_data (args_[0]) is In (read-only — staged into target).
+    //   target (args_[1]) is read (Phase 3 remote_load from peers)
+    //     and written (Phase 1 store into own window).  InOut.
+    //   signal (args_[2]) is written (notify) and read (wait).  InOut.
+    if (call->args_.size() >= 1) {
+      // local_data: read only
+      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+    }
+    for (size_t i = 1; i < std::min<size_t>(3, call->args_.size()); ++i) {
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
       MarkAccess(origins, has_read);
       MarkAccess(origins, has_write);
