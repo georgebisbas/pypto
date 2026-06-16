@@ -156,7 +156,6 @@ class TestL3AllGather:
 
         inputs = _make_rank_inputs(n_ranks)
         outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
-            ]
         compiled(inputs, outputs)
 
         expected = _expected_allgather(inputs)

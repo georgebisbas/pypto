@@ -124,7 +124,6 @@ class BroadcastDynamic:
         """Launch one chip orchestration per rank with shared window buffers."""
         scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
-        root = pl.const(ROOT_RANK, pl.INT32)
 
         for r in pl.range(pld.world_size()):
             scratch = pld.window(scratch_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
@@ -134,7 +133,7 @@ class BroadcastDynamic:
                 outputs[r],
                 scratch,
                 signal,
-                root,
+                ROOT_RANK,
                 device=r,
             )
         return outputs
