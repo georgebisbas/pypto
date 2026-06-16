@@ -266,6 +266,8 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   Entry VisitExpr_(const NotPtr& /*op*/) override { return Everything(); }
   Entry VisitExpr_(const BitNotPtr& /*op*/) override { return Everything(); }
 
+  Entry VisitExpr_(const DimExprPtr& op) override { return this->VisitExpr(op->body_); }
+
   Entry VisitExpr_(const CastPtr& op) override { return VisitExpr(op->operand_); }
 
  private:

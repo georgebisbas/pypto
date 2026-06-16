@@ -134,6 +134,7 @@ class CanonicalSimplifier::Impl : public ExprFunctor<ExprPtr> {
   ExprPtr VisitExpr_(const AbsPtr& op) override;
   ExprPtr VisitExpr_(const NotPtr& op) override;
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
+  ExprPtr VisitExpr_(const DimExprPtr& op) override;
   ExprPtr VisitExpr_(const CastPtr& op) override;
 
  private:

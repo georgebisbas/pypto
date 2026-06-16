@@ -769,6 +769,11 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const CastPtr& op) {
   return MakeCast(a, GetScalarDtype(op));
 }
 
+ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const DimExprPtr& op) {
+  // DimExpr wraps a type-annotation expression — unwrap for canonicalization.
+  return VisitExpr(op->body_);
+}
+
 // ============================================================================
 // CanonicalSimplifier — public interface delegation to Impl
 // ============================================================================

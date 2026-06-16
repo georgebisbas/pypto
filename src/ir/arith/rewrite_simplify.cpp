@@ -1344,6 +1344,11 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const CastPtr& op) {
   return MakeCast(a, GetScalarDtype(op));
 }
 
+ExprPtr RewriteSimplifier::Impl::VisitExpr_(const DimExprPtr& op) {
+  // DimExpr wraps a type-annotation expression — unwrap for rewriting.
+  return VisitExpr(op->body_);
+}
+
 // ============================================================================
 // RewriteSimplifier — public interface delegation to Impl
 // ============================================================================
