@@ -7,20 +7,32 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank reduce_scatter — 2D ``[NR, SIZE]`` layout.
+"""L3 distributed st: N-rank reduce-scatter — PyPTO port of
+``examples/workers/l3/reduce_scatter_distributed``.
 
-Uses the **dynamic loop + static tile** pattern with ``NR = pl.nranks_dim``.
-See ``test_l3_allgather.py`` for the full pattern explanation.
+Mirrors the 4-phase pattern of the runtime example's
+``kernels/aiv/reduce_scatter_kernel.cpp`` (simpler ``reduce_scatter_distributed``, PR #842),
+generalized to N ranks via ``NR = pl.nranks_dim``:
 
-* **Phase 1 (stage-in)** — each rank writes its own column into scratch.
-* **Phase 2 (barrier)** — notify-all / wait-all (N-rank mesh).
-* **Phase 3 (reduce)** — accumulate every peer's chunk via
-  ``pld.tile.remote_load`` + ``pl.add``.
-* **Phase 4 (stage-out)** — store reduced accumulator → local output.
+* **Phase 1 (stage-in)** — copy all columns of local ``inp`` into the
+  window-bound ``scratch`` buffer so every peer can read the column
+  it needs for reduction (a plain local ``pl.store`` into the
+  ``DistributedTensor``, ``scratch`` shape ``[NR, SIZE]``).
+* **Phase 2 (barrier)** — each rank ``AtomicAdd``s every peer's ``signal``
+  cell via ``pld.system.notify`` and ``pld.system.wait``s on every peer slot
+  until all ranks have finished staging (``signal`` shape ``[NR, 1]``).
+* **Phase 3 (reduce)** — ``pl.load`` this rank's own column (``my_rank``)
+  from ``scratch`` into an accumulator tile, then for every
+  ``peer != my_rank``: ``pld.tile.remote_load`` the peer's slice at the
+  **same column offset** and ``pl.add`` into ``acc``.
+* **Phase 4 (stage-out)** — ``pl.store`` the accumulator into local ``out``.
 
-Golden: each rank gets its own reduced chunk.
+Golden: rank ``r`` output is the element-wise sum of column ``r`` across all
+ranks: ``outputs[r][j] == sum(inputs[*][r][j])``.
 
-ST coverage: P=2 and P=4.
+ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
+devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
+for both.
 """
 
 # pyright: reportUndefinedVariable=false

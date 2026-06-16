@@ -7,18 +7,27 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank broadcast — 2D ``[NR, SIZE]`` layout.
+"""L3 distributed st: N-rank broadcast — PyPTO port of ``examples/workers/l3/broadcast_distributed``.
 
-Uses the **dynamic loop + static tile** pattern with ``NR = pl.nranks_dim``.
-See ``test_l3_allgather.py`` for the full pattern explanation.
+Mirrors the 3-phase pattern of the runtime example's
+``kernels/aiv/broadcast_kernel.cpp`` (simpler ``broadcast_distributed``),
+generalized to N ranks via ``NR = pl.nranks_dim``:
 
-* **Phase 1 (stage-in)** — root writes its data into scratch.
-* **Phase 2 (barrier)** — notify-all / wait-all (N-rank mesh).
-* **Phase 3 (broadcast)** — each rank remote_loads root's scratch → local output.
+* **Phase 1 (stage-in)** — root rank only: for each column ``c`` in
+  ``pl.range(nranks)``, copy ``inp[c, :]`` into the window-bound ``scratch``
+  buffer (a plain local ``pl.store`` into the ``DistributedTensor``).
+* **Phase 2 (barrier)** — each rank ``AtomicAdd``s every peer's ``signal``
+  cell via ``pld.system.notify`` and ``pld.system.wait``s on every peer slot
+  until all ranks have passed the barrier (``signal`` shape ``[NR, 1]``).
+* **Phase 3 (broadcast)** — every rank reads all columns from the root's
+  scratch via ``pld.tile.remote_load`` and ``pl.store``s into local ``out``.
 
-Golden: every rank's output equals the root's input.
+Golden: every rank's ``outputs[r]`` equals ``inputs[ROOT_RANK]`` (root tensor
+broadcast to all ranks). Non-root inputs must not appear in outputs.
 
-ST coverage: P=2 and P=4.
+ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
+devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
+for both.
 """
 
 # pyright: reportUndefinedVariable=false

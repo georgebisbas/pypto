@@ -7,32 +7,28 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank allgather — 2D ``[NR, SIZE]`` layout.
+"""L3 distributed st: N-rank allgather — PyPTO port of ``examples/workers/l3/allgather_distributed``.
 
-Uses the **dynamic loop + static tile** pattern:
+Mirrors the 3-phase pattern of the runtime example's
+``kernels/aiv/allgather_kernel.cpp`` (simpler ``allgather_distributed``, PR #842),
+generalized to N ranks via ``NR = pl.nranks_dim``:
 
-- **Dynamic loops**: ``pl.range(nranks)`` where ``nranks`` comes from
-  ``pld.nranks(ctx)`` at runtime — adapts to any rank count.
-- **Static tiles**: every ``pl.load`` / ``pl.store`` / ``pld.tile.remote_load``
-  uses a fixed shape (``[1, SIZE]``) — tiles are always compile-time constants
-  and never depend on the number of ranks.
-- **Type annotations**: ``NR = pl.nranks_dim`` creates a first-class
-  distributed-rank-count dimension.  The compiler's
-  ``ResolveDistributedShapeVars`` pass resolves it to the rank count at chip
-  level, and the HOST codegen emits ``world_size`` at the orchestrator level.
-  **No name matching** — the inference is structural: any ``DimExpr`` in a
-  distributed function maps to the rank count.
+* **Phase 1 (stage-in)** — copy local ``inp`` into this rank's scratch slot in the
+  window-bound ``scratch`` buffer (a plain local ``pl.store`` into the
+  ``DistributedTensor``).
+* **Phase 2 (barrier)** — each rank ``AtomicAdd``s every peer's ``signal``
+  cell via ``pld.system.notify`` and ``pld.system.wait``s on every peer slot
+  until all ranks have staged their slice (``signal`` shape ``[NR, 1]``).
+* **Phase 3 (gather)** — for each ``r`` in ``pl.range(nranks)``,
+  ``pld.tile.remote_load`` that rank's scratch slice and ``pl.store`` into
+  ``out[r, :]``.
 
-Single program compiles once and works for P=2 and P=4 without recompilation.
+Golden: every rank's output is the rank-ordered concatenation of all inputs,
+shape ``[NR, SIZE]``.
 
-* **Phase 1 (stage-in)** — copy local input into scratch slot.
-* **Phase 2 (barrier)** — notify-all / wait-all (N-rank mesh).
-* **Phase 3 (gather)** — ``pld.tile.remote_load`` each peer's scratch →
-  ``pl.store`` into ``out[r, :]``.
-
-Golden: every rank sees rank-ordered concatenation, shape ``[NR, SIZE]``.
-
-ST coverage: P=2 and P=4.
+ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
+devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
+for both.
 """
 
 # pyright: reportUndefinedVariable=false
