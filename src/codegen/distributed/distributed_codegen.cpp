@@ -719,7 +719,19 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
 }
 
 void DistributedCodegen::VisitExpr_(const ir::DimExprPtr& op) {
-  // DimExpr wraps a type-annotation expression — unwrap to the body.
+  // DimExpr wraps a type-annotation expression.
+  //
+  // The InferDistributedDimBindings pass resolves DimExpr → nranks Var
+  // in InCore functions before codegen runs.  Any DimExpr that survives
+  // to codegen must be in a non-InCore function (HOST orchestrator,
+  // chip orchestrator, etc.) where the only sensible resolution is the
+  // total number of ranks — the implicit world_size parameter.
+  if (current_func_ && !ir::IsInCoreType(current_func_->func_type_)) {
+    current_expr_value_ = "world_size";
+    return;
+  }
+  // InCore: the body should already be the resolved nranks Var from
+  // InferDistributedDimBindings.  Unwrap and visit it.
   VisitExpr(op->body_);
 }
 
