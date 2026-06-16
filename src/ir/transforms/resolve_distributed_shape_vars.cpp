@@ -19,7 +19,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
@@ -34,9 +34,9 @@ namespace {
 // Pre-SSA resolution of dynamic shape Vars in distributed functions.
 //
 // Runs BEFORE ConvertToSSA so type-shape Vars never enter SSA scope.
-// The algorithm is structural — no DimExpr node, no name matching:
+// The algorithm is structural — no new IR node, no name matching:
 //
-//   1. Collect every Var defined in the function body (AssignStmt LHS).
+//   1. Collect every Var name defined in the function body (AssignStmt LHS).
 //   2. Find the nranks Var from ``nranks = pld.nranks(ctx)``.
 //   3. Walk parameter/return type shapes; any shape dim that is a Var
 //      NOT in the body-def set is a type-only placeholder → replace
@@ -70,13 +70,7 @@ std::set<std::string> CollectBodyDefNames(const FunctionPtr& func) {
 /// Check whether a function participates in distributed communication.
 bool HasDistributedTensorParam(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
-    if (auto overridden = param->GetOverrideType()) {
-      if (As<DistributedTensorType>(overridden)) return true;
-    }
     if (As<DistributedTensorType>(param->GetType())) return true;
-    if (auto ptr = As<PtrType>(param->GetType())) {
-      if (As<DistributedTensorType>(ptr->pointee_type_)) return true;
-    }
   }
   return false;
 }
@@ -102,63 +96,39 @@ VarPtr FindNranksVar(const FunctionPtr& func) {
   return finder.found_;
 }
 
-/// Return the ShapedType's shape dims, unwrapping Ptr wrappers.
-const std::vector<ExprPtr>* GetShapeDims(const TypePtr& type) {
-  if (auto st = As<ShapedType>(type)) return &st->shape_;
-  if (auto pt = As<PtrType>(type)) return GetShapeDims(pt->pointee_type_);
-  return nullptr;
-}
-
-/// Rewrite a single type, replacing type-only Vars with nranks_var.
-TypePtr RewriteType(const TypePtr& type, const std::set<std::string>& body_def_names,
-                    const VarPtr& nranks_var) {
-  const auto* shape = GetShapeDims(type);
-  if (!shape) return type;
-
+/// Rewrite a single ShapedType, replacing type-only Vars with nranks_var.
+TypePtr RewriteShapedType(const std::shared_ptr<const ShapedType>& shaped,
+                          const std::set<std::string>& body_def_names,
+                          const VarPtr& nranks_var) {
   bool changed = false;
   std::vector<ExprPtr> new_shape;
-  for (const auto& dim : *shape) {
+  for (const auto& dim : shaped->shape_) {
     auto var = As<Var>(dim);
     if (var && body_def_names.find(var->name_hint_) == body_def_names.end()) {
-      // Var is NOT defined in the body → type-only placeholder → replace.
       new_shape.push_back(nranks_var);
       changed = true;
     } else {
       new_shape.push_back(dim);
     }
   }
-  if (!changed) return type;
+  if (!changed) return shaped;
 
-  // Reconstruct the appropriate concrete type.
-  if (auto tt = As<TensorType>(type)) {
+  if (auto tt = As<TensorType>(shaped)) {
     return std::make_shared<TensorType>(new_shape, tt->dtype_, tt->memref_, tt->tensor_view_);
   }
-  if (auto dt = As<DistributedTensorType>(type)) {
-    return std::make_shared<DistributedTensorType>(new_shape, dt->dtype_, dt->distributed_comm_type_);
+  if (auto dt = As<DistributedTensorType>(shaped)) {
+    return std::make_shared<DistributedTensorType>(new_shape, dt->dtype_);
   }
-  // Pointer wrapper (e.g. Ptr<TensorType> used by InOut/Out).
-  if (auto pt = As<PtrType>(type)) {
-    auto new_pointee = RewriteType(pt->pointee_type_, body_def_names, nranks_var);
-    return std::make_shared<PtrType>(new_pointee, pt->span_);
-  }
-  return type;
+  return shaped;
 }
 
-/// Rewrite a Var's type, including overridden type (InOut/Out wrappers).
-VarPtr RewriteParam(const VarPtr& param, const std::set<std::string>& body_def_names,
+/// Rewrite the type on a function parameter or return type.
+TypePtr RewriteType(const TypePtr& type, const std::set<std::string>& body_def_names,
                     const VarPtr& nranks_var) {
-  auto new_type = RewriteType(param->GetType(), body_def_names, nranks_var);
-  auto overridden = param->GetOverrideType();
-  auto new_overridden = overridden ? RewriteType(overridden, body_def_names, nranks_var) : nullptr;
-
-  if (new_type.get() == param->GetType().get() &&
-      (!overridden || new_overridden.get() == overridden.get())) {
-    return param;
+  if (auto shaped = As<ShapedType>(type)) {
+    return RewriteShapedType(shaped, body_def_names, nranks_var);
   }
-
-  auto new_param = std::make_shared<Var>(param->name_hint_, new_type, param->span_);
-  if (new_overridden) new_param->SetOverrideType(new_overridden);
-  return new_param;
+  return type;
 }
 
 }  // namespace
@@ -178,9 +148,14 @@ Pass ResolveDistributedShapeVars() {
     bool params_changed = false;
     std::vector<VarPtr> new_params;
     for (const auto& param : func->params_) {
-      auto new_param = RewriteParam(param, body_def_names, nranks_var);
-      new_params.push_back(new_param);
-      if (new_param.get() != param.get()) params_changed = true;
+      auto new_type = RewriteType(param->GetType(), body_def_names, nranks_var);
+      if (new_type.get() == param->GetType().get()) {
+        new_params.push_back(param);
+      } else {
+        params_changed = true;
+        new_params.push_back(
+            std::make_shared<Var>(param->name_hint_, new_type, param->span_));
+      }
     }
 
     // Rewrite return types.
@@ -199,7 +174,6 @@ Pass ResolveDistributedShapeVars() {
                                       func->role_, func->attrs_);
   };
 
-  // Requires nothing — runs pre-SSA; produces and invalidates nothing.
   static const PassProperties kProperties{};
   return CreateFunctionPass(pass_func, "ResolveDistributedShapeVars", kProperties);
 }
