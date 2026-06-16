@@ -994,6 +994,10 @@ class TypeResolver:
         When the shape contains any Expr elements, all int elements are
         converted to ConstInt.
 
+        Non-ConstInt dimensions (Vars, binary ops, etc.) are wrapped in
+        DimExpr so visitors and SSA verifiers skip into type-annotation
+        expressions.
+
         Args:
             shape: Mixed list of int and ir.Expr dimensions
 
@@ -1003,8 +1007,19 @@ class TypeResolver:
         if all(isinstance(d, int) for d in shape):
             return cast(list[int], shape)
 
-        # Convert all to Expr
-        return [ir.ConstInt(d, DataType.INDEX, ir.Span.unknown()) if isinstance(d, int) else d for d in shape]
+        # Convert all to Expr, wrapping non-ConstInt dims in DimExpr
+        # so that type-annotation expressions (Vars, composites) are
+        # invisible to SSA scope checks and structural visitors.
+        result: list[ir.Expr] = []
+        for d in shape:
+            if isinstance(d, int):
+                result.append(ir.ConstInt(d, DataType.INDEX, ir.Span.unknown()))
+            elif isinstance(d, ir.ConstInt):
+                result.append(d)
+            else:
+                # Non-ConstInt Expr (Var, Mul, Add, ...) — wrap in DimExpr
+                result.append(ir.DimExpr(d, ir.Span.unknown()))
+        return result
 
     def resolve_dtype(self, dtype_node: ast.expr) -> DataType:
         """Resolve dtype annotation.

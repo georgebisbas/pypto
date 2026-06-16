@@ -7,26 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank reduce_scatter — 2D ``[N, SIZE]`` layout.
+"""L3 distributed st: N-rank reduce_scatter — 2D ``[R, SIZE]`` layout.
 
-Uses the **dynamic loop + static tile** pattern:
-
-- **Dynamic loops**: ``pl.range(nranks)`` where ``nranks`` comes from
-  ``pld.nranks(ctx)`` at runtime — adapts to any rank count.
-- **Static tiles**: every ``pl.load`` / ``pl.store`` / ``pld.tile.remote_load``
-  uses a fixed shape (``[1, SIZE]``) — tiles are always compile-time constants
-  and never depend on the number of ranks.
-- **Type annotations**: ``n_ranks`` is a concrete Python ``int`` (``ConstInt``)
-  passed at program-construction time — no ``pl.dynamic()`` is used.
-  Separate compilation per rank count (P=2 / P=4).
-
-* **Phase 1 (stage-in)** — each rank writes its own column into scratch.
-* **Phase 2 (barrier)** — notify-all / wait-all (N-rank mesh).
-* **Phase 3 (reduce)** — accumulate every peer's chunk via
-  ``pld.tile.remote_load`` + ``pl.add``.
-* **Phase 4 (stage-out)** — store reduced accumulator → local output.
-
-Golden: each rank gets its own reduced chunk.
+Uses the **dynamic loop + static tile** pattern with ``R = pl.dynamic("R")``.
+See ``test_l3_allgather.py`` for the full pattern explanation.
 
 ST coverage: P=2 and P=4.
 """
@@ -43,13 +27,14 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64  # elements per rank
+R = pl.dynamic("R")
 
 
 def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
     """Element-wise sum of all rank inputs, scattered to per-rank chunks.
 
-    inputs shape: [N, N, SIZE] (each rank has FULL data from all ranks)
-    output shape: [N, 1, SIZE]  (each rank gets its own reduced chunk)
+    inputs shape: [R, R, SIZE] (each rank has FULL data from all ranks)
+    output shape: [R, 1, SIZE]  (each rank gets its own reduced chunk)
     """
     n_ranks = inputs.shape[0]
     result = torch.zeros((n_ranks, 1, SIZE), dtype=inputs.dtype)
@@ -68,97 +53,88 @@ def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
     return data
 
 
-def _build_reduce_scatter_program(n_ranks: int):
-    """Build the N-rank reduce_scatter program.
+@pl.program
+class ReduceScatterMesh:
+    """Mesh reduce_scatter with dynamic rank count R."""
 
-    *n_ranks* is a compile-time constant (Python ``int`` → ``ir.ConstInt``)
-    used in type annotations.  The same body is re-compiled for P=2 and P=4.
-    Dynamic loops (``pl.range(nranks)``) and static tiles (``[1, SIZE]``)
-    keep every ``pl.load`` / ``pl.store`` / ``pld.tile.remote_load`` rank-agnostic.
-    """
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[R, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[R, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Stage-in → barrier → accumulate peer chunks → store my chunk."""
+        ctx = pld.get_comm_ctx(scratch)
+        my_rank = pld.rank(ctx)
+        rranks = pld.nranks(ctx)
 
-    @pl.program
-    class ReduceScatterN:
-        @pl.function(type=pl.FunctionType.InCore)
-        def reduce_step(
-            self,
-            inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            """Stage-in → barrier → accumulate peer chunks → store my chunk."""
-            ctx = pld.get_comm_ctx(scratch)
-            my_rank = pld.rank(ctx)
-            nranks = pld.nranks(ctx)
+        # Phase 1: stage-in — copy my column into scratch.
+        local = pl.load(inp, [my_rank, 0], [1, SIZE])  # Tile[1, SIZE] ← static
+        scratch = pl.store(local, [0, 0], scratch)
 
-            # Phase 1: stage-in — copy my column into scratch.
-            local = pl.load(inp, [my_rank, 0], [1, SIZE])  # Tile[1, SIZE] ← static
-            scratch = pl.store(local, [0, 0], scratch)
-
-            # Phase 2: barrier — notify every peer, wait on every peer slot.
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    pld.system.notify(
-                        signal,
-                        peer=peer,
-                        offsets=[my_rank, 0],
-                        value=1,
-                        op=pld.NotifyOp.AtomicAdd,
-                    )
-            for src in pl.range(nranks):
-                if src != my_rank:
-                    pld.system.wait(
-                        signal=signal,
-                        offsets=[src, 0],
-                        expected=1,
-                        cmp=pld.WaitCmp.Ge,
-                    )
-
-            # Phase 3: accumulate — load my slice, add every peer's slice via remote_load.
-            acc = pl.load(scratch, [0, 0], [1, SIZE])
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
-                    acc = pl.add(acc, recv)
-
-            # Phase 4: stage-out — reduced accumulator → local output.
-            return pl.store(acc, [0, 0], out)
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(
-            self,
-            inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            """Per-device orchestration wrapper around ``reduce_step``."""
-            return self.reduce_step(inp, out, scratch, signal)
-
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(
-            self,
-            inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
-            outputs: pl.Out[pl.Tensor[[n_ranks, 1, SIZE], pl.FP32]],
-        ) -> pl.Tensor[[n_ranks, 1, SIZE], pl.FP32]:
-            """Launch one chip orchestration per rank with shared window buffers."""
-            scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1×SIZE × FP32
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # N×1 × INT32
-
-            for r in pl.range(pld.world_size()):
-                scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-                self.chip_orch(
-                    inputs[r],
-                    outputs[r],
-                    scratch,
+        # Phase 2: barrier — notify every peer, wait on every peer slot.
+        for peer in pl.range(rranks):
+            if peer != my_rank:
+                pld.system.notify(
                     signal,
-                    device=r,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
                 )
-            return outputs
+        for src in pl.range(rranks):
+            if src != my_rank:
+                pld.system.wait(
+                    signal=signal,
+                    offsets=[src, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
 
-    return ReduceScatterN
+        # Phase 3: accumulate — load my slice, add every peer's slice via remote_load.
+        acc = pl.load(scratch, [0, 0], [1, SIZE])
+        for peer in pl.range(rranks):
+            if peer != my_rank:
+                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+                acc = pl.add(acc, recv)
+
+        # Phase 4: stage-out — reduced accumulator → local output.
+        return pl.store(acc, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip_orch(
+        self,
+        inp: pl.Tensor[[R, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[R, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        """Per-device orchestration wrapper around ``reduce_step``."""
+        return self.reduce_step(inp, out, scratch, signal)
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def host_orch(
+        self,
+        inputs: pl.Tensor[[R, R, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[R, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[R, 1, SIZE], pl.FP32]:
+        """Launch one chip orchestration per rank with shared window buffers."""
+        scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1×SIZE × FP32
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # R×1 × INT32
+
+        for r in pl.range(pld.world_size()):
+            scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            self.chip_orch(
+                inputs[r],
+                outputs[r],
+                scratch,
+                signal,
+                device=r,
+            )
+        return outputs
 
 
 class TestL3ReduceScatter:
@@ -171,7 +147,7 @@ class TestL3ReduceScatter:
             pytest.skip(f"reduce_scatter P={n_ranks} needs {n_ranks} devices")
 
         compiled = ir.compile(
-            _build_reduce_scatter_program(n_ranks),
+            ReduceScatterMesh,
             platform=test_config.platform,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],

@@ -718,6 +718,11 @@ void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   current_expr_value_ = op->value_ ? "True" : "False";
 }
 
+void DistributedCodegen::VisitExpr_(const ir::DimExprPtr& op) {
+  // DimExpr wraps a type-annotation expression — unwrap to the body.
+  VisitExpr(op->body_);
+}
+
 // ========================================================================
 // Call-site lowering
 // ========================================================================

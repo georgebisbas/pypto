@@ -79,8 +79,20 @@ bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (lhs == rhs) {
     return true;
   }
-  auto lhs_const = As<ir::ConstInt>(lhs);
-  auto rhs_const = As<ir::ConstInt>(rhs);
+  // Unwrap DimExpr wrappers before comparison.
+  auto unwrap = [](const ExprPtr& e) -> ExprPtr {
+    if (auto dim_expr = As<ir::DimExpr>(e)) {
+      return dim_expr->body_;
+    }
+    return e;
+  };
+  auto lhs_inner = unwrap(lhs);
+  auto rhs_inner = unwrap(rhs);
+  if (lhs_inner == rhs_inner) {
+    return true;
+  }
+  auto lhs_const = As<ir::ConstInt>(lhs_inner);
+  auto rhs_const = As<ir::ConstInt>(rhs_inner);
   return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
 }
 

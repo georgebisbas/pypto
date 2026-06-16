@@ -92,6 +92,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_EXPR_TRAMPOLINE(Submit, visit_submit)
   VISITOR_EXPR_TRAMPOLINE(MakeTuple, visit_make_tuple)
   VISITOR_EXPR_TRAMPOLINE(TupleGetItemExpr, visit_tuple_get_item_expr)
+  VISITOR_EXPR_TRAMPOLINE(DimExpr, visit_dim_expr)
 
   // Binary expression types (23) — individual overrides, default delegates to VisitBinaryExpr_
   VISITOR_EXPR_TRAMPOLINE(Add, visit_add)
@@ -189,6 +190,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_EXPR_TRAMPOLINE(Submit, visit_submit)
   MUTATOR_EXPR_TRAMPOLINE(MakeTuple, visit_make_tuple)
   MUTATOR_EXPR_TRAMPOLINE(TupleGetItemExpr, visit_tuple_get_item_expr)
+  MUTATOR_EXPR_TRAMPOLINE(DimExpr, visit_dim_expr)
 
   // Binary expression types (23)
   MUTATOR_EXPR_TRAMPOLINE(Add, visit_add)
@@ -320,6 +322,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, Submit, visit_submit);
   BIND_VISITOR(visitor_cls, MakeTuple, visit_make_tuple);
   BIND_VISITOR(visitor_cls, TupleGetItemExpr, visit_tuple_get_item_expr);
+  BIND_VISITOR(visitor_cls, DimExpr, visit_dim_expr);
 
   // Binary expression handlers (23)
   BIND_VISITOR(visitor_cls, Add, visit_add);
@@ -418,6 +421,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, Submit, visit_submit);
   BIND_MUTATOR(mutator_cls, MakeTuple, visit_make_tuple);
   BIND_MUTATOR(mutator_cls, TupleGetItemExpr, visit_tuple_get_item_expr);
+  BIND_MUTATOR(mutator_cls, DimExpr, visit_dim_expr);
 
   // Binary expression handlers (23)
   BIND_MUTATOR(mutator_cls, Add, visit_add);

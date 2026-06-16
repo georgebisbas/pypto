@@ -504,6 +504,23 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
+ * @brief Infer distributed dimension bindings from context.
+ *
+ * For each distributed function (one with DistributedTensor params), detects
+ * the nranks variable from ``pld.nranks(ctx)`` and replaces every DimExpr in
+ * type shapes with that Var.  This resolves ``pl.dynamic("R")`` placeholders
+ * to the actual rank count at chip level — no name matching is done.
+ *
+ * Requirements:
+ * - Input IR must be in SSA form.
+ * - Runs early, before ConvertTensorToTileOps.
+ *
+ * This pass eliminates all DimExpr nodes in distributed functions.  Any
+ * DimExpr remaining after this pass in a non-distributed function is an error.
+ */
+Pass InferDistributedDimBindings();
+
+/**
  * @brief Lower ``tile.load(transpose=True)`` to a body-local DN view (RFC #1300 P6)
  *
  * For each InCore function, detects ``tile.load(..., transpose=True)`` whose source

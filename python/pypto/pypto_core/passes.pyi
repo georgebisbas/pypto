@@ -480,6 +480,14 @@ def canonicalize_tile_slice() -> Pass:
 def infer_tile_memory_space() -> Pass:
     """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
+def infer_distributed_dim_bindings() -> Pass:
+    """Create a pass that resolves pl.dynamic() placeholders in distributed functions.
+
+    For each function with DistributedTensor params, detects the nranks
+    variable from ``pld.nranks(ctx)`` and replaces every DimExpr in type
+    shapes with that Var.  This is structural — no name matching is done.
+    """
+
 def lower_transpose_load_param_layout() -> Pass:
     """Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).
 
@@ -784,6 +792,7 @@ __all__ = [
     "auto_tile_matmul_l0",
     "canonicalize_tile_slice",
     "infer_tile_memory_space",
+    "infer_distributed_dim_bindings",
     "lower_transpose_load_param_layout",
     "materialize_tensor_strides",
     "resolve_backend_op_layouts",

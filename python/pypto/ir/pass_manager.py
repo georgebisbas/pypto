@@ -128,6 +128,11 @@ class PassManager:
             # into downstream expression and type-annotation uses before tile
             # lowering inspects them. Runs post-SSA to exploit single-definition.
             ("Simplify", lambda: passes.simplify()),
+            # Resolve pl.dynamic() placeholders (DimExpr nodes) in distributed
+            # functions to the nranks Var from pld.nranks(ctx).  Must run after
+            # ConvertToSSA (for stable Var identity) and before any tile
+            # lowering (shape must be resolved before ConvertTensorToTileOps).
+            ("InferDistributedDimBindings", lambda: passes.infer_distributed_dim_bindings()),
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("FlattenCallExpr", lambda: passes.flatten_call_expr()),
         ]

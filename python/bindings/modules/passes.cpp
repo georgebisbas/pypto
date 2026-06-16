@@ -449,6 +449,12 @@ void BindPass(nb::module_& m) {
              "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
+  passes.def("infer_distributed_dim_bindings", &pass::InferDistributedDimBindings,
+             "Create a pass that resolves pl.dynamic() placeholders in distributed functions.\n\n"
+             "For each function with DistributedTensor params, detects the nranks variable\n"
+             "from pld.nranks(ctx) and replaces every DimExpr in type shapes with that Var.\n"
+             "This is structural — no name matching is done. Runs early, before\n"
+             "ConvertTensorToTileOps.");
   passes.def("lower_transpose_load_param_layout", &pass::LowerTransposeLoadParamLayout,
              "Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).\n\n"
              "For each InCore function, detects tile.load(..., transpose=True) whose source\n"

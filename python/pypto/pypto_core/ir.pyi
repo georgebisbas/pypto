@@ -1278,6 +1278,25 @@ class ConstBool(Expr):
     def dtype(self) -> DataType:
         """Data type of the expression (always DataType.BOOL)."""
 
+class DimExpr(Expr):
+    """Composite dimension expression in type shapes.
+
+    Wraps a scalar expression (e.g. Var, Mul, Add) so that visitors
+    and verifiers skip into it via IgnoreField.  Passes unwrap via
+    ``As<DimExpr>(expr)->body_``.
+    """
+
+    body: Final[Expr]
+    """The wrapped dimension expression (e.g. ir.Var, ir.Mul, ir.Add)."""
+
+    def __init__(self, body: Expr, span: Span) -> None:
+        """Create a DimExpr wrapping a body expression.
+
+        Args:
+            body: The wrapped expression
+            span: Source location
+        """
+
 class Call(Expr):
     """Function call expression."""
 

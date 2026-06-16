@@ -138,6 +138,12 @@ void IRVisitor::VisitExpr_(const TupleGetItemExprPtr& op) {
   VisitExpr(op->tuple_);
 }
 
+void IRVisitor::VisitExpr_(const DimExprPtr& op) {
+  // DimExpr wraps a type-annotation expression with IgnoreField on body_.
+  // Default visitor does NOT walk into the body — codegen and passes that
+  // need the inner expression explicitly unwrap via As<DimExpr>(expr)->body_.
+}
+
 void IRVisitor::VisitBinaryExpr_(const BinaryExprPtr& op) {
   INTERNAL_CHECK_SPAN(op->left_, op->span_) << "BinaryExpr has null left operand";
   INTERNAL_CHECK_SPAN(op->right_, op->span_) << "BinaryExpr has null right operand";

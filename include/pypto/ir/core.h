@@ -83,6 +83,9 @@ enum class ObjectKind {
   BitNot,
   Cast,
 
+  // Composite dimension expression (type-shape annotation wrapper)
+  DimExpr,
+
   // Statement kinds
   AssignStmt,
   IfStmt,
