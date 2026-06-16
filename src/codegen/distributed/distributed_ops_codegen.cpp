@@ -122,25 +122,12 @@ REGISTER_DISTRIBUTED_OP(tensor_slice, "tensor.slice") {
       indices << offset_i;
     } else {
       const std::string shape_i = codegen.GetExprAsCode(shape_tuple->elements_[i]);
-      // If the shape dimension is not a numeric literal, it's a dynamic
-      // dimension (from pl.dynamic("NR")) that must resolve to world_size
-      // at the HOST/orchestrator level.  The ResolveDistributedShapeVars
-      // pass handles this for InCore functions; non-InCore functions
-      // rely on this codegen fallback.
-      const std::string resolved_shape = [&]() -> std::string {
-        if (shape_i.empty()) return shape_i;
-        // Numeric literal (may have leading minus for negative values).
-        if (std::isdigit(shape_i[0]) || (shape_i.size() > 1 && shape_i[0] == '-' && std::isdigit(shape_i[1]))) {
-          return shape_i;
-        }
-        return "world_size";
-      }();
       // Constant-fold ``0 + shape_i`` for readability when offset is 0.
       auto offset_const = As<ConstInt>(offset_tuple->elements_[i]);
       if (offset_const && offset_const->value_ == 0) {
-        indices << "0:" << resolved_shape;
+        indices << "0:" << shape_i;
       } else {
-        indices << offset_i << ":" << offset_i << " + " << resolved_shape;
+        indices << offset_i << ":" << offset_i << " + " << shape_i;
       }
     }
   }
