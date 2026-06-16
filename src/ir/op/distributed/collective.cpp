@@ -36,6 +36,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -220,9 +221,13 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Result: Tile with the same shape as target (NR rows × SIZE cols).
-  // The lowering assembles gathered chunks into a Tile via tile.concat.
-  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
+  // Result: Tile [1, NR*SIZE] — rank-ordered concat of NR chunks, each [1, SIZE].
+  auto nr = target_type->shape_[0];
+  auto size = target_type->shape_[1];
+  auto nr_times_size = MakeMul(nr, size, Span::unknown());
+  auto result_shape = std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()),
+                                           nr_times_size};
+  return std::make_shared<TileType>(result_shape, target_type->dtype_);
 }
 
 }  // namespace
