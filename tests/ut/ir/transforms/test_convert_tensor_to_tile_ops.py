@@ -3463,8 +3463,8 @@ class TestWindowSliceIncoreConversion:
 
     def test_allgather_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.allgather(local_data, target, signal)`` upgrades both
-        ``target`` and ``signal`` params to InOut. ``local_data`` remains In
-        (read-only)."""
+        ``target`` and ``signal`` params to InOut. ``inp`` (source of
+        ``local_data`` via ``pl.load``) stays In (read-only)."""
         SIZE = 16
         nr = 2
 
@@ -3473,10 +3473,11 @@ class TestWindowSliceIncoreConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                local_data: pl.Tensor[[1, SIZE], pl.FP32],
+                inp: pl.Tensor[[1, SIZE], pl.FP32],
                 target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+                local_data = pl.load(inp, [0, 0], [1, SIZE])
                 gathered = pld.tensor.allgather(local_data, target, signal)
                 return gathered
 
@@ -3485,10 +3486,11 @@ class TestWindowSliceIncoreConversion:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                local_data: pl.Tensor[[1, SIZE], pl.FP32],
+                inp: pl.Tensor[[1, SIZE], pl.FP32],
                 target: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
                 signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
+            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+                local_data = pl.load(inp, [0, 0], [1, SIZE])
                 gathered = pld.tensor.allgather(local_data, target, signal)
                 return gathered
 
