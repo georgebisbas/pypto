@@ -61,7 +61,6 @@ class IRVisitor : public IRFunctor<void> {
   void VisitExpr_(const SubmitPtr& op) override;
   void VisitExpr_(const MakeTuplePtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
-  void VisitExpr_(const DimExprPtr& op) override;
 
   // Binary operations - visit left and right children
   void VisitExpr_(const AddPtr& op) override;

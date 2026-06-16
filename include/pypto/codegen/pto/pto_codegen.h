@@ -594,7 +594,6 @@ class PTOCodegen : public CodegenBase {
   void VisitExpr_(const ir::NegPtr& op) override;
   void VisitExpr_(const ir::AbsPtr& op) override;
   void VisitExpr_(const ir::BitNotPtr& op) override;
-  void VisitExpr_(const ir::DimExprPtr& op) override;
 
  private:
   /**

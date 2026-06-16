@@ -364,10 +364,6 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
   IntSet VisitExpr_(const NotPtr& /*op*/) override { return BoolInterval(); }
   IntSet VisitExpr_(const BitNotPtr& /*op*/) override { return IntSet::Everything(); }
 
-  IntSet VisitExpr_(const DimExprPtr& op) override {
-    return this->VisitExpr(op->body_);
-  }
-
   IntSet VisitExpr_(const CastPtr& op) override {
     // Only propagate bounds through widening casts (target >= source bits).
     // Narrowing casts can wrap/truncate, making interval propagation unsound.

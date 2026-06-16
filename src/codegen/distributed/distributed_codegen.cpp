@@ -700,6 +700,14 @@ void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
       return;
     }
   }
+  // If the Var couldn't be resolved through define-use chains, it's likely
+  // a type-shape dynamic dimension in a non-InCore function (HOST orchestrator).
+  // InCore functions should never reach this path — the
+  // ResolveDistributedShapeVars pass replaces type-shape Vars before codegen.
+  if (current_func_ && !ir::IsInCoreType(current_func_->func_type_)) {
+    current_expr_value_ = "world_size";
+    return;
+  }
   current_expr_value_ = SanitizeName(op->name_hint_);
 }
 
@@ -716,27 +724,6 @@ void DistributedCodegen::VisitExpr_(const ir::ConstFloatPtr& op) {
 void DistributedCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ConstBool";
   current_expr_value_ = op->value_ ? "True" : "False";
-}
-
-void DistributedCodegen::VisitExpr_(const ir::DimExprPtr& op) {
-  // DimExpr wraps a type-annotation expression.
-  //
-  // The InferDistributedDimBindings pass resolves DimExpr → nranks Var
-  // in InCore functions before codegen runs.  Any DimExpr that survives
-  // to codegen must be in a non-InCore function (HOST orchestrator,
-  // chip orchestrator, etc.) where the only sensible resolution is the
-  // total number of ranks — the implicit world_size parameter.
-  //
-  // If current_func_ is null (e.g. during op codegen before EmitFunction
-  // sets it), conservatively emit world_size — DimExpr should never
-  // appear in InCore functions by the time codegen runs.
-  if (!current_func_ || !ir::IsInCoreType(current_func_->func_type_)) {
-    current_expr_value_ = "world_size";
-    return;
-  }
-  // InCore: the body should already be the resolved nranks Var from
-  // InferDistributedDimBindings.  Unwrap and visit it.
-  VisitExpr(op->body_);
 }
 
 // ========================================================================

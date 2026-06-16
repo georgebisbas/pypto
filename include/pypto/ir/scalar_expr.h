@@ -310,41 +310,6 @@ DEFINE_UNARY_EXPR_NODE(BitNot, "Bitwise not expression (~operand)")
 DEFINE_UNARY_EXPR_NODE(Cast, "Cast expression (cast operand to dtype)")
 
 #undef DEFINE_UNARY_EXPR_NODE
-
-// ============================================================================
-// DimExpr — compile-time composite dimension expression in type shapes.
-//
-// Encodes the semantic distinction between:
-//   - Compile-time composite:  DimExpr(N * 2) in Tensor[[M, N * 2], FP32]
-//   - Runtime dynamic:         A bare Var in the same position.
-//
-// IgnoreField on body_ prevents all visitors (reflection, structural
-// equality, serialization) and verifiers (SSA scope, use-before-def)
-// from walking into the wrapped expression.  This keeps type-annotation
-// variables out of runtime SSA scope checks.
-//
-// Passes needing the expression unwrap via As<DimExpr>(expr)->body_.
-// ============================================================================
-
-class DimExpr : public Expr {
- public:
-  /// The wrapped dimension expression (e.g. ir.Mul, ir.Add, or bare ir.Var).
-  /// Marked IgnoreField so visitors skip it during tree walks.
-  ExprPtr body_;
-
-  DimExpr(ExprPtr body, Span span) : Expr(std::move(span), body->GetType()), body_(std::move(body)) {}
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DimExpr; }
-  [[nodiscard]] std::string TypeName() const override { return "DimExpr"; }
-
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(Expr::GetFieldDescriptors(),
-                          std::make_tuple(reflection::IgnoreField(&DimExpr::body_, "body")));
-  }
-};
-
-using DimExprPtr = std::shared_ptr<const DimExpr>;
-
 // ========== Helper Functions for Operator Construction ==========
 
 /**
@@ -449,10 +414,6 @@ inline BinaryOperands PromoteIntBinaryOperands(const ExprPtr& left, const ExprPt
 }
 
 // ========== Binary Operator Construction Functions ==========
-
-inline ExprPtr MakeDimExpr(const ExprPtr& body, const Span& span = Span::unknown()) {
-  return std::make_shared<DimExpr>(body, span);
-}
 
 inline ExprPtr MakeCast(const ExprPtr& operand, DataType dtype, const Span& span = Span::unknown()) {
   return std::make_shared<Cast>(operand, dtype, span);

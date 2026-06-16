@@ -826,16 +826,6 @@ void BindIR(nb::module_& m) {
   BindFields<ConstBool>(constbool_class);
   constbool_class.def_prop_ro("dtype", &ConstBool::dtype, "Data type of the expression (always BOOL)");
 
-  // DimExpr - composite dimension expression in type shapes
-  auto dimexpr_class = nb::class_<DimExpr, Expr>(ir, "DimExpr",
-                                                  "Composite dimension expression in type shapes.\n\n"
-                                                  "Wraps a scalar expression (e.g. ir.Mul, ir.Add, or bare "
-                                                  "ir.Var) so that visitors and verifiers skip into it.\n"
-                                                  "Passes unwrap via As<DimExpr>(expr)->body_.");
-  dimexpr_class.def(nb::init<ExprPtr, const Span&>(), nb::arg("body"), nb::arg("span"),
-                    "Create a DimExpr wrapping a body expression");
-  BindFields<DimExpr>(dimexpr_class);
-
   // Call - const shared_ptr
   auto call_class = nb::class_<Call, Expr>(ir, "Call", "Function call expression");
 

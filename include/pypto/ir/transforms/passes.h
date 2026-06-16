@@ -504,21 +504,22 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
- * @brief Infer distributed dimension bindings from context.
+ * @brief Resolve dynamic shape Vars in distributed functions (pre-SSA).
  *
- * For each distributed function (one with DistributedTensor params), detects
- * the nranks variable from ``pld.nranks(ctx)`` and replaces every DimExpr in
- * type shapes with that Var.  This resolves ``pl.dynamic("R")`` placeholders
- * to the actual rank count at chip level — no name matching is done.
+ * Runs before ConvertToSSA.  For each InCore function with DistributedTensor
+ * params, detects the nranks variable from ``pld.nranks(ctx)`` and replaces
+ * every type-shape Var that is NOT defined in the function body with that
+ * nranks Var.  This is structural — no name matching is done.
  *
  * Requirements:
- * - Input IR must be in SSA form.
- * - Runs early, before ConvertTensorToTileOps.
+ * - Runs pre-SSA (insert before ConvertToSSA in the pipeline).
+ * - Only processes InCore functions with DistributedTensor params.
  *
- * This pass eliminates all DimExpr nodes in distributed functions.  Any
- * DimExpr remaining after this pass in a non-distributed function is an error.
+ * Type-shape-only Vars (from ``pl.dynamic("NR")``) are replaced with the
+ * body-defined nranks Var BEFORE SSA conversion, so they never enter SSA
+ * scope.  Static tile shapes (always ConstInt) are unaffected.
  */
-Pass InferDistributedDimBindings();
+Pass ResolveDistributedShapeVars();
 
 /**
  * @brief Lower ``tile.load(transpose=True)`` to a body-local DN view (RFC #1300 P6)

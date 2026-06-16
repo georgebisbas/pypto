@@ -537,13 +537,6 @@ ExprPtr IRMutator::VisitExpr_(const TupleGetItemExprPtr& op) {
   return op;
 }
 
-ExprPtr IRMutator::VisitExpr_(const DimExprPtr& op) {
-  // DimExpr wraps a type-annotation expression with IgnoreField on body_.
-  // Default mutator returns as-is — passes that need to rewrite the body
-  // explicitly unwrap and reconstruct via As<DimExpr>(expr)->body_.
-  return op;
-}
-
 ExprPtr IRMutator::VisitBinaryExpr_(const BinaryExprPtr& op) {
   INTERNAL_CHECK_SPAN(op->left_, op->span_) << "BinaryExpr has null left operand";
   INTERNAL_CHECK_SPAN(op->right_, op->span_) << "BinaryExpr has null right operand";

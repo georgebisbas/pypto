@@ -81,7 +81,6 @@ DEFINE_KIND_TRAIT(Neg, ObjectKind::Neg)
 DEFINE_KIND_TRAIT(Not, ObjectKind::Not)
 DEFINE_KIND_TRAIT(BitNot, ObjectKind::BitNot)
 DEFINE_KIND_TRAIT(Cast, ObjectKind::Cast)
-DEFINE_KIND_TRAIT(DimExpr, ObjectKind::DimExpr)
 
 // Statement types
 DEFINE_KIND_TRAIT(AssignStmt, ObjectKind::AssignStmt)
@@ -183,9 +182,8 @@ struct KindTrait<Expr> {
       ObjectKind::Xor, ObjectKind::BitAnd, ObjectKind::BitOr, ObjectKind::BitXor, ObjectKind::BitShiftLeft,
       ObjectKind::BitShiftRight,
       // Unary expressions (5 kinds)
-      ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast,
-      ObjectKind::DimExpr};
-  static constexpr size_t count = 39;
+      ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast};
+  static constexpr size_t count = 38;
 };
 
 // BinaryExpr base class - matches any binary expression kind

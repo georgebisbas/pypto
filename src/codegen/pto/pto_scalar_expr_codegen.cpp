@@ -185,11 +185,6 @@ void PTOCodegen::VisitExpr_(const ir::ConstBoolPtr& op) {
   fs_.current_expr_value = result;
 }
 
-void PTOCodegen::VisitExpr_(const ir::DimExprPtr& op) {
-  // DimExpr wraps a type-annotation expression — unwrap to the body.
-  VisitExpr(op->body_);
-}
-
 // ========================================================================
 // Expression visitors - Binary arithmetic
 // ========================================================================

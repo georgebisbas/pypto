@@ -357,11 +357,6 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   Bound VisitExpr_(const NotPtr& /*op*/) override { return {0, 1}; }
   Bound VisitExpr_(const BitNotPtr& /*op*/) override { return Everything(); }
 
-  Bound VisitExpr_(const DimExprPtr& op) override {
-    // DimExpr wraps a type-annotation expression — unwrap for analysis.
-    return this->VisitExpr(op->body_);
-  }
-
   Bound VisitExpr_(const CastPtr& op) override {
     auto a = VisitExpr(op->operand_);
     // For Cast to integer type, intersect with the target type's representable range

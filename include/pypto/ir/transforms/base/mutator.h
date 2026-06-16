@@ -63,7 +63,6 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   ExprPtr VisitExpr_(const SubmitPtr& op) override;
   ExprPtr VisitExpr_(const MakeTuplePtr& op) override;
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override;
-  ExprPtr VisitExpr_(const DimExprPtr& op) override;
 
   // Binary operations - reconstruct with mutated children
   ExprPtr VisitExpr_(const AddPtr& op) override;
