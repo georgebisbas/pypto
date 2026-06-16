@@ -726,7 +726,11 @@ void DistributedCodegen::VisitExpr_(const ir::DimExprPtr& op) {
   // to codegen must be in a non-InCore function (HOST orchestrator,
   // chip orchestrator, etc.) where the only sensible resolution is the
   // total number of ranks — the implicit world_size parameter.
-  if (current_func_ && !ir::IsInCoreType(current_func_->func_type_)) {
+  //
+  // If current_func_ is null (e.g. during op codegen before EmitFunction
+  // sets it), conservatively emit world_size — DimExpr should never
+  // appear in InCore functions by the time codegen runs.
+  if (!current_func_ || !ir::IsInCoreType(current_func_->func_type_)) {
     current_expr_value_ = "world_size";
     return;
   }

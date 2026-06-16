@@ -770,8 +770,12 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const CastPtr& op) {
 }
 
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const DimExprPtr& op) {
-  // DimExpr wraps a type-annotation expression — unwrap for canonicalization.
-  return VisitExpr(op->body_);
+  // DimExpr is a semantic wrapper for type-annotation expressions.
+  // Simplify the inner expression but preserve the DimExpr wrapping
+  // so downstream passes and codegen can still recognise it.
+  auto new_body = VisitExpr(op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return MakeDimExpr(new_body, op->span_);
 }
 
 // ============================================================================
