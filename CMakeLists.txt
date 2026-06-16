@@ -164,6 +164,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
+    src/ir/transforms/resolve_distributed_shape_vars.cpp
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/lower_composite_ops_pass.cpp
