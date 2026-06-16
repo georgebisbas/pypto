@@ -408,31 +408,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Collect: (a) AssignStmts producing tensor.assemble aliases, and (b)
       // nested ForStmts (so we can map their iter_args -> their return_vars,
       // which are how a parent's carry "comes out of" an inner loop).
-      class AliasingNodeCollector : public IRVisitor {
-       public:
-        std::vector<AssignStmtPtr> assigns_;
-        std::vector<ForStmtPtr> nested_fors_;
-        void VisitStmt_(const AssignStmtPtr& a) override {
-          assigns_.push_back(a);
-          IRVisitor::VisitStmt_(a);
-        }
-        void VisitStmt_(const ForStmtPtr& f) override {
-          nested_fors_.push_back(f);
-          IRVisitor::VisitStmt_(f);
-        }
-      };
-      AliasingNodeCollector collector;
-      collector.VisitStmt(for_stmt->body_);
+      auto body_aliases = CollectBodyAliases(for_stmt->body_);
       // Index assignments by produced var so rule (d) can climb tuple chains.
       std::unordered_map<const Var*, AssignStmtPtr> var_to_assign;
-      for (const auto& a : collector.assigns_) {
+      for (const auto& a : body_aliases.assigns) {
         var_to_assign[a->var_.get()] = a;
       }
 
       bool changed = true;
       while (changed) {
         changed = false;
-        for (const auto& assign : collector.assigns_) {
+        for (const auto& assign : body_aliases.assigns) {
           // (d) TupleGetItemExpr: climb to the tuple-producing call and resolve
           // the corresponding output arg. Multi-output InCore kernels return
           // tuples; each `var = ret_tuple[i]` extract should alias the i-th
@@ -536,7 +522,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // a SEQ x PARALLEL phase fence). The outer carry must be a distinct
         // backing array and the outer yield must emit an explicit array-array
         // copy back into it (see VisitStmt_(YieldStmtPtr)).
-        for (const auto& nf : collector.nested_fors_) {
+        for (const auto& nf : body_aliases.nested_fors) {
           for (size_t k = 0; k < nf->iter_args_.size(); ++k) {
             if (As<ArrayType>(nf->iter_args_[k]->GetType())) continue;
             auto init_var = AsVarLike(nf->iter_args_[k]->initValue_);
