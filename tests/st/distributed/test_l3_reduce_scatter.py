@@ -70,7 +70,7 @@ class ReduceScatterN:
         self,
         inp: pl.Tensor[[NR, SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
         """Stage-in → barrier → accumulate peer chunks → store my chunk."""
@@ -78,9 +78,11 @@ class ReduceScatterN:
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
 
-        # Phase 1: stage-in — copy my column into scratch.
-        local = pl.load(inp, [my_rank, 0], [1, SIZE])  # Tile[1, SIZE] ← static
-        scratch = pl.store(local, [0, 0], scratch)
+        # Phase 1: stage-in — copy all columns to scratch so every peer
+        # can read the specific column it needs (my_rank) for reduction.
+        for c in pl.range(nranks):
+            chunk = pl.load(inp, [c, 0], [1, SIZE])  # Tile[1, SIZE] ← static
+            pl.store(chunk, [c, 0], scratch)
 
         # Phase 2: barrier — notify every peer, wait on every peer slot.
         for peer in pl.range(nranks):
@@ -101,11 +103,11 @@ class ReduceScatterN:
                     cmp=pld.WaitCmp.Ge,
                 )
 
-        # Phase 3: accumulate — load my slice, add every peer's slice via remote_load.
-        acc = pl.load(scratch, [0, 0], [1, SIZE])
+        # Phase 3: reduce — each rank accumulates column my_rank from every peer.
+        acc = pl.load(scratch, [my_rank, 0], [1, SIZE])
         for peer in pl.range(nranks):
             if peer != my_rank:
-                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[my_rank, 0], shape=[1, SIZE])
                 acc = pl.add(acc, recv)
 
         # Phase 4: stage-out — reduced accumulator → local output.
@@ -116,7 +118,7 @@ class ReduceScatterN:
         self,
         inp: pl.Tensor[[NR, SIZE], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
         """Per-device orchestration wrapper around ``reduce_step``."""
@@ -129,11 +131,11 @@ class ReduceScatterN:
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
         """Launch one chip orchestration per rank with shared window buffers."""
-        scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1×SIZE × FP32
+        scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)  # NR×SIZE × FP32
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR×1 × INT32
 
         for r in pl.range(pld.world_size()):
-            scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
+            scratch = pld.window(scratch_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
             self.chip_orch(
                 inputs[r],
