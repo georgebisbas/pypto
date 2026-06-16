@@ -7,19 +7,18 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: N-rank broadcast — 2D ``[NR, SIZE]`` layout.
+"""L3 distributed st: N-rank broadcast — 2D ``[N, SIZE]`` layout.
 
-Uses the **dynamic loop + static tile** pattern for rank-count polymorphism:
+Uses the **dynamic loop + static tile** pattern:
 
 - **Dynamic loops**: ``pl.range(nranks)`` where ``nranks`` comes from
   ``pld.nranks(ctx)`` at runtime — adapts to any rank count.
 - **Static tiles**: every ``pl.load`` / ``pl.store`` / ``pld.tile.remote_load``
   uses a fixed shape (``[1, SIZE]``) — tiles are always compile-time constants
   and never depend on the number of ranks.
-- **Type annotations**: ``NR = pl.dynamic("NR")`` is a bare ``Var`` in
-  parameter type shapes (e.g. ``Tensor[[NR, SIZE]]``), never a composite
-  expression (``NR * SIZE``).  The same compiled binary works for P=2 and P=4
-  because NR is recovered from the input tensor shape at runtime.
+- **Type annotations**: ``n_ranks`` is a concrete Python ``int`` (``ConstInt``)
+  passed at program-construction time — no ``pl.dynamic()`` is used.
+  Separate compilation per rank count (P=2 / P=4).
 
 * **Phase 1 (stage-in)** — root writes its data into scratch.
 * **Phase 2 (barrier)** — notify-all / wait-all (N-rank mesh).
@@ -27,7 +26,7 @@ Uses the **dynamic loop + static tile** pattern for rank-count polymorphism:
 
 Golden: every rank's output equals the root's input.
 
-ST coverage: P=2 and P=4. One program body for both.
+ST coverage: P=2 and P=4.
 """
 
 # pyright: reportUndefinedVariable=false
@@ -43,14 +42,13 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64  # elements per rank
 ROOT_RANK = 0
-NR = pl.dynamic("NR")
 
 
 def _expected_broadcast(inputs: torch.Tensor, root: int = ROOT_RANK) -> torch.Tensor:
     """Every rank gets the root's input.
 
-    inputs shape: [NR, NR, SIZE]
-    output shape: [NR, NR, SIZE] — all ranks have root's data
+    inputs shape: [N, N, SIZE]
+    output shape: [N, N, SIZE] — all ranks have root's data
     """
     root_data = inputs[root].clone()
     return torch.stack([root_data] * inputs.shape[0])
@@ -64,94 +62,103 @@ def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
     return data
 
 
-@pl.program
-class BroadcastDynamic:
-    """Dynamic-rank broadcast with 2D ``[NR, SIZE]`` layout."""
+def _build_broadcast_program(n_ranks: int):
+    """Build the N-rank broadcast program.
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def bcast_step(
-        self,
-        inp: pl.Tensor[[NR, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[NR, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
-        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        root: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[NR, SIZE], pl.FP32]:
-        """Stage-in (root only) → barrier → remote_load root → store."""
-        ctx = pld.get_comm_ctx(scratch)
-        my_rank = pld.rank(ctx)
-        nranks = pld.nranks(ctx)
+    *n_ranks* is a compile-time constant (Python ``int`` → ``ir.ConstInt``)
+    used in type annotations.  The same body is re-compiled for P=2 and P=4.
+    Dynamic loops (``pl.range(nranks)``) and static tiles (``[1, SIZE]``)
+    keep every ``pl.load`` / ``pl.store`` / ``pld.tile.remote_load`` rank-agnostic.
+    """
 
-        # Phase 1: stage-in — only root writes its chunk into scratch.
-        if my_rank == root:
+    @pl.program
+    class BroadcastN:
+        @pl.function(type=pl.FunctionType.InCore)
+        def bcast_step(
+            self,
+            inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+            scratch: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+            root: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+            """Stage-in (root only) → barrier → remote_load root → store."""
+            ctx = pld.get_comm_ctx(scratch)
+            my_rank = pld.rank(ctx)
+            nranks = pld.nranks(ctx)
+
+            # Phase 1: stage-in — only root writes its chunk into scratch.
+            if my_rank == root:
+                for c in pl.range(nranks):
+                    chunk = pl.load(inp, [c, 0], [1, SIZE])  # Tile[1, SIZE] ← static
+                    pl.store(chunk, [c, 0], scratch)
+
+            # Phase 2: barrier — notify every peer, wait on every peer slot.
+            for peer in pl.range(nranks):
+                if peer != my_rank:
+                    pld.system.notify(
+                        signal,
+                        peer=peer,
+                        offsets=[my_rank, 0],
+                        value=1,
+                        op=pld.NotifyOp.AtomicAdd,
+                    )
+            for src in pl.range(nranks):
+                if src != my_rank:
+                    pld.system.wait(
+                        signal=signal,
+                        offsets=[src, 0],
+                        expected=1,
+                        cmp=pld.WaitCmp.Ge,
+                    )
+
+            # Phase 3: broadcast — each rank reads all chunks from root's scratch.
             for c in pl.range(nranks):
-                chunk = pl.load(inp, [c, 0], [1, SIZE])  # Tile[1, SIZE] ← static
-                pl.store(chunk, [c, 0], scratch)
+                recv = pld.tile.remote_load(scratch, peer=root, offsets=[c, 0], shape=[1, SIZE])
+                pl.store(recv, [c, 0], out)  # Tile[1, SIZE] ← static
 
-        # Phase 2: barrier — notify every peer, wait on every peer slot.
-        for peer in pl.range(nranks):
-            if peer != my_rank:
-                pld.system.notify(
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[n_ranks, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[n_ranks, SIZE], pl.FP32]],
+            scratch: pl.InOut[pld.DistributedTensor[[n_ranks, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[n_ranks, 1], pl.INT32]],
+            root: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[n_ranks, SIZE], pl.FP32]:
+            """Per-device orchestration wrapper around ``bcast_step``."""
+            return self.bcast_step(inp, out, scratch, signal, root)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[n_ranks, n_ranks, SIZE], pl.FP32]:
+            """Launch one chip orchestration per rank with shared window buffers."""
+            scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+
+            for r in pl.range(pld.world_size()):
+                scratch = pld.window(scratch_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+                self.chip_orch(
+                    inputs[r],
+                    outputs[r],
+                    scratch,
                     signal,
-                    peer=peer,
-                    offsets=[my_rank, 0],
-                    value=1,
-                    op=pld.NotifyOp.AtomicAdd,
+                    ROOT_RANK,
+                    device=r,
                 )
-        for src in pl.range(nranks):
-            if src != my_rank:
-                pld.system.wait(
-                    signal=signal,
-                    offsets=[src, 0],
-                    expected=1,
-                    cmp=pld.WaitCmp.Ge,
-                )
+            return outputs
 
-        # Phase 3: broadcast — each rank reads all chunks from root's scratch.
-        for c in pl.range(nranks):
-            recv = pld.tile.remote_load(scratch, peer=root, offsets=[c, 0], shape=[1, SIZE])
-            pl.store(recv, [c, 0], out)  # Tile[1, SIZE] ← static
-
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def chip_orch(
-        self,
-        inp: pl.Tensor[[NR, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[NR, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[NR, SIZE], pl.FP32]],
-        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        root: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[NR, SIZE], pl.FP32]:
-        """Per-device orchestration wrapper around ``bcast_step``."""
-        return self.bcast_step(inp, out, scratch, signal, root)
-
-    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-    def host_orch(
-        self,
-        inputs: pl.Tensor[[NR, NR, SIZE], pl.FP32],
-        outputs: pl.Out[pl.Tensor[[NR, NR, SIZE], pl.FP32]],
-    ) -> pl.Tensor[[NR, NR, SIZE], pl.FP32]:
-        """Launch one chip orchestration per rank with shared window buffers."""
-        scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
-
-        for r in pl.range(pld.world_size()):
-            scratch = pld.window(scratch_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-            self.chip_orch(
-                inputs[r],
-                outputs[r],
-                scratch,
-                signal,
-                ROOT_RANK,
-                device=r,
-            )
-        return outputs
+    return BroadcastN
 
 
 class TestL3Broadcast:
-    """L3 distributed runtime: N-rank broadcast (2D layout, dynamic NR)."""
+    """L3 distributed runtime: N-rank broadcast (2D layout)."""
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_broadcast(self, test_config, device_ids, n_ranks):
@@ -160,7 +167,7 @@ class TestL3Broadcast:
             pytest.skip(f"broadcast P={n_ranks} needs {n_ranks} devices")
 
         compiled = ir.compile(
-            BroadcastDynamic,
+            _build_broadcast_program(n_ranks),
             platform=test_config.platform,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
