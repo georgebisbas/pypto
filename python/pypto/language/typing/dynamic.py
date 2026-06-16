@@ -33,7 +33,7 @@ class DynVar(Scalar):
             ...
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, is_nranks_dim: bool = False) -> None:
         if not name.isidentifier():
             raise ValueError(f"DynVar name must be a valid identifier, got {name!r}")
         self.name = name
@@ -46,6 +46,10 @@ class DynVar(Scalar):
         self.dtype = DataType.INDEX
         self.expr = None
         self._annotation_only = False
+        # True if this DynVar was created by pl.nranks_dim (not pl.dynamic).
+        # Sets is_nranks_dim_ = true on the ir.Var; consumed by the
+        # ResolveDistributedShapeVars pass and distributed codegen.
+        self._is_nranks_dim = is_nranks_dim
 
     def unwrap(self) -> Expr:
         """Return the underlying ir.Var, creating it eagerly if needed.
@@ -54,7 +58,7 @@ class DynVar(Scalar):
         Scalar-consuming paths without requiring prior TypeResolver resolution.
         """
         if self._ir_var is None:
-            self._ir_var = Var(self.name, ScalarType(DataType.INDEX), Span.unknown())
+            self._ir_var = Var(self.name, ScalarType(DataType.INDEX), Span.unknown(), self._is_nranks_dim)
         # Keep Scalar.expr in sync so direct .expr access returns a valid value.
         self.expr = self._ir_var
         return self._ir_var
@@ -75,4 +79,23 @@ def dynamic(name: str) -> DynVar:
     return DynVar(name)  # type: ignore[return-value]  # metaclass __call__ typed as -> Scalar
 
 
-__all__ = ["DynVar", "dynamic"]
+nranks_dim: DynVar = DynVar("NR", is_nranks_dim=True)
+"""Dynamic dimension representing the distributed rank count (NR).
+
+This is a first-class distributed-rank-count dimension, distinct from the
+general-purpose ``pl.dynamic()``.  The ``ResolveDistributedShapeVars`` pass
+resolves it to the ``nranks`` Var from ``pld.nranks(ctx)`` before tile
+lowering, so tile shapes stay static and the same binary works for any
+world size — the rank count only affects loop bounds, never tile shapes.
+
+Usage::
+
+    NR = pl.nranks_dim  # no parentheses — it's a singleton
+
+    @pl.function
+    def kernel(self, signal: pld.DistributedTensor[[NR, 1], pl.INT32]) -> ...:
+        ...
+"""
+
+
+__all__ = ["DynVar", "dynamic", "nranks_dim"]

@@ -123,6 +123,11 @@ class PassManager:
             ("InlineFunctions", lambda: passes.inline_functions()),
             ("UnrollLoops", lambda: passes.unroll_loops()),
             ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
+            # Resolve type-shape-only Vars (from pl.dynamic("NR")) in distributed
+            # functions to the nranks Var from pld.nranks(ctx).  Must run BEFORE
+            # ConvertToSSA so type-annotation Vars never enter SSA scope.
+            # Structural — no name matching.
+            ("ResolveDistributedShapeVars", lambda: passes.resolve_distributed_shape_vars()),
             ("ConvertToSSA", lambda: passes.convert_to_ssa()),
             # Propagate scalar constants (e.g. `CHUNK_K: Scalar[INDEX] = 512`)
             # into downstream expression and type-annotation uses before tile

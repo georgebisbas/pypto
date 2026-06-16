@@ -504,6 +504,25 @@ Pass CanonicalizeTileSlice();
 Pass InferTileMemorySpace();
 
 /**
+ * @brief Resolve pl.nranks_dim shape Vars in distributed functions (pre-SSA).
+ *
+ * Runs before ConvertToSSA.  For each InCore function with DistributedTensor
+ * params, finds the nranks variable from ``pld.nranks(ctx)`` and replaces
+ * every type-shape Var whose ``is_nranks_dim_`` flag is true with that
+ * nranks Var.
+ *
+ * nranks_dim Vars are created by ``pl.nranks_dim`` (a first-class DSL
+ * primitive distinct from ``pl.dynamic()``) and carry ``is_nranks_dim_ = true``
+ * on the ``ir::Var`` node.  The replacement runs BEFORE SSA so these Vars
+ * never enter SSA scope.  Static tile shapes (always ConstInt) are unaffected.
+ *
+ * Requirements:
+ * - Runs pre-SSA (insert before ConvertToSSA in the pipeline).
+ * - Only processes InCore functions with DistributedTensor params.
+ */
+Pass ResolveDistributedShapeVars();
+
+/**
  * @brief Lower ``tile.load(transpose=True)`` to a body-local DN view (RFC #1300 P6)
  *
  * For each InCore function, detects ``tile.load(..., transpose=True)`` whose source

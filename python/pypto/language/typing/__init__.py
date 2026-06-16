@@ -20,7 +20,7 @@ from typing import TypeAlias
 
 from pypto.language.typing.array import Array
 from pypto.language.typing.direction import InOut, Out
-from pypto.language.typing.dynamic import DynVar, dynamic
+from pypto.language.typing.dynamic import DynVar, dynamic, nranks_dim
 from pypto.language.typing.memref import MemRef
 from pypto.language.typing.ptr import Ptr
 from pypto.language.typing.scalar import Scalar
@@ -45,4 +45,5 @@ __all__ = [
     "Tile",
     "Tuple",
     "dynamic",
+    "nranks_dim",
 ]

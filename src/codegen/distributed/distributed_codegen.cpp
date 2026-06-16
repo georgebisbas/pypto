@@ -700,7 +700,19 @@ void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
       return;
     }
   }
-  current_expr_value_ = SanitizeName(op->name_hint_);
+
+  // Vars created by pl.nranks_dim carry is_nranks_dim_ = true.  In
+  // non-InCore contexts (HOST orchestrator, chip orchestrator) this
+  // resolves to the world_size kwarg.  InCore functions should never
+  // reach this path — the ResolveDistributedShapeVars pass replaces
+  // these Vars before codegen.
+  if (op->is_nranks_dim_) {
+    current_expr_value_ = "world_size";
+    return;
+  }
+
+  const std::string name = SanitizeName(op->name_hint_);
+  current_expr_value_ = name;
 }
 
 void DistributedCodegen::VisitExpr_(const ir::ConstIntPtr& op) {

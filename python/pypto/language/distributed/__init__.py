@@ -35,6 +35,7 @@ plus 2-segment unified-dispatch short form, just like ``pl``):
   ``pypto.pypto_core.ir``.
 """
 
+from pypto.language.typing.dynamic import nranks_dim
 from pypto.pypto_core.ir import AtomicType, NotifyOp, ReduceOp, WaitCmp
 
 from .op import (
@@ -62,6 +63,7 @@ __all__ = [
     "alloc_window_buffer",
     "get_comm_ctx",
     "nranks",
+    "nranks_dim",
     "rank",
     "remote_load",
     "remote_store",

@@ -81,6 +81,30 @@ def dynamic_kernel(
     ...
 ```
 
+#### 分布式 rank 数量
+
+分布式程序中使用 `pl.nranks_dim` 表示 rank 数量。它是一个一等公民的
+分布式维度，与 `pl.dynamic()` 不同，它会在 tile lowering 之前被解析为
+`pld.nranks(ctx)`：
+
+```python
+NR = pl.nranks_dim  # 单例 — 无需括号
+
+@pl.function(type=pl.FunctionType.InCore)
+def allreduce_step(
+    self,
+    data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+) -> ...:
+    ctx = pld.get_comm_ctx(data)
+    nranks = pld.nranks(ctx)
+    for peer in pl.range(nranks):
+        ...
+```
+
+`pl.nranks_dim` 只能出现在类型注解中 — 不得用于 tile 形状或偏移量。
+编译器会在 pass 阶段检查并给出明确的错误提示。
+
 ### 参数方向（Parameter Directions）
 
 默认情况下，参数为只读输入。使用包装器声明输出参数：

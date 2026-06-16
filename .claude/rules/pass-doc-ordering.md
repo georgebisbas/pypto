@@ -16,6 +16,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 01 | `01-inline_functions.md` | 1st pass |
 | 02 | `02-unroll_loops.md` | 2nd pass |
 | 03 | `03-ctrl_flow_transform.md` | 3rd pass |
+| — | `resolve_distributed_shape_vars.md` | Runs after `CtrlFlowTransform`, before `ConvertToSSA` (distributed only — see `docs/en/dev/passes/resolve_distributed_shape_vars.md`). **TODO: assign slot 04, renumber 04–39 → 05–40.** |
 | 04 | `04-convert_to_ssa.md` | 4th pass |
 | 05 | `05-simplify.md` | 5th pass (also runs as the last pass of the tile pipeline) |
 | 06 | `06-flatten_call_expr.md` | 6th pass |

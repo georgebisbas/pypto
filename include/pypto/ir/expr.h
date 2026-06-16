@@ -227,6 +227,13 @@ class Var : public Expr {
         name_hint_(std::move(name_hint)),
         unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
 
+  /// Create a Var with is_nranks_dim_ set (used by pl.nranks_dim).
+  Var(std::string name_hint, TypePtr type, Span span, bool is_nranks_dim)
+      : Expr(std::move(span), std::move(type)),
+        name_hint_(std::move(name_hint)),
+        is_nranks_dim_(is_nranks_dim),
+        unique_id_(next_unique_id_.fetch_add(1, std::memory_order_relaxed)) {}
+
   /**
    * @brief Get the unique identity of this variable
    *
@@ -236,6 +243,10 @@ class Var : public Expr {
    * @return Process-unique identifier for this variable instance
    */
   [[nodiscard]] uint64_t UniqueId() const { return unique_id_; }
+
+  /// True if this Var was created by pl.nranks_dim — resolved by
+  /// ResolveDistributedShapeVars to pld.nranks(ctx).
+  const bool is_nranks_dim_ = false;
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Var; }
   [[nodiscard]] std::string TypeName() const override { return "Var"; }

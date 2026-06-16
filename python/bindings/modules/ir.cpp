@@ -731,10 +731,18 @@ void BindIR(nb::module_& m) {
       nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name_hint"), nb::arg("type"),
       nb::arg("span"),
       "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
+  var_class.def(nb::init<const std::string&, const TypePtr&, const Span&, bool>(), nb::arg("name_hint"),
+                nb::arg("type"), nb::arg("span"), nb::arg("is_nranks_dim") = false,
+                "Create a variable reference with an optional is_nranks_dim flag (used by pl.nranks_dim).");
   var_class.def_prop_ro(
       "unique_id", &Var::UniqueId,
       "Process-unique identifier for this Var instance. Stable for the lifetime of the process; "
       "use as a dictionary key to deduplicate Var wrappers that refer to the same underlying object.");
+  // Read-only access so the pass and codegen can inspect the flag.
+  // Set at construction via the 4-arg init overload — never mutated.
+  var_class.def_prop_ro(
+      "is_nranks_dim", [](const Var& v) { return v.is_nranks_dim_; },
+      "True if this Var was created by pl.nranks_dim.");
   BindFields<Var>(var_class);
 
   // IterArg - const shared_ptr

@@ -206,7 +206,20 @@ from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import ScopeMode, manual_scope, scope, spmd_submit, submit
-from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import (
+    Array,
+    DynVar,
+    InOut,
+    IntLike,
+    MemRef,
+    Out,
+    Scalar,
+    Tensor,
+    Tile,
+    Tuple,
+    dynamic,
+    nranks_dim,
+)
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
@@ -268,6 +281,7 @@ __all__ = [
     "IntLike",
     "Out",
     "dynamic",
+    "nranks_dim",
     "const",
     "range",
     "parallel",

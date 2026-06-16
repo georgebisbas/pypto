@@ -829,7 +829,9 @@ class TypeResolver:
             if value._ir_var is None:
                 name = value.name
                 if name not in self._dyn_var_cache:
-                    self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), span)
+                    self._dyn_var_cache[name] = ir.Var(
+                        name, ir.ScalarType(DataType.INDEX), span, value._is_nranks_dim
+                    )
                 value._ir_var = self._dyn_var_cache[name]
             elif value.name not in self._dyn_var_cache:
                 self._dyn_var_cache[value.name] = value._ir_var

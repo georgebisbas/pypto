@@ -95,6 +95,30 @@ def dynamic_kernel(
     ...
 ```
 
+#### Distributed rank count
+
+For distributed programs, use `pl.nranks_dim` to represent the number of ranks.
+It is a first-class distributed-rank-count dimension — distinct from
+`pl.dynamic()` and resolved to `pld.nranks(ctx)` before tile lowering:
+
+```python
+NR = pl.nranks_dim  # singleton — no parentheses
+
+@pl.function(type=pl.FunctionType.InCore)
+def allreduce_step(
+    self,
+    data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+) -> ...:
+    ctx = pld.get_comm_ctx(data)
+    nranks = pld.nranks(ctx)
+    for peer in pl.range(nranks):
+        ...
+```
+
+`pl.nranks_dim` must only appear in type annotations — never in tile shapes
+or offsets.  The compiler rejects misuse with a clear error at pass time.
+
 ### Parameter Directions
 
 By default, parameters are read-only inputs. Use wrappers for output parameters:

@@ -26,8 +26,9 @@ Mirrors the 4-phase pattern of the runtime example's
 
 Golden: ``outputs[r] == sum(inputs[*])`` for every rank ``r``.
 
-Rank count uses ``NR = pl.dynamic("NR")`` in host tensor shapes; runtime
-``inputs.shape[0]`` must match ``len(device_ids)`` / ``pld.world_size()``.
+Rank count uses ``NR = pl.nranks_dim`` — a first-class distributed-rank-count
+dimension.  Runtime ``inputs.shape[0]`` must match ``len(device_ids)`` /
+``pld.world_size()``.
 
 ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four
 devices, e.g. ``--device=0,1,2,3`` or ``--device=0-3``). One program body
@@ -46,7 +47,7 @@ from pypto import ir
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 256  # matches ALLREDUCE_COUNT in runtime allreduce_kernel.cpp
-NR = pl.dynamic("NR")
+NR = pl.nranks_dim  # first-class distributed rank-count dimension
 
 
 def _expected_allreduce(inputs: torch.Tensor) -> torch.Tensor:
