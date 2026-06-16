@@ -700,15 +700,20 @@ void DistributedCodegen::VisitExpr_(const ir::VarPtr& op) {
       return;
     }
   }
-  // If the Var couldn't be resolved through define-use chains, it's likely
-  // a type-shape dynamic dimension in a non-InCore function (HOST orchestrator).
+
+  // If the Var name is not in declared_vars_ or host_orch_var_defs_, it's
+  // a type-shape dynamic dimension (from pl.dynamic("NR")) that was never
+  // resolved to a body variable.  In all non-InCore contexts (HOST
+  // orchestrator, chip orchestrator) this must resolve to world_size.
   // InCore functions should never reach this path — the
   // ResolveDistributedShapeVars pass replaces type-shape Vars before codegen.
-  if (current_func_ && !ir::IsInCoreType(current_func_->func_type_)) {
+  const std::string name = SanitizeName(op->name_hint_);
+  if (declared_vars_.find(name) == declared_vars_.end() &&
+      host_orch_var_defs_.find(op.get()) == host_orch_var_defs_.end()) {
     current_expr_value_ = "world_size";
     return;
   }
-  current_expr_value_ = SanitizeName(op->name_hint_);
+  current_expr_value_ = name;
 }
 
 void DistributedCodegen::VisitExpr_(const ir::ConstIntPtr& op) {
