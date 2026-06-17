@@ -771,16 +771,11 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
   };
 
-  // My-row offset [my_rank, 0] — pld.system.rank is a per-device compile-time constant.
-  auto my_row_offsets = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{my_rank, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+  // Helper: window row offset [rank_expr, 0] — same shape as signal offsets.
+  auto make_row_offsets = make_signal_offsets;
 
-  // Fixed per-peer offsets — compile-time constants.
-  auto off0 = tile_conversion_utils::MakeZeroOffsets(/*ndim=*/2, span);  // [0, 0]
-  auto off1 =
-      std::make_shared<MakeTuple>(std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span),
-                                                       std::make_shared<ConstInt>(0, DataType::INDEX, span)},
-                                  span);  // [1, 0]
+  // My-row offset [my_rank, 0] — pld.system.rank is a per-device compile-time constant.
+  auto my_row_offsets = make_row_offsets(my_rank);
 
   // ---- Phase 1: stage-in (local_data → target[my_rank, 0]) ----
   b.Bind("stage_in", reg.Create("tile.store", {local_data, my_row_offsets, target}, {}, span), span);
@@ -818,37 +813,38 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: gather — assemble [rank0_chunk, rank1_chunk] ----
-  // Both branches produce the same shape [2, SIZE] via tile.concat,
-  // so the IfStmt is type-consistent.
-  auto acc_self = b.Bind("acc_self",
-                         reg.Create("tile.load", {target, my_row_offsets, chunk_shape, chunk_shape},
-                                    {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
-                         span);
+  // ---- Phase 3: gather — assemble chunks from all ranks in rank order ----
+  // Build a chain of tile.concat calls in a C++ loop over NR (compile-time
+  // constant).  For each rank r, remote-load the chunk and concat onto the
+  // accumulator.  rank 0 starts the chain; subsequent ranks are prepended
+  // or appended depending on order.
+  //
+  // All ranks produce the same rank-ordered result [1, NR*SIZE].
+  auto nr_c = As<ConstInt>(target_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(nr_c, span)
+      << "allgather: target NR must be a compile-time constant for N-rank gather";
+  int64_t nr_val = nr_c->value_;
 
-  auto gathered = b.EmitIfExpr(
-      MakeEq(my_rank, zero_idx, span),
-      [&](LoweringBuilder& then_body) {
-        // We are rank 0: concat(self, remote_load from rank 1).
-        auto recv1 =
-            then_body.Bind("recv1",
-                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
-                                                            {target, one_idx, off1, chunk_shape}, {}, span),
-                           span);
-        return then_body.Bind(
-            "gathered", OpRegistry::GetInstance().Create("tile.concat", {acc_self, recv1}, {}, span), span);
-      },
-      [&](LoweringBuilder& else_body) {
-        // We are rank 1: concat(remote_load from rank 0, self).
-        auto recv0 =
-            else_body.Bind("recv0",
-                           OpRegistry::GetInstance().Create("pld.tile.remote_load",
-                                                            {target, zero_idx, off0, chunk_shape}, {}, span),
-                           span);
-        return else_body.Bind(
-            "gathered", OpRegistry::GetInstance().Create("tile.concat", {recv0, acc_self}, {}, span), span);
-      },
-      span);
+  ExprPtr gathered;
+  for (int64_t r = 0; r < nr_val; ++r) {
+    auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
+    auto row_offsets = make_row_offsets(rank_expr);
+
+    // Load chunk from rank r.  pld.tile.remote_load handles both remote and
+    // local (self) cases — for self it's equivalent to a local tile.load.
+    auto chunk = b.Bind(
+        "chunk_r" + std::to_string(r),
+        reg.Create("pld.tile.remote_load", {target, rank_expr, row_offsets, chunk_shape}, {}, span),
+        span);
+
+    if (r == 0) {
+      gathered = chunk;
+    } else {
+      gathered = b.Bind(
+          "gathered_r" + std::to_string(r),
+          reg.Create("tile.concat", {gathered, chunk}, {}, span), span);
+    }
+  }
 
   return gathered;
 }
