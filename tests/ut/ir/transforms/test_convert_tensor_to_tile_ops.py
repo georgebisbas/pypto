@@ -3493,15 +3493,15 @@ class TestWindowSliceIncoreConversion:
         for i, bp in enumerate(before_fn.params):
             after_dir = after_fn.param_directions[i]
             if bp.name_hint == "target":
-                assert after_dir == pl.ParamDirection.InOut, (
+                assert after_dir == ir.ParamDirection.InOut, (
                     f"target must be InOut, got {after_dir}"
                 )
             elif bp.name_hint == "signal":
-                assert after_dir == pl.ParamDirection.InOut, (
+                assert after_dir == ir.ParamDirection.InOut, (
                     f"signal must be InOut, got {after_dir}"
                 )
             elif bp.name_hint == "local_data":
-                assert after_dir == pl.ParamDirection.In, (
+                assert after_dir == ir.ParamDirection.In, (
                     f"local_data must be In, got {after_dir}"
                 )
 
