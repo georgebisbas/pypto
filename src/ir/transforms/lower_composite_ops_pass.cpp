@@ -818,15 +818,23 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // constant).  For each rank r, load the chunk via tile.load (self) or
   // pld.tile.remote_load (peer), then concat onto the accumulator.
   // All ranks produce the same rank-ordered result [1, NR*SIZE].
+  //
+  // Every rank holds exactly one local row — use local offsets [0, 0] for
+  // both tile.load (self) and remote_load (peers), matching the allreduce
+  // Phase 3 convention.
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
   INTERNAL_CHECK_SPAN(nr_c, span)
       << "allgather: target NR must be a compile-time constant for N-rank gather";
   int64_t nr_val = nr_c->value_;
 
+  auto zero_row_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                           std::make_shared<ConstInt>(0, DataType::INDEX, span)},
+      span);
+
   ExprPtr gathered;
   for (int64_t r = 0; r < nr_val; ++r) {
     auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
-    auto row_offsets = make_row_offsets(rank_expr);
 
     // For rank r == my_rank, use a local tile.load.  For all other ranks,
     // use pld.tile.remote_load to pull the chunk across HCCL.
@@ -835,14 +843,14 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         [&](LoweringBuilder& then_body) {
           return then_body.Bind(
               "chunk_r" + std::to_string(r),
-              reg.Create("tile.load", {target, row_offsets, chunk_shape, chunk_shape},
+              reg.Create("tile.load", {target, zero_row_offsets, chunk_shape, chunk_shape},
                          {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
               span);
         },
         [&](LoweringBuilder& else_body) {
           return else_body.Bind(
               "chunk_r" + std::to_string(r),
-              reg.Create("pld.tile.remote_load", {target, rank_expr, row_offsets, chunk_shape}, {}, span),
+              reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
               span);
         },
         span);
