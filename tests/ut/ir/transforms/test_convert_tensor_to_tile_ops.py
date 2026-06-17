@@ -3490,18 +3490,19 @@ class TestWindowSliceIncoreConversion:
         after_params = after_fn.params
         before_nparams = len(before_fn.params)
 
-        for i, (bp, ap) in enumerate(zip(before_fn.params, after_params[:before_nparams])):
+        for i, bp in enumerate(before_fn.params):
+            after_dir = after_fn.param_directions[i]
             if bp.name_hint == "target":
-                assert ap.direction == pl.ParamDirection.InOut, (
-                    f"target must be InOut, got {ap.direction}"
+                assert after_dir == pl.ParamDirection.InOut, (
+                    f"target must be InOut, got {after_dir}"
                 )
             elif bp.name_hint == "signal":
-                assert ap.direction == pl.ParamDirection.InOut, (
-                    f"signal must be InOut, got {ap.direction}"
+                assert after_dir == pl.ParamDirection.InOut, (
+                    f"signal must be InOut, got {after_dir}"
                 )
             elif bp.name_hint == "local_data":
-                assert ap.direction == pl.ParamDirection.In, (
-                    f"local_data must be In, got {ap.direction}"
+                assert after_dir == pl.ParamDirection.In, (
+                    f"local_data must be In, got {after_dir}"
                 )
 
     def test_reduce_scatter_upgrades_target_and_signal_to_inout(self):
