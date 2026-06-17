@@ -718,20 +718,25 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 // ``pld.tensor.allgather`` lowering rule
 //
 // All-gather: gather data from all ranks and return the concatenated result
-// as a local Tile.  Currently hardcoded for NR=2 (matching the test suite).
+// as a local Tile.  Fully N-rank general — NR is read from the target's
+// compile-time shape at lowering time.
 //
 //   arg[0] = local_data  — Tile [1, SIZE], this rank's chunk
 //   arg[1] = target      — DistributedTensor [NR, SIZE], staging window
 //   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
 //
-// Phases:
-//   1.  tile.store(local_data, [my_rank, 0], target)   — stage-in
+// Phases (aligned with simpler allgather_distributed reference):
+//   1.  tile.store(local_data, [0, 0], target)   — stage-in (each rank's
+//       private HCCL window starts at local row 0)
 //   2a. notify-all (Set 1)
 //   2b. wait-all  (Ge 1)
-//   3.  acc = tile.load(target, [my_rank, 0], [1, SIZE])   — self chunk
-//       if 0 != my_rank: recv0 = remote_load(peer=0, [0,0]); acc = concat(recv0, acc)
-//       if 1 != my_rank: recv1 = remote_load(peer=1, [1,0]); acc = concat(acc, recv1)
-//       return acc  (Tile [1, 2*SIZE] — rank-ordered concatenation)
+//   3.  for r in 0..NR-1:
+//         chunk = pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])
+//         concat onto accumulator
+//       return accumulator (Tile [1, NR*SIZE] — rank-ordered concatenation)
+//
+// Self-read falls out of the same remote_load path via HCCL identity
+// mapping (CommRemotePtr returns local ptr for peer == my_rank).
 // ============================================================================
 
 ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
@@ -1080,11 +1085,6 @@ ExprPtr LowerTensorBarrierRule(const CallPtr& call, const std::vector<ExprPtr>& 
 // AssignStmt (or a composite-op Call embedded directly in a ReturnStmt) only
 // when the callee name appears here. Adding a new composite op = add a rule
 // function above + one row in ``kRules``; the mutator below needs no change.
-//
-// Today the only rules are ``tile.sin`` / ``tile.cos``. The pass is idempotent
-// provided each rule emits only ops not listed here (the sin/cos recipe emits
-// only ``tile.muls`` / ``tile.adds`` / ``tile.add`` / ``tile.sub`` / ``tile.mul`` /
-// ``tile.cast``).
 //
 // When the table grows past a handful of entries — or a rule wants its own
 // translation unit — promote this back to a standalone registry under

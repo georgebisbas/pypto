@@ -202,10 +202,10 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
   }
 
-  // arg 0: local_data — Tile (or Tensor before conversion) with this rank's chunk
+  // arg 0: local_data — Tile with this rank's chunk
   auto local_type = args[0]->GetType();
-  CHECK(As<TileType>(local_type) || As<TensorType>(local_type))
-      << "pld.tensor.allgather local_data must be a Tile or Tensor, got " << local_type->TypeName();
+  CHECK(As<TileType>(local_type))
+      << "pld.tensor.allgather local_data must be a Tile, got " << local_type->TypeName();
 
   // arg 1: target — DistributedTensor [NR, SIZE] staging window
   auto target_type = As<DistributedTensorType>(args[1]->GetType());

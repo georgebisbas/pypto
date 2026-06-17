@@ -198,13 +198,14 @@ Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects
 
 ### `pld.tensor.allgather`
 
-Decomposes into a 3-phase recipe:
+Decomposes into a 3-phase recipe, aligned with the simpler allgather reference (`simpler/examples/workers/l3/allgather_distributed/`):
 
+- Phase 1: `tile.store(local_data, [0, 0], target)` — stage this rank's chunk into its private HCCL window at local row 0
 - Phase 2a: notify-all (`Set 1`)
 - Phase 2b: wait-all (`Ge 1`)
-- Phase 3: for each peer `p != rank`, `remote_load` the peer's row from the distributed window and `tile.store` it into the local copy of `target`
+- Phase 3: for `r` in `0..NR-1`, `pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])` and `tile.concat` onto accumulator; return the concatenated Tile `[1, NR*SIZE]`
 
-`target` has shape `[NR, SIZE]`; each rank stages its own chunk at `[my_rank, 0:SIZE]` before the call. After lowering, every rank's local copy holds the full `[NR, SIZE]` gathered tensor. No post-gather barrier is needed because the rule only writes into the caller's own window and subsequent reads are program-ordered after the call.
+Self-read falls out of the same `remote_load` path via HCCL identity mapping (`CommRemotePtr` returns local pointer for `peer == my_rank`). Every rank produces the identical rank-ordered concatenation.
 
 ### `pld.tensor.reduce_scatter`
 
