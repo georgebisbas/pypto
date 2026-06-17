@@ -869,9 +869,7 @@ def test_allgather_emits_for_and_if_control_flow():
     collector.visit_program(After)
 
     assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
-    assert collector.if_count == 2, (
-        f"expected 2 IfStmts (notify-all + wait-all), got {collector.if_count}"
-    )
+    assert collector.if_count == 2, f"expected 2 IfStmts (notify-all + wait-all), got {collector.if_count}"
 
 
 def test_allgather_lowering_is_idempotent():

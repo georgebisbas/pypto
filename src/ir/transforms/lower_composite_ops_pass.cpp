@@ -775,10 +775,10 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // every rank stores its chunk at local offset [0, 0] of its private HCCL
   // window.  The DistributedTensor shape [NR, SIZE] is a logical view;
   // physically each rank holds one row at local row 0.
-  auto zero_row_offsets = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
-                           std::make_shared<ConstInt>(0, DataType::INDEX, span)},
-      span);
+  auto zero_row_offsets =
+      std::make_shared<MakeTuple>(std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                                                       std::make_shared<ConstInt>(0, DataType::INDEX, span)},
+                                  span);
 
   // ---- Phase 1: stage-in (local_data → target[0, 0]) ----
   b.Bind("stage_in", reg.Create("tile.store", {local_data, zero_row_offsets, target}, {}, span), span);
@@ -825,8 +825,7 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // TLOAD path.  Every rank holds exactly one local row, so offsets
   // [0, 0] are correct for all reads.
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
-  INTERNAL_CHECK_SPAN(nr_c, span)
-      << "allgather: target NR must be a compile-time constant for N-rank gather";
+  INTERNAL_CHECK_SPAN(nr_c, span) << "allgather: target NR must be a compile-time constant for N-rank gather";
   int64_t nr_val = nr_c->value_;
 
   ExprPtr gathered;
@@ -841,9 +840,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
     if (r == 0) {
       gathered = chunk;
     } else {
-      gathered = b.Bind(
-          "gathered_r" + std::to_string(r),
-          reg.Create("tile.concat", {gathered, chunk}, {}, span), span);
+      gathered = b.Bind("gathered_r" + std::to_string(r),
+                        reg.Create("tile.concat", {gathered, chunk}, {}, span), span);
     }
   }
 

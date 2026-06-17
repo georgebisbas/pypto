@@ -135,7 +135,8 @@ class TestL3TensorReduceScatterIntrinsic:
 
         expected = _expected_reduce_scatter(inputs)
         assert torch.allclose(outputs, expected), (
-            f"reduce-scatter intrinsic P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
+            f"reduce-scatter intrinsic P={n_ranks} mismatch: "
+            f"max diff = {(outputs - expected).abs().max().item()}"
         )
 
 
