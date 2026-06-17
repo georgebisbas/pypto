@@ -815,10 +815,8 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
 
   // ---- Phase 3: gather — assemble chunks from all ranks in rank order ----
   // Build a chain of tile.concat calls in a C++ loop over NR (compile-time
-  // constant).  For each rank r, remote-load the chunk and concat onto the
-  // accumulator.  rank 0 starts the chain; subsequent ranks are prepended
-  // or appended depending on order.
-  //
+  // constant).  For each rank r, load the chunk via tile.load (self) or
+  // pld.tile.remote_load (peer), then concat onto the accumulator.
   // All ranks produce the same rank-ordered result [1, NR*SIZE].
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
   INTERNAL_CHECK_SPAN(nr_c, span)
@@ -830,11 +828,23 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
     auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
     auto row_offsets = make_row_offsets(rank_expr);
 
-    // Load chunk from rank r.  pld.tile.remote_load handles both remote and
-    // local (self) cases — for self it's equivalent to a local tile.load.
-    auto chunk = b.Bind(
-        "chunk_r" + std::to_string(r),
-        reg.Create("pld.tile.remote_load", {target, rank_expr, row_offsets, chunk_shape}, {}, span),
+    // For rank r == my_rank, use a local tile.load.  For all other ranks,
+    // use pld.tile.remote_load to pull the chunk across HCCL.
+    auto chunk = b.EmitIfExpr(
+        MakeEq(my_rank, rank_expr, span),
+        [&](LoweringBuilder& then_body) {
+          return then_body.Bind(
+              "chunk_r" + std::to_string(r),
+              reg.Create("tile.load", {target, row_offsets, chunk_shape, chunk_shape},
+                         {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
+              span);
+        },
+        [&](LoweringBuilder& else_body) {
+          return else_body.Bind(
+              "chunk_r" + std::to_string(r),
+              reg.Create("pld.tile.remote_load", {target, rank_expr, row_offsets, chunk_shape}, {}, span),
+              span);
+        },
         span);
 
     if (r == 0) {
