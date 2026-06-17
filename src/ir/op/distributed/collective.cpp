@@ -84,6 +84,7 @@ TypePtr DeduceBuiltinTensorAllReduceType(const std::vector<ExprPtr>& args,
 }  // namespace
 
 REGISTER_OP("builtin.tensor.allreduce")
+    .set_op_category("DistributedOp")
     .set_description("Internal chip-dispatch builtin for pld.tensor.allreduce.")
     .add_argument("src", "Window-bound DistributedTensor to reduce in place")
     .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
@@ -231,7 +232,8 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
     auto result_shape = std::vector<ExprPtr>{
         std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()),
         std::make_shared<ConstInt>(nr->value_ * size->value_, DataType::INDEX, Span::unknown())};
-    return std::make_shared<TileType>(result_shape, target_type->dtype_, std::nullopt, std::nullopt, MemorySpace::Vec);
+    return std::make_shared<TileType>(result_shape, target_type->dtype_, std::nullopt, std::nullopt,
+                                      MemorySpace::Vec);
   }
   // Fallback: return target shape [NR, SIZE] when dimensions are not
   // compile-time constants.
@@ -313,4 +315,3 @@ REGISTER_OP("pld.tensor.reduce_scatter")
 
 }  // namespace ir
 }  // namespace pypto
-

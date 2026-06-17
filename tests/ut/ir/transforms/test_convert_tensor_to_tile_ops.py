@@ -3477,8 +3477,8 @@ class TestWindowSliceIncoreConversion:
                 target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
             ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-                gathered = pld.tensor.allgather(local_data, target, signal)
-                return gathered
+                gathered = pld.tensor.allgather(local_data, target, signal)  # type: ignore[arg-type]
+                return gathered  # type: ignore[return-type]
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         # After conversion the function has additional params (MemRef for
@@ -3486,24 +3486,18 @@ class TestWindowSliceIncoreConversion:
         # direction inference: target and signal must be InOut; local_data
         # (an original plain-Tensor In param) stays In.
         after_fn = After["kernel"]
+        assert after_fn is not None
         before_fn = Before["kernel"]
-        after_params = after_fn.params
-        before_nparams = len(before_fn.params)
+        assert before_fn is not None
 
         for i, bp in enumerate(before_fn.params):
             after_dir = after_fn.param_directions[i]
             if bp.name_hint == "target":
-                assert after_dir == ir.ParamDirection.InOut, (
-                    f"target must be InOut, got {after_dir}"
-                )
+                assert after_dir == ir.ParamDirection.InOut, f"target must be InOut, got {after_dir}"
             elif bp.name_hint == "signal":
-                assert after_dir == ir.ParamDirection.InOut, (
-                    f"signal must be InOut, got {after_dir}"
-                )
+                assert after_dir == ir.ParamDirection.InOut, f"signal must be InOut, got {after_dir}"
             elif bp.name_hint == "local_data":
-                assert after_dir == ir.ParamDirection.In, (
-                    f"local_data must be In, got {after_dir}"
-                )
+                assert after_dir == ir.ParamDirection.In, f"local_data must be In, got {after_dir}"
 
     def test_reduce_scatter_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.reduce_scatter(target, signal, op=...)`` upgrades both

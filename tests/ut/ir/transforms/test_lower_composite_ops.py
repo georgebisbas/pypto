@@ -864,12 +864,9 @@ def test_allgather_emits_for_and_if_control_flow():
     collector = _StmtKindCollector()
     collector.visit_program(After)
 
-    assert collector.for_count == 2, (
-        f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
-    )
+    assert collector.for_count == 2, f"expected 2 ForStmts (notify, wait), got {collector.for_count}"
     assert collector.if_count == 3, (
-        f"expected 3 IfStmts (2 nested in notify/wait + 1 gather), "
-        f"got {collector.if_count}"
+        f"expected 3 IfStmts (2 nested in notify/wait + 1 gather), got {collector.if_count}"
     )
 
 
