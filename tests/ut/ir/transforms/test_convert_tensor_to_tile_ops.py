@@ -3476,7 +3476,7 @@ class TestWindowSliceIncoreConversion:
                 local_data: pl.Tensor[[1, SIZE], pl.FP32],
                 target: pld.DistributedTensor[[nr, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+            ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
                 gathered = pld.tensor.allgather(local_data, target, signal)
                 return gathered
 

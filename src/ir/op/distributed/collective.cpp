@@ -220,10 +220,19 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Result: Tile with the target shape [NR, SIZE] (semantically holds NR×SIZE
-  // elements).  The lowering assemble [1, NR*SIZE] via tile.concat; the
-  // exact output layout is verified at the lowering-test level, not in the
-  // deducer.
+  // Result: Tile [1, NR*SIZE] — rank-ordered concat of NR chunks, each
+  // [1, SIZE].  Both NR and SIZE are compile-time ConstInt values so the
+  // product is a concrete constant (no MakeMul / dynamic expr needed).
+  auto nr = As<ConstInt>(target_type->shape_[0]);
+  auto size = As<ConstInt>(target_type->shape_[1]);
+  if (nr && size) {
+    auto result_shape = std::vector<ExprPtr>{
+        std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()),
+        std::make_shared<ConstInt>(nr->value_ * size->value_, DataType::INDEX, Span::unknown())};
+    return std::make_shared<TileType>(result_shape, target_type->dtype_);
+  }
+  // Fallback: return target shape [NR, SIZE] when dimensions are not
+  // compile-time constants.
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
 }
 
