@@ -771,14 +771,17 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         std::vector<ExprPtr>{rank_expr, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
   };
 
-  // Helper: window row offset [rank_expr, 0] — same shape as signal offsets.
-  auto make_row_offsets = make_signal_offsets;
+  // Per the simpler allgather reference (examples/workers/l3/allgather_distributed/),
+  // every rank stores its chunk at local offset [0, 0] of its private HCCL
+  // window.  The DistributedTensor shape [NR, SIZE] is a logical view;
+  // physically each rank holds one row at local row 0.
+  auto zero_row_offsets = std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
+                           std::make_shared<ConstInt>(0, DataType::INDEX, span)},
+      span);
 
-  // My-row offset [my_rank, 0] — pld.system.rank is a per-device compile-time constant.
-  auto my_row_offsets = make_row_offsets(my_rank);
-
-  // ---- Phase 1: stage-in (local_data → target[my_rank, 0]) ----
-  b.Bind("stage_in", reg.Create("tile.store", {local_data, my_row_offsets, target}, {}, span), span);
+  // ---- Phase 1: stage-in (local_data → target[0, 0]) ----
+  b.Bind("stage_in", reg.Create("tile.store", {local_data, zero_row_offsets, target}, {}, span), span);
 
   // ---- Phase 2a: notify-all ----
   b.EmitFor(
@@ -815,44 +818,24 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
 
   // ---- Phase 3: gather — assemble chunks from all ranks in rank order ----
   // Build a chain of tile.concat calls in a C++ loop over NR (compile-time
-  // constant).  For each rank r, load the chunk via tile.load (self) or
-  // pld.tile.remote_load (peer), then concat onto the accumulator.
-  // All ranks produce the same rank-ordered result [1, NR*SIZE].
-  //
-  // Every rank holds exactly one local row — use local offsets [0, 0] for
-  // both tile.load (self) and remote_load (peers), matching the allreduce
-  // Phase 3 convention.
+  // constant).  Following the simpler allgather reference, use
+  // pld.tile.remote_load for every rank including self — the HCCL
+  // CommRemotePtr helper returns the local pointer unchanged for
+  // peer == my_rank, so the self-read naturally falls out of the same
+  // TLOAD path.  Every rank holds exactly one local row, so offsets
+  // [0, 0] are correct for all reads.
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
   INTERNAL_CHECK_SPAN(nr_c, span)
       << "allgather: target NR must be a compile-time constant for N-rank gather";
   int64_t nr_val = nr_c->value_;
 
-  auto zero_row_offsets = std::make_shared<MakeTuple>(
-      std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span),
-                           std::make_shared<ConstInt>(0, DataType::INDEX, span)},
-      span);
-
   ExprPtr gathered;
   for (int64_t r = 0; r < nr_val; ++r) {
     auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
 
-    // For rank r == my_rank, use a local tile.load.  For all other ranks,
-    // use pld.tile.remote_load to pull the chunk across HCCL.
-    auto chunk = b.EmitIfExpr(
-        MakeEq(my_rank, rank_expr, span),
-        [&](LoweringBuilder& then_body) {
-          return then_body.Bind(
-              "chunk_r" + std::to_string(r),
-              reg.Create("tile.load", {target, zero_row_offsets, chunk_shape, chunk_shape},
-                         {{"target_memory", MemorySpace::Vec}, {"transpose", false}}, span),
-              span);
-        },
-        [&](LoweringBuilder& else_body) {
-          return else_body.Bind(
-              "chunk_r" + std::to_string(r),
-              reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
-              span);
-        },
+    auto chunk = b.Bind(
+        "chunk_r" + std::to_string(r),
+        reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
         span);
 
     if (r == 0) {
