@@ -106,6 +106,7 @@ set(PYPTO_SOURCES
     src/ir/op/tile_ops/cross_core.cpp
     src/ir/op/tile_ops/sort.cpp
     src/ir/op/tile_ops/gather.cpp
+    src/ir/op/tile_ops/paged_gather.cpp
     src/ir/op/tile_ops/scatter.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/sync_ops/cross_core.cpp
@@ -128,6 +129,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/sort.cpp
     src/ir/op/tensor_ops/gather.cpp
+    src/ir/op/tensor_ops/paged_gather.cpp
     src/ir/op/tensor_ops/scatter.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
