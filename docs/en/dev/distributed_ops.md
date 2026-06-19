@@ -284,3 +284,52 @@ dispatches before the final `Simplify`.
   `orch.allocate_domain(...)` block). The embedded programs and golden checks
   are the canonical e2e contracts — drop the skip markers once that host-side
   work lands.
+
+## Collective operation capability
+
+PyPTO supports cross-rank collective communication via three delivery patterns:
+
+1. **Hand-rolled InCore** — users compose `pld.system.notify` /
+   `pld.system.wait` / `pld.tile.remote_load` / `tile.add` / `tile.store`
+   directly. Reference STs exist for mesh allreduce (P=2,4 dynamic `NR`),
+   broadcast (P=2), ring allreduce (RS+AG, P=2,4), allgather, and
+   reduce_scatter.
+
+2. **Composite intrinsic** — `pld.tensor.allreduce(target, signal,
+   op=ReduceOp.Sum)` is an InCore composite op lowered in
+   `LowerCompositeOps` (pass 14) to the 5-phase decomposition
+   ([#1746](https://github.com/hw-native-sys/pypto/pull/1746)). Additional
+   composite collectives (`all_gather`, `reduce_scatter`, `broadcast`,
+   `barrier`) are in-flight via
+   [#1782](https://github.com/hw-native-sys/pypto/pull/1782). This is the
+   recommended pattern for future InCore collectives.
+
+3. **HOST-level builtin** — host_orch tensor collectives (e.g.
+   `pld.tensor.allreduce` on host tensors) lower through
+   `LowerHostTensorCollectives` (pass 38) to internal builtin chip dispatch
+   ([#1798](https://github.com/hw-native-sys/pypto/pull/1798)). Use when the
+   collective spans cross-chip orchestration scheduling rather than a pure
+   InCore recipe.
+
+| Primitive | Mesh (hand-rolled) | Ring RS+AG | Composite intrinsic | HOST builtin |
+|-----------|-------------------|------------|---------------------|--------------|
+| all_reduce | ✅ P=2,4 dynamic `NR` | ✅ P=2,4 ([#1778](https://github.com/hw-native-sys/pypto/pull/1778)) | ✅ `ReduceOp.Sum` only ([#1746](https://github.com/hw-native-sys/pypto/pull/1746)) | ✅ ([#1798](https://github.com/hw-native-sys/pypto/pull/1798)) |
+| all_gather | ✅ ST on `main` ([#1575](https://github.com/hw-native-sys/pypto/pull/1575)); dynamic `NR` parity closed ([#1726](https://github.com/hw-native-sys/pypto/pull/1726)) | — | 🟡 [#1782](https://github.com/hw-native-sys/pypto/pull/1782) pr_open | 📋 planned |
+| reduce_scatter | ✅ ST on `main` ([#1575](https://github.com/hw-native-sys/pypto/pull/1575)); dynamic `NR` parity closed ([#1726](https://github.com/hw-native-sys/pypto/pull/1726)) | — | 🟡 [#1782](https://github.com/hw-native-sys/pypto/pull/1782) pr_open | 📋 planned |
+| broadcast | ✅ P=2 ([#1631](https://github.com/hw-native-sys/pypto/pull/1631)) | — | 🟡 [#1782](https://github.com/hw-native-sys/pypto/pull/1782) pr_open | 📋 planned |
+| all_to_all(_v) | 🟡 simpler examples only | — | 📋 likely HOST-level | 📋 planned |
+| barrier | notify/wait pair (all STs) | — | 🟡 [#1782](https://github.com/hw-native-sys/pypto/pull/1782) pr_open | — |
+| new_group | — | — | 📋 needs subgroup infra (plan 17) | — |
+
+Legend: ✅ merged on `main`; 🟡 in-flight PR; 📋 not yet implemented.
+
+Upstream tracking: [#1189](https://github.com/hw-native-sys/pypto/issues/1189)
+("Add orchestration-level collective communication operators").
+
+### Multi-group semantics
+
+Each `pld.alloc_window_buffer` alloc dispatched to a distinct device subset
+produces an independent comm domain with isolated windows. When multiple
+groups overlap on the same device, the runtime maintains separate
+`device_ctx` handles per group. `pl.new_group(ranks)` is not yet
+implemented — see plan 17 for subgroup semantics hardening.
