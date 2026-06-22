@@ -15,6 +15,9 @@ DSL as a monolithic InCore kernel — one AIV task dispatch per rank.
 
 Schedule (NCCL-style RS + AG, matching ``allreduce_ring_kernel.cpp``):
 
+* **Pre-RS barrier** — global notify/wait on signal row 0; every rank
+  guarantees its stage-in writes to ``scratch`` are drained before any
+  peer issues ``pld.tile.remote_load``.
 * **Phase 1 (stage-in)** — partition each rank's input into ``NR`` equal
   chunks in the HCCL-window ``scratch`` buffer via ``pl.range`` loop.
 * **Phase 2 (reduce-scatter)** — ``(NR−1)`` ring steps. Per step: barrier
@@ -27,6 +30,10 @@ Schedule (NCCL-style RS + AG, matching ``allreduce_ring_kernel.cpp``):
 Golden matches mesh allreduce: ``output[i] = P·i + 100·P·(P−1)/2`` (element-wise
 sum of all rank inputs).  Ring uses ``2(P−1)`` per-round barriers vs mesh's single
 global barrier; remote traffic is ``O(N/P)`` per step vs mesh's ``O(N)``.
+
+Signal layout: ``2(NR−1)+1`` rows × ``NR`` columns. Row 0 is dedicated to the
+pre-RS stage-in barrier; rows 1..NR-1 serve the RS rounds; rows NR..2(NR-1)
+serve the AG rounds.
 
 ST coverage: **P=2** (default CI / 2-device hosts) and **P=4** (any four devices,
 e.g. ``--device=0,1,2,3`` or ``--device=0-3``).  P=8 / P=16 are valid
@@ -68,7 +75,11 @@ def _build_ring_allreduce_program(n_ranks: int):
     Static chunk size and round count are computed from *n_ranks* at factory
     time, avoiding dynamic-shape arithmetic in type annotations.
     """
-    total_rounds = 2 * (n_ranks - 1)
+    # One extra signal row for the pre-RS stage-in-complete barrier:
+    #   row 0              — stage-in sync (all ranks wrote scratch)
+    #   rows 1..(NR-1)     — reduce-scatter rounds
+    #   rows NR..(2NR-2)   — allgather rounds
+    total_rounds = 2 * (n_ranks - 1) + 1
     chunk = SIZE // n_ranks  # Python int — used in tile shapes to avoid SSA renaming
 
     @pl.program
@@ -76,7 +87,7 @@ def _build_ring_allreduce_program(n_ranks: int):
         """Ring allreduce with chunked reduce-scatter + allgather schedule."""
 
         @pl.function(type=pl.FunctionType.InCore)
-        def ring_step(
+        def ring_step(  # noqa: PLR0912
             self,
             inp: pl.Tensor[[1, SIZE], pl.FP32],
             out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
@@ -84,11 +95,12 @@ def _build_ring_allreduce_program(n_ranks: int):
             signal: pl.InOut[pld.DistributedTensor[[total_rounds, n_ranks], pl.INT32]],
             chunk_elems: pl.Scalar[pl.INDEX],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            """Monolithic ring allreduce: stage-in → RS loop → AG loop → stage-out.
+            """Monolithic ring allreduce: stage-in → sync → RS loop → AG loop → stage-out.
 
             *scratch* holds ``NR`` chunks laid out flat in ``[1, SIZE]``;
             chunk *c* starts at offset ``c * chunk_elems``.  *signal* carries
-            ``2(NR−1)`` rows, one per RS/AG round; each row has ``NR`` cells.
+            ``2(NR−1)+1`` rows: row 0 for the stage-in-complete barrier,
+            rows 1..NR-1 for reduce-scatter, rows NR..2(NR-1) for allgather.
             ``alloc_window_buffer`` zero-initialises every cell, so per-round
             ``AtomicAdd(0→1)`` / ``WaitGe(1)`` is safe without explicit reset.
             """
@@ -102,13 +114,38 @@ def _build_ring_allreduce_program(n_ranks: int):
                 src_tile = pl.load(inp, [0, c * chunk_elems], [1, chunk])
                 pl.store(src_tile, [0, c * chunk_elems], scratch)
 
+            # Pre-RS barrier — synchronise so every rank's scratch is visible
+            # before any rank issues pld.tile.remote_load.  Without this barrier
+            # HCCL may deliver per-round TNOTIFY signals before the stage-in
+            # tstore data has drained to the peer-visible window, causing the
+            # first RS remote_load to read stale / partial chunks.
+            # Uses signal row 0 (one-shot AtomicAdd from 0→1 per peer).
+            for peer in pl.range(nranks):
+                if peer != my_rank:
+                    pld.system.notify(
+                        signal,
+                        peer=peer,
+                        offsets=[0, my_rank],
+                        value=1,
+                        op=pld.NotifyOp.AtomicAdd,
+                    )
+            for peer in pl.range(nranks):
+                if peer != my_rank:
+                    pld.system.wait(
+                        signal=signal,
+                        offsets=[0, peer],
+                        expected=1,
+                        cmp=pld.WaitCmp.Ge,
+                    )
+
             # Phase 2: reduce-scatter — (NR−1) ring steps.
             # s is 0-indexed; step = s + 1 is the 1-indexed ring step.
+            # rs_round = 1 + s (signal row 0 used by the pre-RS barrier above).
             for s in pl.range(nranks - 1):
                 step = s + 1
                 recv_add_idx = (my_rank - step - 1 + nranks) % nranks
                 left_send_idx = (left - step + nranks) % nranks
-                rs_round = s
+                rs_round = 1 + s
 
                 # Barrier — every rank notifies every peer, then waits on every peer.
                 for peer in pl.range(nranks):
@@ -141,11 +178,12 @@ def _build_ring_allreduce_program(n_ranks: int):
                 pl.store(acc, [0, recv_add_idx * chunk_elems], scratch)
 
             # Phase 3: allgather — (NR−1) ring steps.
+            # ag_round = nranks + s (shifted by 1 for the pre-RS barrier row).
             for s in pl.range(nranks - 1):
                 step = s + 1
                 recv_idx = (my_rank - step + nranks) % nranks
                 left_send_idx = (left - step + 1 + nranks) % nranks
-                ag_round = (nranks - 1) + s
+                ag_round = nranks + s
 
                 # Barrier.
                 for peer in pl.range(nranks):
