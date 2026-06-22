@@ -402,19 +402,21 @@ def allgather(
     local_data: Tile,
     target: DistributedTensor,
     signal: DistributedTensor,
-) -> Tile:
-    """Gather data from all ranks, returning the concatenated result as a Tile.
+    out: Tensor,
+) -> Tensor:
+    """Gather data from all ranks, writing the concatenated result into a user-provided output Tensor.
 
     ``local_data`` is a Tile [1, SIZE] with this rank's chunk.
     ``target`` has shape [NR, SIZE] — used internally as a staging window
     (the intrinsic handles the stage-in).  ``signal`` is a window-bound
-    INT32 barrier tensor.
+    INT32 barrier tensor.  ``out`` is a plain Tensor [1, NR*SIZE] that
+    receives the rank-ordered concatenated result.
 
     Usage::
 
         chunk = pl.load(inp, [0, 0], [1, SIZE])
-        result = pld.tensor.allgather(chunk, data, sig)
-        return pl.store(result, [0, 0], out)  # result is Tile [1, NR*SIZE]
+        pld.tensor.allgather(chunk, data, sig, out)
+        return out  # out now holds [1, NR*SIZE] of gathered data
 
     Args:
         local_data: Tile [1, SIZE] — this rank's chunk to gather.
@@ -422,17 +424,20 @@ def allgather(
             [NR, SIZE] used as the internal staging window.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
             cross-rank barrier.
+        out: A :class:`pl.Tensor` of shape [1, NR*SIZE] that receives the
+            rank-ordered concatenation of all gathered chunks.
 
     Returns:
-        A :class:`Tile` containing the rank-ordered concatenation of all
-        gathered chunks — identical on every rank.
+        The ``out`` :class:`pl.Tensor` containing the gathered result —
+        identical on every rank.
     """
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.allgather", target=target, signal=signal
     )
     local_data_expr = _unwrap(local_data)
-    call = _ir_tensor.allgather(local_data_expr, target_expr, signal_expr)
-    return Tile(expr=call)
+    out_expr = _unwrap(out)
+    call = _ir_tensor.allgather(local_data_expr, target_expr, signal_expr, out_expr)
+    return Tensor(expr=call)
 
 
 def reduce_scatter(

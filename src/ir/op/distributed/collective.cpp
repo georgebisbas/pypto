@@ -195,8 +195,8 @@ namespace {
 TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 3) << "pld.tensor.allgather requires exactly 3 positional arguments "
-                             "(local_data, target, signal), but got "
+  CHECK(args.size() == 4) << "pld.tensor.allgather requires exactly 4 positional arguments "
+                             "(local_data, target, signal, out), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.allgather positional argument #" << i << " must not be null";
@@ -222,39 +222,33 @@ TypePtr DeduceTensorAllGatherType(const std::vector<ExprPtr>& args,
       << "pld.tensor.allgather signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Result: Tile [1, NR*SIZE] — rank-ordered concat of NR chunks, each
-  // [1, SIZE].  Both NR and SIZE are compile-time ConstInt values so the
-  // product is a concrete constant (no MakeMul / dynamic expr needed).
-  // MemorySpace::Vec matches the tile.concat output memory used in the
-  // lowering.
-  auto nr = As<ConstInt>(target_type->shape_[0]);
-  auto size = As<ConstInt>(target_type->shape_[1]);
-  if (nr && size) {
-    auto result_shape = std::vector<ExprPtr>{
-        std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()),
-        std::make_shared<ConstInt>(nr->value_ * size->value_, DataType::INDEX, Span::unknown())};
-    return std::make_shared<TileType>(result_shape, target_type->dtype_, std::nullopt, std::nullopt,
-                                      MemorySpace::Vec);
-  }
-  // Fallback: return target shape [NR, SIZE] when dimensions are not
-  // compile-time constants.
-  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
+  // arg 3: out — Tensor [1, NR*SIZE] where the gathered result is written
+  auto out_type = As<TensorType>(args[3]->GetType());
+  CHECK(out_type) << "pld.tensor.allgather out must be a Tensor (not a DistributedTensor), got "
+                  << args[3]->GetType()->TypeName();
+  CHECK(out_type->shape_.size() == 2)
+      << "pld.tensor.allgather out must be 2D [1, NR*SIZE], got " << out_type->shape_.size() << " dims";
+
+  // Return the output Tensor type — the intrinsic writes directly into it.
+  return out_type;
 }
 
 }  // namespace
 
 REGISTER_OP("pld.tensor.allgather")
     .set_description(
-        "All-gather: gather data from all ranks, returning the concatenated result as "
-        "a local Tile. `local_data` is the rank's chunk (Tile [1, SIZE]). `target` is "
-        "a window-bound DistributedTensor[NR, SIZE] used as the staging area. `signal` is "
-        "a window-bound INT32 DistributedTensor used as the cross-rank barrier. Lowered to "
-        "tile.store + notify-all / wait-all + remote_load + tile.concat by LowerCompositeOps; "
-        "this op never survives past that pass.")
+        "All-gather: gather data from all ranks, writing the concatenated result into "
+        "a user-provided output Tensor. `local_data` is the rank's chunk (Tile [1, SIZE]). "
+        "`target` is a window-bound DistributedTensor[NR, SIZE] used as the staging area. "
+        "`signal` is a window-bound INT32 DistributedTensor used as the cross-rank barrier. "
+        "`out` is a plain Tensor[1, NR*SIZE] that receives the rank-ordered concatenation. "
+        "Lowered to tile.store + notify-all / wait-all + per-peer remote_load + tile.store "
+        "into out by LowerCompositeOps; this op never survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("local_data", "Local tile [1, SIZE] — this rank's data (Input)")
     .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
+    .add_argument("out", "Plain Tensor[1, NR*SIZE] — receives the gathered result (Output)")
     .no_memory_spec()
     .f_deduce_type(DeduceTensorAllGatherType);
 

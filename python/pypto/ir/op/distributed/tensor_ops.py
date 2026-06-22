@@ -225,22 +225,25 @@ def allgather(
     local_data: Expr,
     target: Expr,
     signal: Expr,
+    out: Expr,
     *,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tensor.allgather(local_data, target, signal)`` Call.
+    """Build a ``pld.tensor.allgather(local_data, target, signal, out)`` Call.
 
-    All-gather: gather data from all ranks, returning the concatenated
-    result as a local Tile.  ``local_data`` is a Tile [1, SIZE] with this
-    rank's chunk.  ``target`` has shape [NR, SIZE] — used internally as
-    a staging window.  ``signal`` is a window-bound INT32 barrier tensor.
+    All-gather: gather data from all ranks, writing the concatenated
+    result into a user-provided output Tensor.  ``local_data`` is a Tile
+    [1, SIZE] with this rank's chunk.  ``target`` has shape [NR, SIZE] —
+    used internally as a staging window.  ``signal`` is a window-bound
+    INT32 barrier tensor.  ``out`` is a plain Tensor [1, NR*SIZE] that
+    receives the rank-ordered concatenation.
 
-    The result is a Tile (not a DistributedTensor).  LowerCompositeOps
-    expands this into tile.store + notify-all / wait-all + remote_load +
-    tile.concat; this Call never survives past that pass.
+    LowerCompositeOps expands this into tile.store + notify-all /
+    wait-all + per-peer remote_load + tile.store into out;
+    this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.allgather", [local_data, target, signal], {}, actual_span)
+    return _ir_core.create_op_call("pld.tensor.allgather", [local_data, target, signal, out], {}, actual_span)
 
 
 def reduce_scatter(

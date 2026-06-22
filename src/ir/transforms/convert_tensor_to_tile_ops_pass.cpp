@@ -863,11 +863,11 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (op_name == "pld.tensor.allreduce" && !call->args_.empty()) {
     return call->args_[0];
   }
-  // pld.tensor.allgather(local_data, target, signal): writes gathered
-  // chunks into target on every rank (Phase 1 store).  target (args_[1])
-  // is the primary write target; local_data (args_[0]) is read-only.
-  if (op_name == "pld.tensor.allgather" && call->args_.size() >= 2) {
-    return call->args_[1];
+  // pld.tensor.allgather(local_data, target, signal, out): writes gathered
+  // chunks into out on every rank (Phase 3 per-peer tile.store).  out (args_[3])
+  // is the primary write target; target (args_[1]) is used for staging only.
+  if (op_name == "pld.tensor.allgather" && call->args_.size() >= 4) {
+    return call->args_[3];
   }
   // pld.tensor.reduce_scatter(target, signal, *, op): writes the reduced
   // chunk back into target (Phase 4 store).  target (args_[0]) is the
@@ -1043,11 +1043,12 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   }
 
   if (op_name == "pld.tensor.allgather") {
-    // pld.tensor.allgather(local_data, target, signal):
+    // pld.tensor.allgather(local_data, target, signal, out):
     //   local_data (args_[0]) is In (read-only — staged into target).
     //   target (args_[1]) is read (Phase 3 remote_load from peers)
     //     and written (Phase 1 store into own window).  InOut.
     //   signal (args_[2]) is written (notify) and read (wait).  InOut.
+    //   out (args_[3]) is write-only — the intrinsic writes directly into it.
     if (call->args_.size() >= 1) {
       // local_data: read only
       MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
@@ -1056,6 +1057,10 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
       MarkAccess(origins, has_read);
       MarkAccess(origins, has_write);
+    }
+    if (call->args_.size() >= 4) {
+      // out: write only
+      MarkAccess(CollectReferencedOrigins(call->args_[3], origin_map), has_write);
     }
     return;
   }

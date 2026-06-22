@@ -816,7 +816,6 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.tile.remote_load",
     "tile.store",
     "tile.load",
-    "tile.concat",
 }
 
 
@@ -836,8 +835,8 @@ def _build_allgather_before():
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
             chunk = pl.load(inp, [0, 0], [1, SIZE])
-            gathered = pld.tensor.allgather(chunk, data, signal)
-            return pl.store(gathered, [0, 0], out)
+            result = pld.tensor.allgather(chunk, data, signal, out)
+            return result
 
     return Before
 

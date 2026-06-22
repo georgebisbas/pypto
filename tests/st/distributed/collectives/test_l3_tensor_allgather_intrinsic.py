@@ -69,11 +69,12 @@ def _build_allgather_program(n_ranks: int):
             # Prepare local chunk as a Tile.
             chunk = pl.load(inp, [0, 0], [1, SIZE])
 
-            # Allgather — intrinsic handles stage-in, sync, remote-loads.
-            gathered = pld.tensor.allgather(chunk, data, signal)
-
-            # Stage-out: store the concatenated Tile to output.
-            return pl.store(gathered, [0, 0], out)
+            # Allgather — intrinsic handles stage-in, sync, remote-loads,
+            # and writes directly into out.  Bind result to capture the
+            # composite allgather Call in an AssignStmt so LowerCompositeOps
+            # can find and lower it.
+            result = pld.tensor.allgather(chunk, data, signal, out)
+            return result
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(

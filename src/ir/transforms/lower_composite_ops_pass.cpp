@@ -717,13 +717,14 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 // ============================================================================
 // ``pld.tensor.allgather`` lowering rule
 //
-// All-gather: gather data from all ranks and return the concatenated result
-// as a local Tile.  Fully N-rank general — NR is read from the target's
-// compile-time shape at lowering time.
+// All-gather: gather data from all ranks and write the concatenated result
+// into a user-provided output Tensor.  Fully N-rank general — NR is read from
+// the target's compile-time shape at lowering time.
 //
 //   arg[0] = local_data  — Tile [1, SIZE], this rank's chunk
 //   arg[1] = target      — DistributedTensor [NR, SIZE], staging window
 //   arg[2] = signal      — DistributedTensor INT32, cross-rank barrier
+//   arg[3] = out         — Tensor [1, NR*SIZE], output buffer
 //
 // Phases (aligned with simpler allgather_distributed reference):
 //   1.  tile.store(local_data, [0, 0], target)   — stage-in (each rank's
@@ -732,8 +733,8 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 //   2b. wait-all  (Ge 1)
 //   3.  for r in 0..NR-1:
 //         chunk = pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])
-//         concat onto accumulator
-//       return accumulator (Tile [1, NR*SIZE] — rank-ordered concatenation)
+//         tile.store(chunk, [0, r*SIZE], out)  — per-peer column offset
+//       return out  (Tensor rebind)
 //
 // Self-read falls out of the same remote_load path via HCCL identity
 // mapping (CommRemotePtr returns local ptr for peer == my_rank).
@@ -741,11 +742,12 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 
 ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
-  INTERNAL_CHECK_SPAN(args.size() == 3, span)
-      << "pld.tensor.allgather rule expects 3 args (local_data, target, signal), got " << args.size();
+  INTERNAL_CHECK_SPAN(args.size() == 4, span)
+      << "pld.tensor.allgather rule expects 4 args (local_data, target, signal, out), got " << args.size();
   const auto& local_data = args[0];
   const auto& target = args[1];
   const auto& signal = args[2];
+  const auto& out = args[3];
 
   auto local_type = As<TileType>(local_data->GetType());
   INTERNAL_CHECK_SPAN(local_type, span) << "pld.tensor.allgather local_data must be TileType";
@@ -821,19 +823,16 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: gather — assemble chunks from all ranks in rank order ----
-  // Build a chain of tile.concat calls in a C++ loop over NR (compile-time
-  // constant).  Following the simpler allgather reference, use
-  // pld.tile.remote_load for every rank including self — the HCCL
-  // CommRemotePtr helper returns the local pointer unchanged for
-  // peer == my_rank, so the self-read naturally falls out of the same
-  // TLOAD path.  Every rank holds exactly one local row, so offsets
-  // [0, 0] are correct for all reads.
+  // ---- Phase 3: gather — per-peer remote_load → tile.store into output Tensor ----
+  // Following the simpler allgather reference (examples/workers/l3/allgather_distributed/)
+  // and the hand-written test_l3_allgather.py: each peer's chunk is remote_loaded
+  // as a Tile [1, SIZE] and immediately stored into the output Tensor at a
+  // rank-ordered column offset [0, r*SIZE].  No tile.concat — each intermediate
+  // Tile fits in UB regardless of NR or SIZE.
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
   INTERNAL_CHECK_SPAN(nr_c, span) << "allgather: target NR must be a compile-time constant for N-rank gather";
   int64_t nr_val = nr_c->value_;
 
-  ExprPtr gathered;
   for (int64_t r = 0; r < nr_val; ++r) {
     auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
 
@@ -842,15 +841,18 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
         reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
         span);
 
-    if (r == 0) {
-      gathered = chunk;
-    } else {
-      gathered = b.Bind("gathered_r" + std::to_string(r),
-                        reg.Create("tile.concat", {gathered, chunk}, {}, span), span);
-    }
+    // Column offset: [0, r*SIZE] — rank-ordered placement.
+    auto r_idx = std::make_shared<ConstInt>(r, DataType::INDEX, span);
+    auto col_offset_expr = MakeMul(r_idx, size_expr, span);
+    auto col_offsets = std::make_shared<MakeTuple>(
+        std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span), col_offset_expr}, span);
+
+    b.Bind("store_r" + std::to_string(r), reg.Create("tile.store", {chunk, col_offsets, out}, {}, span),
+           span);
   }
 
-  return gathered;
+  // Return the output Tensor — the lowering writes directly into it.
+  return out;
 }
 
 // ============================================================================
