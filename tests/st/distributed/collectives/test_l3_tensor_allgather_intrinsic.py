@@ -65,7 +65,6 @@ def _build_allgather_program(n_ranks: int):
             out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            my_rank: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
             # Prepare local chunk as a Tile.
             chunk = pl.load(inp, [0, 0], [1, SIZE])
@@ -83,9 +82,8 @@ def _build_allgather_program(n_ranks: int):
             out: pl.Out[pl.Tensor[[1, nr * SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            my_rank: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, nr * SIZE], pl.FP32]:
-            return self.gather_step(inp, out, data, signal, my_rank)
+            return self.gather_step(inp, out, data, signal)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
@@ -99,7 +97,7 @@ def _build_allgather_program(n_ranks: int):
             for r in pl.range(pld.world_size()):
                 data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)
                 sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
-                self.chip_orch(inputs[r], outputs[r], data, sig, r, device=r)
+                self.chip_orch(inputs[r], outputs[r], data, sig, device=r)
             return outputs
 
     return AllGatherIntrinsicNRank
