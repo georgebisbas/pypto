@@ -184,7 +184,7 @@ Running `LowerCompositeOps` twice produces identical IR after the first run: the
 
 ## `pld.tensor.*` distributed collectives
 
-The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait / `pld.tile.remote_load` / `tile.store` recipe. The rules share the same signal-buffer discipline: a window-bound INT32 `signal` matrix is used as a cross-rank barrier, and the buffer is **single-shot per call**.
+The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait + data-movement recipe. The data-movement primitive differs by op: `allgather` and `broadcast` relocate window data with `pld.tile.get` (a GM→GM bulk copy through a VEC staging tile), while `allreduce` and `reduce_scatter` pull peer chunks into a UB tile with `pld.tile.remote_load` and accumulate with `tile.add`. The rules share the same signal-buffer discipline: a window-bound INT32 `signal` matrix is used as a cross-rank barrier, and the buffer is **single-shot per call**.
 
 ### `pld.tensor.allreduce`
 
@@ -198,14 +198,15 @@ Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects
 
 ### `pld.tensor.allgather`
 
-Decomposes into a 3-phase recipe, aligned with the simpler allgather reference (`simpler/examples/workers/l3/allgather_distributed/`):
+Signature: `allgather(local_data, target, signal, out)`. `local_data` is this rank's chunk (`Tensor` or `Tile` `[1, SIZE]`), `target` is a window-bound `DistributedTensor[NR, SIZE]` staging area, `signal` is the INT32 barrier, and `out` is a plain `Tensor[1, NR*SIZE]` that receives the result. Decomposes into a recipe aligned with the simpler allgather reference (`simpler/examples/workers/l3/allgather_distributed/`):
 
-- Phase 1: `tile.store(local_data, [0, 0], target)` — stage this rank's chunk into its private HCCL window at local row 0
+- Phase 0: `tile.load(local_data, [0, 0], [1, SIZE])` — emit a Tile from the plain input when `local_data` is a `Tensor`; skipped when it is already a Tile
+- Phase 1: `tile.store(stage_tile, [0, 0], target)` — stage this rank's chunk into its private HCCL window at local row 0
 - Phase 2a: notify-all (`Set 1`)
 - Phase 2b: wait-all (`Ge 1`)
-- Phase 3: for `r` in `0..NR-1`, `pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])` and `tile.concat` onto accumulator; return the concatenated Tile `[1, NR*SIZE]`
+- Phase 3: for `r` in `0..NR-1`, `pld.tile.get(out, peer=r, target, stage, dst_offsets=[0, r*SIZE], src_offsets=[0, 0], shape=[1, SIZE])` — transfer each peer's chunk directly into `out` at column offset `[0, r*SIZE]` through one shared `[1, SIZE]` VEC staging tile. No `tile.concat`; each transfer is `[1, SIZE]` so it fits in UB for any `NR`/`SIZE`. Returns the `out` **Tensor** `[1, NR*SIZE]`.
 
-Self-read falls out of the same `remote_load` path via HCCL identity mapping (`CommRemotePtr` returns local pointer for `peer == my_rank`). Every rank produces the identical rank-ordered concatenation.
+Self-read falls out of the same `pld.tile.get` path via HCCL identity mapping (`CommRemotePtr` returns local pointer for `peer == my_rank`). Every rank produces the identical rank-ordered concatenation in `out`.
 
 ### `pld.tensor.reduce_scatter`
 
@@ -228,7 +229,7 @@ Decomposes into a 3-phase recipe:
 
 - Phase 2a: notify-all (`Set 1`)
 - Phase 2b: wait-all (`Ge 1`)
-- Phase 3: every non-root rank `remote_load`s root's slice and `tile.store`s it locally; root copies its own slice in-place
+- Phase 3: `tile.create` (VEC staging tile) + `pld.tile.get(target, peer=root, target, stage)` on every rank — each rank reads root's slice into its own `target`. For `peer == root` the HCCL identity mapping makes the get a local no-op, so root keeps its own data while non-root ranks receive root's.
 
 `root` is a static `int` kwarg known at compile time.
 
@@ -243,7 +244,7 @@ The returned expression is the same `signal` tensor, enabling the rebind idiom `
 
 ### Signal-buffer discipline
 
-All distributed rules use `kGe` (not `kEq`) for wait predicates. The cell is monotonically increasing within a single call, but a slow rank's first poll may already see the cell past the threshold if a faster peer has finished its Phase-3 remote loads and started the next notify. `kEq` would deadlock in that case; `kGe` does not. A self-resetting variant (Set 0 / Eq 0 at the end of a call) is blocked on PTOAS issue #797.
+All distributed rules use `kGe` (not `kEq`) for wait predicates. The cell is monotonically increasing within a single call, but a slow rank's first poll may already see the cell past the threshold if a faster peer has finished its Phase-3 data movement and started the next notify. `kEq` would deadlock in that case; `kGe` does not. A self-resetting variant (Set 0 / Eq 0 at the end of a call) is blocked on PTOAS issue #797.
 
 ## Implementation Notes
 

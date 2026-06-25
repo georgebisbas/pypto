@@ -631,7 +631,7 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
 // Broadcast root rank's data to every rank:
 //   Phase 2a: notify-all (Set 1)
 //   Phase 2b: wait-all  (Ge 1)
-//   Phase 3:  pld.tensor.get(target, peer=root, src=target)
+//   Phase 3:  tile.create(VEC stage) + pld.tile.get(target, peer=root, src=target, stage)
 // Returns target (in-place rebind).  Single barrier — broadcast is read-only
 // after staging, no WAR hazard.
 // ============================================================================
@@ -698,10 +698,34 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: pld.tensor.get(root's data → local target slot) ----
-  // get(target, peer=root, src=target) copies the root rank's entire slice of
-  // target into every rank's local target slot through a VEC staging tile (TGET).
-  b.Bind("get_ret", reg.Create("pld.tensor.get", {target, root_expr, target}, {}, span), span);
+  // ---- Phase 3: pld.tile.get(root's data → local target slot) ----
+  // Emit tile.create + pld.tile.get directly (the tensor-level get has no
+  // codegen and ConvertTensorToTileOps runs before this pass).
+  //
+  // Build a 2D VEC staging tile [rows, cols] where rows = prod(dims[:-1]),
+  // cols = dims[-1], mirroring ConvertTensorToTileOps's lowering of
+  // pld.tensor.get.
+  int64_t rows_val = 1;
+  for (size_t d = 0; d + 1 < target_type->shape_.size(); ++d) {
+    auto dim_c = As<ConstInt>(target_type->shape_[d]);
+    INTERNAL_CHECK_SPAN(dim_c, span) << "broadcast target shape must be static";
+    rows_val *= dim_c->value_;
+  }
+  auto last_dim_c = As<ConstInt>(target_type->shape_.back());
+  INTERNAL_CHECK_SPAN(last_dim_c, span) << "broadcast target shape must be static";
+  int64_t cols_val = last_dim_c->value_;
+
+  auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
+  auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
+  auto stage_shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+
+  auto stage_tile =
+      b.Bind("bcast_stage",
+             reg.Create("tile.create", {stage_shape_tuple},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  b.Bind("get_ret", reg.Create("pld.tile.get", {target, root_expr, target, stage_tile}, {}, span), span);
 
   // In-place rebind: return target so the LHS Var holds the post-broadcast view.
   return target;
@@ -727,11 +751,13 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
 //   2a. notify-all (Set 1)
 //   2b. wait-all  (Ge 1)
 //   3.  for r in 0..NR-1:
-//         chunk = pld.tile.remote_load(target, peer=r, [0,0], [1,SIZE])
-//         tile.store(chunk, [0, r*SIZE], out)  — per-peer column offset
+//         pld.tile.get(out, peer=r, target, stage,
+//                      dst_offsets=[0, r*SIZE], src_offsets=[0,0], shape=[1,SIZE])
+//       — transfer each peer's chunk directly into out at column offset
+//         [0, r*SIZE]; one shared [1, SIZE] VEC staging tile, no tile.concat
 //       return out  (Tensor rebind)
 //
-// Self-read falls out of the same remote_load path via HCCL identity
+// Self-read falls out of the same pld.tile.get path via HCCL identity
 // mapping (CommRemotePtr returns local ptr for peer == my_rank).
 // ============================================================================
 
@@ -834,31 +860,36 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
       },
       span);
 
-  // ---- Phase 3: gather — per-peer remote_load → tile.store into output Tensor ----
-  // Following the simpler allgather reference (examples/workers/l3/allgather_distributed/)
-  // and the hand-written test_l3_allgather.py: each peer's chunk is remote_loaded
-  // as a Tile [1, SIZE] and immediately stored into the output Tensor at a
-  // rank-ordered column offset [0, r*SIZE].  No tile.concat — each intermediate
-  // Tile fits in UB regardless of NR or SIZE.
+  // ---- Phase 3: gather — per-peer pld.tile.get directly into output Tensor ----
+  // Each peer's chunk [1, SIZE] is transferred from the window buffer directly
+  // into the output Tensor at a rank-ordered column offset [0, r*SIZE] via
+  // pld.tile.get (subregion form).  A single VEC staging tile [1, SIZE] is
+  // shared across all peers — no tile.concat, each intermediate fits in UB
+  // regardless of NR or SIZE.
+  //
+
   auto nr_c = As<ConstInt>(target_type->shape_[0]);
   INTERNAL_CHECK_SPAN(nr_c, span) << "allgather: target NR must be a compile-time constant for N-rank gather";
   int64_t nr_val = nr_c->value_;
 
+  auto gather_stage =
+      b.Bind("ag_stage",
+             reg.Create("tile.create", {chunk_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
   for (int64_t r = 0; r < nr_val; ++r) {
     auto rank_expr = std::make_shared<ConstInt>(r, DataType::INDEX, span);
 
-    auto chunk = b.Bind(
-        "chunk_r" + std::to_string(r),
-        reg.Create("pld.tile.remote_load", {target, rank_expr, zero_row_offsets, chunk_shape}, {}, span),
-        span);
-
-    // Column offset: [0, r*SIZE] — rank-ordered placement.
-    auto r_idx = std::make_shared<ConstInt>(r, DataType::INDEX, span);
-    auto col_offset_expr = MakeMul(r_idx, size_expr, span);
-    auto col_offsets = std::make_shared<MakeTuple>(
+    // Column dst offset: [0, r*SIZE] — rank-ordered placement.
+    auto col_offset_expr = MakeMul(rank_expr, size_expr, span);
+    auto dst_offsets = std::make_shared<MakeTuple>(
         std::vector<ExprPtr>{std::make_shared<ConstInt>(0, DataType::INDEX, span), col_offset_expr}, span);
 
-    b.Bind("store_r" + std::to_string(r), reg.Create("tile.store", {chunk, col_offsets, out}, {}, span),
+    b.Bind("get_r" + std::to_string(r),
+           reg.Create("pld.tile.get",
+                      {out, rank_expr, target, gather_stage, dst_offsets, zero_row_offsets, chunk_shape}, {},
+                      span),
            span);
   }
 

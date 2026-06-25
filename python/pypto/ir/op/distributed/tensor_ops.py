@@ -214,8 +214,8 @@ def broadcast(
     ``root`` is a static int selecting the source rank.  The result type is
     ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
 
-    LowerCompositeOps expands this into notify-all / wait-all + remote_load;
-    this Call never survives past that pass.
+    LowerCompositeOps expands this into notify-all / wait-all + tile.create +
+    pld.tile.get; this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.tensor.broadcast", [target, signal], {"root": root}, actual_span)
@@ -240,8 +240,8 @@ def allgather(
     the rank-ordered concatenation.
 
     LowerCompositeOps expands this into tile.load (when local_data is a
-    Tensor) + tile.store + notify-all / wait-all + per-peer remote_load
-    + tile.store into out; this Call never survives past that pass.
+    Tensor) + tile.store + notify-all / wait-all + per-peer pld.tile.get
+    into out; this Call never survives past that pass.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.tensor.allgather", [local_data, target, signal, out], {}, actual_span)

@@ -743,7 +743,8 @@ _BROADCAST_REQUIRED_OPS = {
     "pld.system.rank",
     "pld.system.notify",
     "pld.system.wait",
-    "pld.tensor.get",
+    "tile.create",
+    "pld.tile.get",
 }
 
 
@@ -782,7 +783,7 @@ def test_broadcast_is_decomposed_to_primitives():
 
 def test_broadcast_emits_for_and_if_control_flow():
     """Broadcast emits 2 ForStmts + 2 IfStmts: notify-all + wait-all.
-    Phase 3 (remote_load + store) has no loop."""
+    Phase 3 (tile.create + pld.tile.get) has no loop."""
     Before = _build_broadcast_before()
     After = passes.lower_composite_ops()(Before)
     collector = _StmtKindCollector()
@@ -812,7 +813,8 @@ _ALLGATHER_REQUIRED_OPS = {
     "pld.system.rank",
     "pld.system.notify",
     "pld.system.wait",
-    "pld.tile.remote_load",
+    "tile.create",
+    "pld.tile.get",
     "tile.store",
     "tile.load",
 }
@@ -856,9 +858,9 @@ def test_allgather_is_decomposed_to_primitives():
 def test_allgather_emits_for_and_if_control_flow():
     """Allgather emits 2 ForStmts + 2 IfStmts: notify-all, wait-all.
 
-    Phase 3 (gather) uses pld.tile.remote_load for all ranks including
+    Phase 3 (gather) uses pld.tile.get for all ranks including
     self (following the simpler reference), so there is no per-rank
-    IfStmt — the self-read falls out of the same remote_load path
+    IfStmt — the self-read falls out of the same get path
     via HCCL identity mapping."""
     Before = _build_allgather_before()
     After = passes.lower_composite_ops()(Before)

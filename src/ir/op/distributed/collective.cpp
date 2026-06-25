@@ -14,9 +14,10 @@
  * @brief Distributed tensor-level collective ops — pld.tensor.{barrier,broadcast,allgather,reduce_scatter}.
  *
  * Composite collective ops that lower through LowerCompositeOps (pass 14)
- * into notify/wait/remote_load/store primitives.  Each op registers a type
- * deducer and an op description; the actual IR expansion lives in the
- * lowering pass.
+ * into notify / wait + data-movement primitives.  allgather / broadcast move
+ * data via pld.tile.get; allreduce / reduce_scatter accumulate via
+ * pld.tile.remote_load + tile.add.  Each op registers a type deducer and an op
+ * description; the actual IR expansion lives in the lowering pass.
  *
  *   - pld.tensor.barrier(signal)                -> DistributedTensorType
  *   - pld.tensor.broadcast(target, signal, root) -> DistributedTensorType
@@ -177,8 +178,8 @@ REGISTER_OP("pld.tensor.broadcast")
         "`target` is a window-bound DistributedTensor (each rank writes its own data before the "
         "call; root's data is read and replicated by all non-root ranks). `signal` is a "
         "window-bound INT32 matrix used as the cross-rank barrier. `root` (int kwarg) selects "
-        "the source rank. Lowered to notify-all / wait-all + pld.tensor.get by LowerCompositeOps; "
-        "this op never survives past that pass.")
+        "the source rank. Lowered to notify-all / wait-all + tile.create + pld.tile.get by "
+        "LowerCompositeOps; this op never survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (InOut)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor used as cross-rank barrier (InOut)")
@@ -243,7 +244,7 @@ REGISTER_OP("pld.tensor.allgather")
         "`signal` is a window-bound INT32 DistributedTensor used as the cross-rank barrier. "
         "`out` is a plain Tensor[1, NR*SIZE] that receives the rank-ordered concatenation. "
         "Lowered to tile.load (when local_data is a Tensor) + tile.store + notify-all / wait-all "
-        "+ per-peer remote_load + tile.store into out by LowerCompositeOps; this op never "
+        "+ per-peer pld.tile.get into out by LowerCompositeOps; this op never "
         "survives past that pass.")
     .set_op_category("DistributedOp")
     .add_argument("local_data", "Local Tensor or Tile [1, SIZE] — this rank's data (Input)")

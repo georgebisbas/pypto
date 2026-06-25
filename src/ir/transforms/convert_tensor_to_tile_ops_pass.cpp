@@ -864,7 +864,7 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
     return call->args_[0];
   }
   // pld.tensor.allgather(local_data, target, signal, out): writes gathered
-  // chunks into out on every rank (Phase 3 per-peer tile.store).  out (args_[3])
+  // chunks into out on every rank (Phase 3 per-peer pld.tile.get).  out (args_[3])
   // is the primary write target; target (args_[1]) is used for staging only.
   if (op_name == "pld.tensor.allgather" && call->args_.size() >= 4) {
     return call->args_[3];
@@ -883,7 +883,7 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
     return call->args_[0];
   }
   // pld.tensor.broadcast(target, signal, *, root): writes root's data into
-  // target on every rank via pld.tensor.get.  target (args_[0]) is
+  // target on every rank via pld.tile.get.  target (args_[0]) is
   // the primary write target.
   if (op_name == "pld.tensor.broadcast" && !call->args_.empty()) {
     return call->args_[0];
@@ -1045,7 +1045,7 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
   if (op_name == "pld.tensor.allgather") {
     // pld.tensor.allgather(local_data, target, signal, out):
     //   local_data (args_[0]) is In (read-only — staged into target).
-    //   target (args_[1]) is read (Phase 3 remote_load from peers)
+    //   target (args_[1]) is read (Phase 3 pld.tile.get from peers)
     //     and written (Phase 1 store into own window).  InOut.
     //   signal (args_[2]) is written (notify) and read (wait).  InOut.
     //   out (args_[3]) is write-only — the intrinsic writes directly into it.
@@ -1089,8 +1089,8 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
 
   if (op_name == "pld.tensor.broadcast") {
     // pld.tensor.broadcast(target, signal, *, root): target (args_[0]) and
-    // signal (args_[1]) are both InOut.  Target is read via pld.tensor.get
-    // (non-root reads root's slice), written via pld.tensor.get into local
+    // signal (args_[1]) are both InOut.  Target is read via pld.tile.get
+    // (non-root reads root's slice), written via pld.tile.get into local
     // slot.  Signal is written (Phase 2a notify) and read (Phase 2b wait).
     for (size_t i = 0; i < std::min<size_t>(2, call->args_.size()); ++i) {
       auto origins = CollectReferencedOrigins(call->args_[i], origin_map);
