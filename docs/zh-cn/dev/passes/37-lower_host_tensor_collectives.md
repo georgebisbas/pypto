@@ -3,8 +3,10 @@
 ## 概览
 
 `LowerHostTensorCollectives` 将 host orchestrator 中的
-`pld.tensor.allreduce` 调用改写为编译器内部的 builtin chip dispatch。它在
-[`MaterializeCommDomainScopes`](36-materialize_comm_domain_scopes.md) 之后运行，
+`pld.tensor.allreduce`、`pld.tensor.barrier`、`pld.tensor.broadcast`、
+`pld.tensor.reduce_scatter` 和 `pld.tensor.allgather` 调用改写为编译器内部的
+builtin chip dispatch。它在
+[`MaterializeCommDomainScopes`](38-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
 
@@ -26,6 +28,10 @@
 
 ```python
 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+signal = pld.tensor.barrier(signal)
+data = pld.tensor.broadcast(data, signal, root=0)
+data = pld.tensor.reduce_scatter(data, signal)
+data = pld.tensor.allgather(data, signal)
 ```
 
 本 pass 会为每个参与设备生成一个 `builtin.tensor.allreduce` 调用。若外层
