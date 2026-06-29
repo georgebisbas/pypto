@@ -45,6 +45,7 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64  # matches COUNT_PER_RANK in simpler allgather_kernel.cpp
 NR = pl.dynamic("NR")
+GATHERED = pl.dynamic("GATHERED")  # = NR * SIZE at runtime — concatenated output
 
 
 def _expected_allgather(inputs: torch.Tensor) -> torch.Tensor:
@@ -70,56 +71,54 @@ class AllGatherMesh:
     def gather_step(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, GATHERED], pl.FP32]],
         scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        gather_peer: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-        """Per-peer gather step with stage-in + barrier gated on first call."""
+    ) -> pl.Tensor[[1, GATHERED], pl.FP32]:
+        """Monolithic allgather: stage, barrier, gather all peers in one kernel."""
         ctx = pld.get_comm_ctx(scratch)
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
 
-        # Phase 1: stage-in — local input → this rank's scratch slot (once, on first call).
-        if gather_peer == 0:
-            local = pl.load(inp, [0, 0], [1, SIZE])
-            pl.store(local, [0, 0], scratch)
+        # Phase 1: stage-in — local input → this rank's scratch slot.
+        local = pl.load(inp, [0, 0], [1, SIZE])
+        pl.store(local, [0, 0], scratch)
 
-        # Phase 2: dual-loop barrier — notify every peer, wait on every peer (once).
-        if gather_peer == 0:
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    pld.system.notify(
-                        signal,
-                        peer=peer,
-                        offsets=[my_rank, 0],
-                        value=1,
-                        op=pld.NotifyOp.AtomicAdd,
-                    )
-            for src in pl.range(nranks):
-                if src != my_rank:
-                    pld.system.wait(
-                        signal=signal,
-                        offsets=[src, 0],
-                        expected=1,
-                        cmp=pld.WaitCmp.Ge,
-                    )
+        # Phase 2: dual-loop barrier — notify every peer, wait on every peer.
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
+                )
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(
+                    signal=signal,
+                    offsets=[src, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
 
-        # Phase 3: gather — remote_load gather_peer's scratch slice.
-        recv = pld.tile.remote_load(scratch, peer=gather_peer, offsets=[0, 0], shape=[1, SIZE])
-        return pl.store(recv, [0, 0], out)
+        # Phase 3: gather — remote_load each peer's scratch into output.
+        for peer in pl.range(nranks):
+            recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+            pl.store(recv, [0, peer * SIZE], out)
+        return out
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def chip_orch(
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        out: pl.Out[pl.Tensor[[1, GATHERED], pl.FP32]],
         scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        gather_peer: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+    ) -> pl.Tensor[[1, GATHERED], pl.FP32]:
         """Per-device orchestration wrapper around ``gather_step``."""
-        return self.gather_step(inp, out, scratch, signal, gather_peer)
+        return self.gather_step(inp, out, scratch, signal)
 
     @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
     def host_orch(
@@ -127,22 +126,20 @@ class AllGatherMesh:
         inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, NR * SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, NR * SIZE], pl.FP32]:
-        """Launch one chip orchestration per rank per peer with shared window buffers."""
+        """Launch one chip orchestration per rank with shared window buffers."""
         scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
 
         for r in pl.range(pld.world_size()):
-            for peer in pl.range(pld.world_size()):
-                scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-                self.chip_orch(
-                    inputs[r],
-                    outputs[r, 0:1, peer * SIZE : (peer + 1) * SIZE],
-                    scratch,
-                    signal,
-                    peer,
-                    device=r,
-                )
+            scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            self.chip_orch(
+                inputs[r],
+                outputs[r],
+                scratch,
+                signal,
+                device=r,
+            )
         return outputs
 
 
