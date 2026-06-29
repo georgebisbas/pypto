@@ -58,9 +58,7 @@ def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
         torch.arange(SIZE, dtype=torch.float32).reshape(1, SIZE),  # rank 0 = root
     ]
     for r in range(1, n_ranks):
-        rows.append(
-            torch.arange(r * 100.0, r * 100.0 + SIZE, dtype=torch.float32).reshape(1, SIZE)
-        )
+        rows.append(torch.arange(r * 100.0, r * 100.0 + SIZE, dtype=torch.float32).reshape(1, SIZE))
     return torch.stack(rows)
 
 
@@ -175,9 +173,7 @@ class TestL3Broadcast:
         )
         # Non-root inputs must not leak into outputs.
         for r in range(1, n_ranks):
-            assert not torch.allclose(outputs[r], inputs[r]), (
-                f"non-root rank {r} input leaked into output"
-            )
+            assert not torch.allclose(outputs[r], inputs[r]), f"non-root rank {r} input leaked into output"
 
 
 if __name__ == "__main__":

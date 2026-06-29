@@ -53,10 +53,7 @@ STAGED = pl.dynamic("STAGED")  # = NR * SIZE at runtime — all ranks' data in s
 def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
     """Per-rank golden: element-wise sum of chunk ``r`` across all ranks."""
     n_ranks = inputs.shape[0]
-    chunks = [
-        sum(inputs[k, 0, r * SIZE : (r + 1) * SIZE] for k in range(n_ranks))
-        for r in range(n_ranks)
-    ]
+    chunks = [sum(inputs[k, 0, r * SIZE : (r + 1) * SIZE] for k in range(n_ranks)) for r in range(n_ranks)]
     return torch.stack(chunks).reshape(n_ranks, 1, SIZE)
 
 
@@ -115,9 +112,7 @@ class ReduceScatterMesh:
         acc = pl.load(scratch, [0, my_rank * SIZE], [1, SIZE])
         for peer in pl.range(nranks):
             if peer != my_rank:
-                recv = pld.tile.remote_load(
-                    scratch, peer=peer, offsets=[0, my_rank * SIZE], shape=[1, SIZE]
-                )
+                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, my_rank * SIZE], shape=[1, SIZE])
                 acc = pl.add(acc, recv)
 
         # Phase 4: stage-out — reduced chunk → local output.
