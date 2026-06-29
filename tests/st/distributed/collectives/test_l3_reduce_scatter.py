@@ -47,6 +47,7 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 64  # matches COUNT_PER_RANK in simpler reduce_scatter_kernel.cpp
 NR = pl.dynamic("NR")
+STAGED = pl.dynamic("STAGED")  # = NR * SIZE at runtime — all ranks' data in scratch
 
 
 def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
@@ -75,47 +76,48 @@ class ReduceScatterMesh:
     @pl.function(type=pl.FunctionType.InCore)
     def reduce_scatter_step(
         self,
-        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        inp: pl.Tensor[[1, STAGED], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, STAGED], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        chunk_idx: pl.Scalar[pl.INDEX],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-        """Per-chunk reduce-scatter with stage-in + barrier gated on first call."""
+        """Monolithic reduce-scatter: stage all data, barrier, reduce own chunk."""
         ctx = pld.get_comm_ctx(scratch)
         my_rank = pld.rank(ctx)
         nranks = pld.nranks(ctx)
 
-        # Phase 1: stage-in — copy this rank's chunk into scratch (once, on first call).
-        if chunk_idx == 0:
-            local = pl.load(inp, [0, 0], [1, SIZE])
-            pl.store(local, [0, 0], scratch)
+        # Phase 1: stage-in — copy ALL local chunks into scratch so every peer
+        # can read the specific chunk it needs at the correct offset.
+        for c in pl.range(nranks):
+            chunk = pl.load(inp, [0, c * SIZE], [1, SIZE])
+            pl.store(chunk, [0, c * SIZE], scratch)
 
-        # Phase 2: dual-loop barrier — notify every peer, wait on every peer (once).
-        if chunk_idx == 0:
-            for peer in pl.range(nranks):
-                if peer != my_rank:
-                    pld.system.notify(
-                        signal,
-                        peer=peer,
-                        offsets=[my_rank, 0],
-                        value=1,
-                        op=pld.NotifyOp.AtomicAdd,
-                    )
-            for src in pl.range(nranks):
-                if src != my_rank:
-                    pld.system.wait(
-                        signal=signal,
-                        offsets=[src, 0],
-                        expected=1,
-                        cmp=pld.WaitCmp.Ge,
-                    )
-
-        # Phase 3: reduce — sum chunk_idx across all peers.
-        acc = pl.load(scratch, [0, 0], [1, SIZE])
+        # Phase 2: dual-loop barrier — notify every peer, wait on every peer.
         for peer in pl.range(nranks):
             if peer != my_rank:
-                recv = pld.tile.remote_load(scratch, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+                pld.system.notify(
+                    signal,
+                    peer=peer,
+                    offsets=[my_rank, 0],
+                    value=1,
+                    op=pld.NotifyOp.AtomicAdd,
+                )
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(
+                    signal=signal,
+                    offsets=[src, 0],
+                    expected=1,
+                    cmp=pld.WaitCmp.Ge,
+                )
+
+        # Phase 3: reduce — sum my chunk across all peers.
+        acc = pl.load(scratch, [0, my_rank * SIZE], [1, SIZE])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                recv = pld.tile.remote_load(
+                    scratch, peer=peer, offsets=[0, my_rank * SIZE], shape=[1, SIZE]
+                )
                 acc = pl.add(acc, recv)
 
         # Phase 4: stage-out — reduced chunk → local output.
@@ -124,14 +126,13 @@ class ReduceScatterMesh:
     @pl.function(type=pl.FunctionType.Orchestration)
     def chip_orch(
         self,
-        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        inp: pl.Tensor[[1, STAGED], pl.FP32],
         out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        scratch: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        scratch: pl.InOut[pld.DistributedTensor[[1, STAGED], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-        chunk_idx: pl.Scalar[pl.INDEX],
     ) -> pl.Tensor[[1, SIZE], pl.FP32]:
         """Per-device orchestration wrapper around ``reduce_scatter_step``."""
-        return self.reduce_scatter_step(inp, out, scratch, signal, chunk_idx)
+        return self.reduce_scatter_step(inp, out, scratch, signal)
 
     @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
     def host_orch(
@@ -139,22 +140,20 @@ class ReduceScatterMesh:
         inputs: pl.Tensor[[NR, 1, NR * SIZE], pl.FP32],
         outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
-        """Launch one chip orchestration per rank per chunk with shared window buffers."""
-        scratch_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
+        """Launch one chip orchestration per rank with shared window buffers."""
+        scratch_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * 4)  # NR x SIZE FP32
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)  # NR x 1 x INT32
 
         for r in pl.range(pld.world_size()):
-            for c in pl.range(pld.world_size()):
-                scratch = pld.window(scratch_buf, [1, SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-                self.chip_orch(
-                    inputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
-                    outputs[r, 0:1, c * SIZE : (c + 1) * SIZE],
-                    scratch,
-                    signal,
-                    c,
-                    device=r,
-                )
+            scratch = pld.window(scratch_buf, [1, pld.world_size() * SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            self.chip_orch(
+                inputs[r],
+                outputs[r],
+                scratch,
+                signal,
+                device=r,
+            )
         return outputs
 
 
