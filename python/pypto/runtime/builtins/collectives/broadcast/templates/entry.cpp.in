@@ -46,6 +46,9 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const L2Ta
   submit_broadcast_kernel<{{dtype_cpp}}>(orch_args);
 }
 
+// The sanitized builtin symbol is kept as an alias-like wrapper for easier
+// debugging of materialized sources; kernel_config.py still uses the standard
+// aicpu_orchestration_entry symbol expected by compile_and_assemble.
 __attribute__((visibility("default"))) void {{entry}}(const L2TaskArgs &orch_args) {
   aicpu_orchestration_entry(orch_args);
 }

@@ -319,8 +319,9 @@ def test_host_broadcast_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32],
-                      sig: pld.DistributedTensor[[4], pl.INT32]):
+        def chip_orch(
+            self, data: pld.DistributedTensor[[256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
@@ -358,8 +359,9 @@ def test_host_reduce_scatter_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[4, 256], pl.FP32],
-                      sig: pld.DistributedTensor[[4], pl.INT32]):
+        def chip_orch(
+            self, data: pld.DistributedTensor[[4, 256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
@@ -397,8 +399,9 @@ def test_host_allgather_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[4, 256], pl.FP32],
-                      sig: pld.DistributedTensor[[4], pl.INT32]):
+        def chip_orch(
+            self, data: pld.DistributedTensor[[4, 256], pl.FP32], sig: pld.DistributedTensor[[4], pl.INT32]
+        ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
