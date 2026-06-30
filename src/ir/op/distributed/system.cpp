@@ -176,8 +176,9 @@ REGISTER_OP("pld.system.fence")
         "visible before subsequent notifies. Lowers to pto.tfence.")
     .set_op_category("DistributedOp")
     .no_memory_spec()
-    .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&,
-                      const Span&) { return GetUnknownType(); });
+    .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&) {
+      return GetUnknownType();
+    });
 
 }  // namespace ir
 }  // namespace pypto
