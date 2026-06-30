@@ -75,6 +75,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TASSIGN(stage_tile, 0x0);
   TASSIGN(recv_tile, 0x10000);
 
+  // Signal scheme: each slot is single-writer (rank j writes into my_rank's
+  // signal[j]). TNOTIFY adds a constant 1 per tile; the TWAIT threshold grows
+  // 1, 2, 3, … because TWAIT(GE) is non-consuming — the slot retains its
+  // accumulated value across tiles. This matches the reduce_scatter signal
+  // protocol (constant notify + incrementing wait threshold).
+  int32_t expected = 1;
   for (int64_t base = 0; base < numel; base += kTileCount) {
     int64_t chunk64 = numel - base;
     if (chunk64 > kTileCount) chunk64 = kTileCount;
@@ -94,10 +100,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
     pipe_barrier(PIPE_ALL);
 
-    // Signal scheme: each slot is single-writer (rank j writes into my_rank's
-    // signal[j]), so a constant 1 per tile is sufficient — the threshold stays
-    // in lockstep with the per-slot accumulation across tiles (matching the
-    // reduce_scatter kernel signal scheme).
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
       __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
@@ -107,8 +109,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     for (int peer = 0; peer < nranks; ++peer) {
       if (peer == my_rank) continue;
       pto::comm::Signal sig(signal_base + peer);
-      pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+      pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
     }
+    ++expected;
     pipe_barrier(PIPE_ALL);
 
     if (my_rank != kRoot) {
