@@ -175,6 +175,7 @@ REGISTER_OP("pld.system.fence")
         "Memory fence: drains the store buffer so prior remote_stores are globally "
         "visible before subsequent notifies. Lowers to pto.tfence.")
     .set_op_category("DistributedOp")
+    .no_argument()
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&) {
       return GetUnknownType();
