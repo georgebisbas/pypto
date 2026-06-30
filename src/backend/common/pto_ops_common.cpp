@@ -3571,7 +3571,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("pld.system.fence",
       [](const ir::CallPtr&, codegen::CodegenBase& codegen_base) {
         auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-        codegen.Emit("pto.tfence");
+        codegen.Emit("pto.threadfence");
         return std::string("");
       });
 
