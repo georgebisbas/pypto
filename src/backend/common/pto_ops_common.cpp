@@ -3571,6 +3571,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("pld.system.fence",
       [](const ir::CallPtr&, codegen::CodegenBase& codegen_base) {
         auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+        // WORKAROUND for PTOAS#872: the proper fix adds dsb(DSB_DDR) inside
+        // TNOTIFY_IMPL. Until that lands, pto.barrier <PIPE_ALL> drains the
+        // MTE3 pipeline, guaranteeing prior TSTORE data is visible before the
+        // subsequent TNOTIFY signal on current silicon.
         codegen.Emit("pto.barrier <PIPE_ALL>");
         return std::string("");
       });

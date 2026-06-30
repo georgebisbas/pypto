@@ -167,13 +167,26 @@ REGISTER_OP("pld.system.wait")
     .f_deduce_type(DeduceWaitType);
 
 // ============================================================================
-// pld.system.fence — memory fence (pto.tfence)
+// pld.system.fence — memory ordering barrier between remote_store and notify
+// ============================================================================
+//
+// On weakly-ordered NoC fabrics (Ascend 910B), a pld.tile.remote_store (TSTORE)
+// and a subsequent pld.system.notify (TNOTIFY) may be reordered, causing the
+// peer to observe the signal before the data. This op inserts a pipeline barrier
+// (pto.barrier <PIPE_ALL>) that drains the MTE3 store before the MTE3 notify,
+// guaranteeing data-before-signal ordering.
+//
+// WORKAROUND for PTOAS#872: the proper fix adds dsb(DSB_DDR) inside
+// TNOTIFY_IMPL. Until that lands, pto.barrier <PIPE_ALL> is sufficient for
+// current silicon.
 // ============================================================================
 
 REGISTER_OP("pld.system.fence")
     .set_description(
-        "Memory fence: drains the store buffer so prior remote_stores are globally "
-        "visible before subsequent notifies. Lowers to pto.tfence.")
+        "Memory ordering barrier between remote_store and notify. "
+        "Drains the MTE3 store buffer so prior remote_stores are globally "
+        "visible before subsequent notifies on weakly-ordered NoC fabrics. "
+        "Lowers to pto.barrier <PIPE_ALL>.")
     .set_op_category("DistributedOp")
     .no_argument()
     .no_memory_spec()

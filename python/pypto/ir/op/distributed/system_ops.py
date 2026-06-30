@@ -119,9 +119,13 @@ def wait(
 def fence(*, span: Span | None = None) -> Call:
     """Build a ``pld.system.fence()`` Call.
 
-    Memory fence: drains the store buffer so prior ``remote_store`` writes
-    are globally visible before subsequent ``notify`` signals. Lowers to
-    ``pto.tfence``. No arguments, no return value.
+    Memory ordering barrier that drains the MTE3 store buffer, guaranteeing
+    prior ``remote_store`` writes are globally visible before subsequent
+    ``notify`` signals on weakly-ordered NoC fabrics (Ascend 910B).
+    Lowers to ``pto.barrier <PIPE_ALL>``. No arguments, no return value.
+
+    WORKAROUND for PTOAS#872: remove once dsb(DSB_DDR) is folded into
+    TNOTIFY_IMPL.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     return _ir_core.create_op_call("pld.system.fence", [], {}, actual_span)

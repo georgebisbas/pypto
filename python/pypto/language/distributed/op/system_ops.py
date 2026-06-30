@@ -168,11 +168,12 @@ def wait(
 
 
 def fence() -> Call:
-    """Memory fence — drain store buffer between remote_store and notify.
+    """Memory ordering barrier between remote_store and notify.
 
     Insert between ``pld.tile.remote_store`` and ``pld.system.notify``
-    to guarantee the stored data is globally visible before the signal
-    lands. Lowers to ``pto.tfence``. No arguments, no return value.
+    on weakly-ordered NoC fabrics (Ascend 910B) to guarantee the stored
+    data is globally visible before the signal lands. Lowers to
+    ``pto.barrier <PIPE_ALL>``. No arguments, no return value.
     """
     return _ir_system.fence()
 
