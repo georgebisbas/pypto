@@ -50,6 +50,7 @@ class HostTensorBarrier:
         self,
         inp: pl.Tensor[[1, SIZE], pl.FP32],
         data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        sig: pld.DistributedTensor[[NR], pl.INT32],
     ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
         return self.publish_step(inp, data)
 
@@ -80,12 +81,12 @@ class HostTensorBarrier:
     ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
         data_buf = pld.alloc_window_buffer(SIZE * 4)
         signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+        signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
 
         for r in pl.range(pld.world_size()):
             data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
-            self.publish_orch(inputs[r], data, device=r)
+            self.publish_orch(inputs[r], data, signal, device=r)
 
-        signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
         signal = pld.tensor.barrier(signal)
 
         for r in pl.range(pld.world_size()):

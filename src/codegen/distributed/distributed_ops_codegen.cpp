@@ -275,8 +275,11 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_reduce_scatter, "builtin.tensor.reduce_sc
 
 // ============================================================================
 // builtin.tensor.allgather: compiler-generated chip dispatch for pld.tensor.allgather.
+//
+// NOT YET WIRED: reserved for future concurrent-dispatch use.
 // Not currently emitted by the HOST lowering pass (which uses builtin.tensor.barrier
-// for the pre-staged path); registered for future concurrent-dispatch use.
+// for the pre-staged path). When the concurrent-dispatch lowering lands, this
+// handler and its template package will be wired in.
 // ============================================================================
 REGISTER_DISTRIBUTED_OP(builtin_tensor_allgather, "builtin.tensor.allgather") {
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);

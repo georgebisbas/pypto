@@ -467,6 +467,10 @@ REGISTER_OP("builtin.tensor.reduce_scatter")
 
 // ============================================================================
 // builtin.tensor.allgather — host dispatch for pld.tensor.allgather
+//
+// NOT YET WIRED: reserved for future concurrent-dispatch lowering.
+// Currently the HOST allgather path lowers to builtin.tensor.barrier instead;
+// this builtin will be used when the concurrent-dispatch lowering lands.
 // ============================================================================
 
 namespace {

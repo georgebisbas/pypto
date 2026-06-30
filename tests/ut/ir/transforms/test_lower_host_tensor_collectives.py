@@ -280,7 +280,8 @@ def test_host_barrier_lowers_to_builtin_world_size_loop():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32],
+                      sig: pld.DistributedTensor[[4], pl.INT32]):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
@@ -290,7 +291,7 @@ def test_host_barrier_lowers_to_builtin_world_size_loop():
             data = pld.window(data_buf, [256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
+                self.chip_orch(data, signal, device=r)
             pld.tensor.barrier(signal)
             return 0
 

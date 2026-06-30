@@ -687,17 +687,18 @@ def test_backend_materializes_barrier_next_level_files(tmp_path):
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32]):
+        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32],
+                      sig: pld.DistributedTensor[[SIZE], pl.INT32]):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             data_buf = pld.alloc_window_buffer(SIZE * 4)
-            signal_buf = pld.alloc_window_buffer(pld.world_size() * 4)
+            signal_buf = pld.alloc_window_buffer(SIZE * 4)
             data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            signal = pld.window(signal_buf, [SIZE], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
-                self.chip_orch(data, device=r)
+                self.chip_orch(data, signal, device=r)
             pld.tensor.barrier(signal)
             return 0
 
@@ -816,7 +817,6 @@ def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, sig
         ("barrier", "builtin.tensor.barrier__fp32"),
         ("broadcast", "builtin.tensor.broadcast__root0__fp32"),
         ("reduce_scatter", "builtin.tensor.reduce_scatter__sum__fp32"),
-        ("allgather", "builtin.tensor.allgather__fp32"),
     ],
 )
 def test_host_collective_builtin_template_package_exists(package_name, variant):
@@ -828,6 +828,22 @@ def test_host_collective_builtin_template_package_exists(package_name, variant):
         assert (templates / name).is_file(), f"missing {name} in {package_name}"
     assert (root / "__init__.py").is_file(), f"missing __init__.py in {package_name}"
     assert variant.startswith("builtin.tensor."), variant
+
+
+def test_allgather_builtin_template_package_reserved_for_future_use():
+    """allgather builtin template package exists but is NOT YET WIRED.
+
+    The HOST allgather path lowers to builtin.tensor.barrier (see
+    test_backend_materializes_allgather_next_level_files). The
+    builtin.tensor.allgather op/templates are reserved for future
+    concurrent-dispatch lowering and must carry a NOT YET WIRED marker.
+    """
+    root = resources.files("pypto.runtime.builtins.collectives") / "allgather"
+    init_content = (root / "__init__.py").read_text()
+    assert "NOT YET WIRED" in init_content, (
+        "allgather __init__.py must carry a NOT YET WIRED marker until the "
+        "concurrent-dispatch lowering lands"
+    )
 
 
 if __name__ == "__main__":
