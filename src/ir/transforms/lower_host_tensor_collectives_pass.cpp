@@ -282,7 +282,7 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   auto stop = OpRegistry::GetInstance().Create("pld.system.world_size", {}, call->span_);
   auto body = std::make_shared<EvalStmt>(rule.make_builtin(call, loop_var), call->span_);
   return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
-                                   std::vector<VarPtr>{}, span, ForKind::Sequential, std::nullopt,
+                                   std::vector<VarPtr>{}, span, ForKind::Sequential,
                                    std::vector<std::pair<std::string, std::any>>{}, leading_comments);
 }
 
@@ -341,26 +341,6 @@ class LowerHostTensorCollectivesMutator : public IRMutator {
     INTERNAL_CHECK_SPAN(scope, call->span_) << "LowerHostTensorCollectives: " << call->op_->name_
                                             << " window buffers must resolve to the same comm-domain scope";
     return EmitPerDeviceBuiltinCalls(call, *rule, scope, span, leading_comments);
-
-    if (!scope->devices_.empty()) {
-      CheckStaticSignalCapacity(call, scope->devices_.size());
-      std::vector<StmtPtr> stmts;
-      stmts.reserve(scope->devices_.size());
-      for (auto device : scope->devices_) {
-        auto device_expr = std::make_shared<ConstInt>(device, DataType::INT64, call->span_);
-        stmts.push_back(std::make_shared<EvalStmt>(MakeBuiltinCall(call, device_expr), call->span_));
-      }
-      return std::make_shared<SeqStmts>(std::move(stmts), span, leading_comments);
-    }
-
-    auto loop_var = std::make_shared<Var>("r", std::make_shared<ScalarType>(DataType::INT64), call->span_);
-    auto zero = std::make_shared<ConstInt>(0, DataType::INT64, call->span_);
-    auto one = std::make_shared<ConstInt>(1, DataType::INT64, call->span_);
-    auto stop = OpRegistry::GetInstance().Create("pld.system.world_size", {}, call->span_);
-    auto body = std::make_shared<EvalStmt>(MakeBuiltinCall(call, loop_var), call->span_);
-    return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
-                                     std::vector<VarPtr>{}, span, ForKind::Sequential,
-                                     std::vector<std::pair<std::string, std::any>>{}, leading_comments);
   }
 
   std::vector<CommDomainScopeStmtPtr> scope_stack_;
