@@ -687,8 +687,9 @@ def test_backend_materializes_barrier_next_level_files(tmp_path):
     @pl.program
     class Prog:
         @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32],
-                      sig: pld.DistributedTensor[[SIZE], pl.INT32]):
+        def chip_orch(
+            self, data: pld.DistributedTensor[[SIZE], pl.FP32], sig: pld.DistributedTensor[[SIZE], pl.INT32]
+        ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
@@ -841,8 +842,7 @@ def test_allgather_builtin_template_package_reserved_for_future_use():
     root = resources.files("pypto.runtime.builtins.collectives") / "allgather"
     init_content = (root / "__init__.py").read_text()
     assert "NOT YET WIRED" in init_content, (
-        "allgather __init__.py must carry a NOT YET WIRED marker until the "
-        "concurrent-dispatch lowering lands"
+        "allgather __init__.py must carry a NOT YET WIRED marker until the concurrent-dispatch lowering lands"
     )
 
 

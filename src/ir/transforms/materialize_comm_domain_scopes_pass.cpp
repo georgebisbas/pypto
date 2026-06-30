@@ -282,8 +282,7 @@ class DispatchAnalyzer : public IRVisitor {
                                                 const char* role) {
     auto view_var = As<Var>(expr);
     INTERNAL_CHECK_SPAN(view_var, expr->span_)
-        << "MaterializeCommDomainScopes: " << op_name << " " << role
-        << " must be a window view Var";
+        << "MaterializeCommDomainScopes: " << op_name << " " << role << " must be a window view Var";
     auto it = view_to_window_.find(view_var.get());
     INTERNAL_CHECK_SPAN(it != view_to_window_.end(), expr->span_)
         << "MaterializeCommDomainScopes: " << op_name << " " << role
@@ -315,14 +314,16 @@ class DispatchAnalyzer : public IRVisitor {
     if (IsOp(op, "pld.tensor.allgather")) {
       if (op->args_.size() == 2) {
         collective_consumers.push_back({ResolveWindowAlloc(op->args_[0], "pld.tensor.allgather", "target"),
-                                        ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "signal"), op->span_});
+                                        ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "signal"),
+                                        op->span_});
         return;
       }
       INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
           << "MaterializeCommDomainScopes: pld.tensor.allgather expects 2 args (host builtin) or "
              "4 args (InCore composite)";
       collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
-                                      ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"), op->span_});
+                                      ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
+                                      op->span_});
     }
   }
 
