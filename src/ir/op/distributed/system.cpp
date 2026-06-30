@@ -166,5 +166,18 @@ REGISTER_OP("pld.system.wait")
     .no_memory_spec()
     .f_deduce_type(DeduceWaitType);
 
+// ============================================================================
+// pld.system.fence — memory fence (pto.tfence)
+// ============================================================================
+
+REGISTER_OP("pld.system.fence")
+    .set_description(
+        "Memory fence: drains the store buffer so prior remote_stores are globally "
+        "visible before subsequent notifies. Lowers to pto.tfence.")
+    .set_op_category("DistributedOp")
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&,
+                      const Span&) { return GetUnknownType(); });
+
 }  // namespace ir
 }  // namespace pypto

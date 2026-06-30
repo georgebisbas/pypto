@@ -3568,6 +3568,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeNotifyCodegenPTO(op, codegen); });
   reg("pld.system.wait",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeWaitCodegenPTO(op, codegen); });
+  reg("pld.system.fence",
+      [](const ir::CallPtr&, codegen::CodegenBase& codegen_base) {
+        auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+        codegen.Emit("pto.tfence");
+        return std::string("");
+      });
 
   // Distributed N7 ops — CommContext accessor lowering.
   //

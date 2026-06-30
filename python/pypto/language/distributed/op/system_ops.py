@@ -167,4 +167,14 @@ def wait(
     return _ir_system.wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 
 
-__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def fence() -> Call:
+    """Memory fence — drain store buffer between remote_store and notify.
+
+    Insert between ``pld.tile.remote_store`` and ``pld.system.notify``
+    to guarantee the stored data is globally visible before the signal
+    lands. Lowers to ``pto.tfence``. No arguments, no return value.
+    """
+    return _ir_system.fence()
+
+
+__all__ = ["fence", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]

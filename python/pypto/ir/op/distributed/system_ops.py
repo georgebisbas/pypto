@@ -116,4 +116,15 @@ def wait(
     )
 
 
-__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
+def fence(*, span: Span | None = None) -> Call:
+    """Build a ``pld.system.fence()`` Call.
+
+    Memory fence: drains the store buffer so prior ``remote_store`` writes
+    are globally visible before subsequent ``notify`` signals. Lowers to
+    ``pto.tfence``. No arguments, no return value.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.system.fence", [], {}, actual_span)
+
+
+__all__ = ["fence", "get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]
