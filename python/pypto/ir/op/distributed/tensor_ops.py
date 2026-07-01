@@ -318,7 +318,33 @@ def reduce_scatter(
     )
 
 
+def all_to_all(
+    input: Expr,
+    target: Expr,
+    signal: Expr,
+    out: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.all_to_all(input, target, signal, out)`` Call.
+
+    Symmetric all-to-all: every rank sends a distinct chunk to every other
+    rank.  ``input`` is a Tensor [NR, SIZE] where ``input[dest, :]`` is the
+    chunk destined for rank ``dest``.  ``target`` is a DistributedTensor
+    [NR, SIZE] staging window.  ``signal`` is a window-bound INT32 barrier
+    tensor.  ``out`` is a Tensor [NR, SIZE] receiving the result, where
+    ``out[src, :]`` is the chunk received from rank ``src``.
+
+    LowerCompositeOps expands this into a 3-phase mesh decomposition
+    (stage-in → barrier → exchange); this Call never survives past that
+    pass.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.tensor.all_to_all", [input, target, signal, out], {}, actual_span)
+
+
 __all__ = [
+    "all_to_all",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

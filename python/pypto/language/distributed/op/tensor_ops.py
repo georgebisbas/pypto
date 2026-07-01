@@ -567,7 +567,39 @@ def reduce_scatter(
     return DistributedTensor(expr=call)
 
 
+def all_to_all(
+    input: Tensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    out: Tensor,
+) -> Tensor:
+    """Symmetric all-to-all: every rank sends a distinct chunk to every other rank.
+
+    ``input`` is a plain Tensor [NR, SIZE] where ``input[dest, :]`` is the
+    chunk destined for rank ``dest``.  The intrinsic handles stage-in into the
+    window, notify/wait barrier, and per-peer ``pld.tile.get`` into ``out``.
+
+    Args:
+        input: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
+        target: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor.
+        out: :class:`pl.Tensor` [NR, SIZE] output, where ``out[src, :]``
+            holds the chunk received from rank ``src``.
+
+    Returns:
+        The ``out`` :class:`pl.Tensor`.
+    """
+    target_expr, signal_expr = _unwrap_distributed_tensors(
+        "pld.tensor.all_to_all", target=target, signal=signal
+    )
+    input_expr = _unwrap(input)
+    out_expr = _unwrap(out)
+    call = _ir_tensor.all_to_all(input_expr, target_expr, signal_expr, out_expr)
+    return Tensor(expr=call)
+
+
 __all__ = [
+    "all_to_all",
     "alloc_window_buffer",
     "allgather",
     "allreduce",
