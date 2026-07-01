@@ -303,28 +303,42 @@ namespace {
 TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   (void)kwargs;
-  CHECK(args.size() == 4)
-      << "pld.tensor.all_to_all requires exactly 4 positional arguments "
-         "(input, target, signal, out), but got "
+  CHECK(args.size() == 2 || args.size() == 4)
+      << "pld.tensor.all_to_all requires 2 args (data, signal) for HOST builtin path "
+         "or 4 args (input, target, signal, out) for InCore composite, but got "
       << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.all_to_all positional argument #" << i << " must not be null";
   }
 
-  // arg 0: input — Tensor [NR, SIZE] with per-destination chunks
+  if (args.size() == 2) {
+    // 2-arg HOST builtin path: all_to_all(data, signal) — data pre-staged in window.
+    auto data_type = As<DistributedTensorType>(args[0]->GetType());
+    CHECK(data_type) << "pld.tensor.all_to_all data must be a DistributedTensor (window-bound), got "
+                     << args[0]->GetType()->TypeName();
+    CHECK(data_type->shape_.size() == 2)
+        << "pld.tensor.all_to_all data must be 2D [NR, SIZE], got " << data_type->shape_.size() << " dims";
+    auto signal_type = As<DistributedTensorType>(args[1]->GetType());
+    CHECK(signal_type) << "pld.tensor.all_to_all signal must be a DistributedTensor (window-bound), got "
+                       << args[1]->GetType()->TypeName();
+    CHECK(signal_type->dtype_ == DataType::INT32)
+        << "pld.tensor.all_to_all signal must have INT32 element type, got dtype "
+        << signal_type->dtype_.ToString();
+    return args[0]->GetType();
+  }
+
+  // 4-arg InCore composite path — existing validation
   auto input_type = As<TensorType>(args[0]->GetType());
   CHECK(input_type) << "pld.tensor.all_to_all input must be a Tensor, got " << args[0]->GetType()->TypeName();
   CHECK(input_type->shape_.size() == 2)
       << "pld.tensor.all_to_all input must be 2D [NR, SIZE], got " << input_type->shape_.size() << " dims";
 
-  // arg 1: target — DistributedTensor [NR, SIZE] staging window
   auto target_type = As<DistributedTensorType>(args[1]->GetType());
   CHECK(target_type) << "pld.tensor.all_to_all target must be a DistributedTensor (window-bound), got "
                      << args[1]->GetType()->TypeName();
   CHECK(target_type->shape_.size() == 2)
       << "pld.tensor.all_to_all target must be 2D [NR, SIZE], got " << target_type->shape_.size() << " dims";
 
-  // arg 2: signal — DistributedTensor INT32
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << "pld.tensor.all_to_all signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();
@@ -332,7 +346,6 @@ TypePtr DeduceTensorAllToAllType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // arg 3: out — Tensor [NR, SIZE] receiving the exchange result
   auto out_type = As<TensorType>(args[3]->GetType());
   CHECK(out_type) << "pld.tensor.all_to_all out must be a Tensor (not a DistributedTensor), got "
                   << args[3]->GetType()->TypeName();
@@ -588,6 +601,43 @@ REGISTER_OP("builtin.tensor.allgather")
     .set_internal_only(true)
     .set_template_dir(":pypto.runtime.builtins.collectives.allgather")
     .f_deduce_type(DeduceBuiltinTensorAllGatherType);
+
+// ============================================================================
+// builtin.tensor.all_to_all — host dispatch for pld.tensor.all_to_all
+// ============================================================================
+
+namespace {
+
+TypePtr DeduceBuiltinTensorAllToAllType(const std::vector<ExprPtr>& args,
+                                        const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  constexpr const char* kOpName = "builtin.tensor.all_to_all";
+  CHECK(args.size() == 2) << kOpName << " requires exactly 2 positional arguments (data, signal), but got "
+                          << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
+  }
+  auto data_type = As<DistributedTensorType>(args[0]->GetType());
+  CHECK(data_type) << kOpName << " data must be a DistributedTensor, got " << args[0]->GetType()->TypeName();
+  CheckSignalDistributedTensor(As<DistributedTensorType>(args[1]->GetType()), kOpName);
+  auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  CHECK(dtype == data_type->dtype_) << kOpName << " dtype kwarg (" << dtype.ToString()
+                                    << ") must match data dtype (" << data_type->dtype_.ToString() << ")";
+  CheckSupportedFp32BuiltinVariant(dtype, kOpName);
+  return args[0]->GetType();
+}
+
+}  // namespace
+
+REGISTER_OP("builtin.tensor.all_to_all")
+    .set_description("Internal chip-dispatch builtin for pld.tensor.all_to_all.")
+    .set_op_category("DistributedOp")
+    .add_argument("data", "Window-bound DistributedTensor [NR, SIZE] (InOut)")
+    .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
+    .set_attr<DataType>("dtype")
+    .no_memory_spec()
+    .set_internal_only(true)
+    .set_template_dir(":pypto.runtime.builtins.collectives.all_to_all")
+    .f_deduce_type(DeduceBuiltinTensorAllToAllType);
 
 }  // namespace ir
 }  // namespace pypto

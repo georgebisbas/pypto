@@ -295,6 +295,22 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_allgather, "builtin.tensor.allgather") {
 }
 
 // ============================================================================
+// builtin.tensor.all_to_all: compiler-generated host collective chip dispatch.
+// ============================================================================
+REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all, "builtin.tensor.all_to_all") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.all_to_all codegen requires DistributedCodegen";
+  const auto dtype = op->GetAttr<DataType>("dtype");
+  const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
+
+  if (dist_codegen->MarkBuiltinEmitted(variant)) {
+    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", Fp32TypeCpp(dtype)}});
+  }
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  return "";
+}
+
+// ============================================================================
 // tensor.slice — emit Python tensor indexing into ``tensors[...]``.
 //
 // IR form:

@@ -324,6 +324,23 @@ class DispatchAnalyzer : public IRVisitor {
       collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
                                       ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
                                       op->span_});
+      return;
+    }
+
+    if (IsOp(op, "pld.tensor.all_to_all")) {
+      if (op->args_.size() == 2) {
+        collective_consumers.push_back({ResolveWindowAlloc(op->args_[0], "pld.tensor.all_to_all", "data"),
+                                        ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all", "signal"),
+                                        op->span_});
+        return;
+      }
+      INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
+          << "MaterializeCommDomainScopes: pld.tensor.all_to_all expects 2 args (host builtin) or "
+             "4 args (InCore composite)";
+      collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all", "target"),
+                                      ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all", "signal"),
+                                      op->span_});
+      return;
     }
   }
 

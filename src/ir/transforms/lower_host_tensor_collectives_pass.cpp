@@ -186,6 +186,16 @@ void CheckStaticSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, 
                                   {ArgDirection::InOut});
 }
 
+[[nodiscard]] CallPtr MakeBuiltinAllToAll(const CallPtr& call, const ExprPtr& device) {
+  auto data_type = As<DistributedTensorType>(call->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(data_type, call->span_)
+      << "LowerHostTensorCollectives: pld.tensor.all_to_all data must be DistributedTensorType";
+  std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", data_type->dtype_}};
+  std::vector<std::pair<std::string, std::any>> attrs = {{"dtype", data_type->dtype_}};
+  return MakeBuiltinCallWithAttrs("builtin.tensor.all_to_all", call, call->args_, std::move(kwargs),
+                                  device, std::move(attrs), {ArgDirection::InOut, ArgDirection::InOut});
+}
+
 struct HostCollectiveRule {
   const char* pld_name;
   using MakeBuiltinFn = std::function<CallPtr(const CallPtr&, const ExprPtr&)>;
@@ -246,6 +256,18 @@ struct HostCollectiveRule {
             return std::vector<WindowBufferPtr>{
                 GetWindowBuffer(call->args_[0], "allgather target"),
                 GetWindowBuffer(call->args_[1], "allgather signal"),
+            };
+          },
+          [](const CallPtr& call) { return call->args_[1]; },
+          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
+      },
+      {
+          "pld.tensor.all_to_all",
+          &MakeBuiltinAllToAll,
+          [](const CallPtr& call) {
+            return std::vector<WindowBufferPtr>{
+                GetWindowBuffer(call->args_[0], "all_to_all data"),
+                GetWindowBuffer(call->args_[1], "all_to_all signal"),
             };
           },
           [](const CallPtr& call) { return call->args_[1]; },

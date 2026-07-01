@@ -568,27 +568,41 @@ def reduce_scatter(
 
 
 def all_to_all(
-    input: Tensor,
-    target: DistributedTensor,
-    signal: DistributedTensor,
-    out: Tensor,
-) -> Tensor:
-    """Symmetric all-to-all: every rank sends a distinct chunk to every other rank.
+    input: Tensor | DistributedTensor,
+    target: DistributedTensor | None = None,
+    signal: DistributedTensor | None = None,
+    out: Tensor | None = None,
+) -> Tensor | DistributedTensor:
+    """All-to-all: symmetric personalized exchange.
 
-    ``input`` is a plain Tensor [NR, SIZE] where ``input[dest, :]`` is the
-    chunk destined for rank ``dest``.  The intrinsic handles stage-in into the
-    window, notify/wait barrier, and per-peer ``pld.tile.get`` into ``out``.
+    Two forms:
+    - **4-arg InCore composite:** ``pld.tensor.all_to_all(input, target, signal, out)``
+      ``input`` is a plain Tensor [NR, SIZE], ``target`` is a DistributedTensor
+      staging window, ``signal`` is an INT32 barrier, ``out`` receives the result.
+    - **2-arg HOST builtin:** ``pld.tensor.all_to_all(data, signal)``
+      ``data`` is a pre-staged DistributedTensor [NR, SIZE] (each rank already
+      wrote its per-destination chunks).  In-place rebind.
 
     Args:
-        input: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
-        target: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
-        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor.
-        out: :class:`pl.Tensor` [NR, SIZE] output, where ``out[src, :]``
-            holds the chunk received from rank ``src``.
+        input: For InCore: :class:`pl.Tensor` [NR, SIZE] with per-destination chunks.
+            For HOST: window-bound :class:`pld.DistributedTensor` [NR, SIZE].
+        target: InCore: :class:`pld.DistributedTensor` [NR, SIZE] staging window.
+            HOST: :class:`pld.DistributedTensor` INT32 barrier.
+        signal: InCore: :class:`pld.DistributedTensor` INT32 barrier.
+        out: InCore: :class:`pl.Tensor` [NR, SIZE] output.
 
     Returns:
-        The ``out`` :class:`pl.Tensor`.
+        InCore: the ``out`` :class:`pl.Tensor`.  HOST: the rebound
+        :class:`pld.DistributedTensor`.
     """
+    if isinstance(input, DistributedTensor) and signal is None and out is None:
+        # 2-arg HOST builtin path: all_to_all(data, signal)
+        data_expr, signal_expr = _unwrap_distributed_tensors(
+            "pld.tensor.all_to_all", target=input, signal=target
+        )
+        call = _ir_tensor.all_to_all(data_expr, signal_expr)
+        return DistributedTensor(expr=call)
+    # 4-arg InCore composite path
     target_expr, signal_expr = _unwrap_distributed_tensors(
         "pld.tensor.all_to_all", target=target, signal=signal
     )

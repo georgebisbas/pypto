@@ -321,26 +321,31 @@ def reduce_scatter(
 def all_to_all(
     input: Expr,
     target: Expr,
-    signal: Expr,
-    out: Expr,
+    signal: Expr | None = None,
+    out: Expr | None = None,
     *,
     span: Span | None = None,
 ) -> Call:
-    """Build a ``pld.tensor.all_to_all(input, target, signal, out)`` Call.
+    """Build a ``pld.tensor.all_to_all(...)`` Call.
 
-    Symmetric all-to-all: every rank sends a distinct chunk to every other
-    rank.  ``input`` is a Tensor [NR, SIZE] where ``input[dest, :]`` is the
-    chunk destined for rank ``dest``.  ``target`` is a DistributedTensor
-    [NR, SIZE] staging window.  ``signal`` is a window-bound INT32 barrier
-    tensor.  ``out`` is a Tensor [NR, SIZE] receiving the result, where
-    ``out[src, :]`` is the chunk received from rank ``src``.
+    Two forms:
+    - **4-arg InCore composite** (input, target, signal, out): Tensor [NR, SIZE]
+      input, DistributedTensor staging window, INT32 barrier, Tensor output.
+    - **2-arg HOST builtin** (data, signal): DistributedTensor [NR, SIZE] with
+      pre-staged chunks + INT32 barrier.  The HOST form is an in-place rebind
+      — the data DistributedTensor is both input and output.
 
-    LowerCompositeOps expands this into a 3-phase mesh decomposition
-    (stage-in → barrier → exchange); this Call never survives past that
-    pass.
+    LowerCompositeOps handles the 4-arg form; LowerHostTensorCollectives
+    handles the 2-arg form.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("pld.tensor.all_to_all", [input, target, signal, out], {}, actual_span)
+    if signal is None and out is None:
+        # 2-arg HOST builtin form: all_to_all(data, signal)
+        _args: list[Expr] = [input, target]  # type: ignore[assignment]
+        return _ir_core.create_op_call("pld.tensor.all_to_all", _args, {}, actual_span)
+    # 4-arg InCore composite form
+    _args_4: list[Expr] = [input, target, signal, out]  # type: ignore[assignment]
+    return _ir_core.create_op_call("pld.tensor.all_to_all", _args_4, {}, actual_span)
 
 
 __all__ = [
