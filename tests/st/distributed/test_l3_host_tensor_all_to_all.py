@@ -115,5 +115,117 @@ class TestL3HostTensorAllToAll:
         )
 
 
+def _build_a2a_builtin_program(n_ranks: int):
+    """Build an N-rank program that exercises the 2-arg HOST builtin path.
+
+    Pattern matches the allreduce HOST test: publish (stage input into the
+    HCCL window), call the 2-arg builtin (barrier + exchange), then consume
+    (read results back from the window).  Each device's HCCL window is
+    private, so the kernel writes exchange results back to ``data[src*C]``
+    in-place without cross-device write races.
+    """
+    nr = n_ranks
+
+    @pl.program
+    class HostTensorAllToAllBuiltin:
+        @pl.function(type=pl.FunctionType.InCore)
+        def publish_step(
+            self,
+            inp: pl.Tensor[[nr, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+            for d in pl.range(nr):
+                local = pl.load(inp, [d, 0], [1, SIZE])
+                data = pl.store(local, [d, 0], data)
+            return data
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def publish_orch(
+            self,
+            inp: pl.Tensor[[nr, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+            return self.publish_step(inp, data)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            data: pld.DistributedTensor[[nr, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[nr, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+            for src in pl.range(nr):
+                row = pl.load(data, [src, 0], [1, SIZE])
+                out = pl.store(row, [src, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            data: pld.DistributedTensor[[nr, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[nr, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+            return self.consume_step(data, out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[nr, nr, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[nr, nr, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[nr, nr, SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(nr * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(nr * 4)
+
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)
+                self.publish_orch(inputs[r], data, device=r)
+
+            data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [nr], dtype=pl.INT32)
+            data = pld.tensor.all_to_all(data, signal)
+
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [nr, SIZE], dtype=pl.FP32)
+                self.consume_orch(data, outputs[r], device=r)
+
+            return outputs
+
+    return HostTensorAllToAllBuiltin
+
+
+class TestL3HostTensorAllToAllBuiltin:
+    """L3 distributed runtime: 2-arg HOST builtin ``pld.tensor.all_to_all(data, signal)``.
+
+    Exercises the builtin kernel template via the HOST lowering path.  The
+    host orchestrator stages input into the per-device private HCCL window,
+    calls the 2-arg builtin (barrier + exchange), then reads results back.
+    Validates that the exchange produces correct personalized output per rank.
+    """
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_host_tensor_all_to_all_builtin(self, test_config, device_ids, n_ranks):
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"all-to-all builtin P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        program = _build_a2a_builtin_program(n_ranks)
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:n_ranks],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = _make_rank_inputs(n_ranks)
+        outputs = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
+
+        compiled(inputs, outputs)
+
+        expected = _expected_all_to_all(inputs)
+        assert torch.allclose(outputs, expected), (
+            f"host all-to-all builtin P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", *sys.argv[1:]])
