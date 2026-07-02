@@ -1027,8 +1027,8 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
                                  {{"target_memory", MemorySpace::Vec}}, span),
                       span);
 
-        body.Bind("aa_stage",
-                  reg.Create("tile.store", {stage_tile, dest_row_offsets, target}, {}, span), span);
+        body.Bind("aa_stage", reg.Create("tile.store", {stage_tile, dest_row_offsets, target}, {}, span),
+                  span);
       },
       span);
 
