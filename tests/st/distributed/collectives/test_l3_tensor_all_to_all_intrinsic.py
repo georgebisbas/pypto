@@ -35,28 +35,20 @@ SIZE = 64
 
 
 def _expected_all_to_all(inputs: torch.Tensor) -> torch.Tensor:
-    """Golden matching simpler: output[src, j] = src*1000 + rank*100 + j.
-
-    inputs shape: [nranks, nranks, SIZE] — inputs[r, d, :] is what rank r
-    sends to rank d.
-    """
+    """Golden matching simpler: output[rank, src, j] = src*1000 + rank*100 + j."""
     nranks = inputs.shape[0]
-    outputs = torch.zeros((nranks, nranks, SIZE), dtype=torch.float32)
-    for rank in range(nranks):
-        for src in range(nranks):
-            for j in range(SIZE):
-                outputs[rank, src, j] = float(src * 1000 + rank * 100 + j)
-    return outputs
+    src_idx = torch.arange(nranks, dtype=torch.float32).view(1, -1, 1)
+    rank_idx = torch.arange(nranks, dtype=torch.float32).view(-1, 1, 1)
+    j = torch.arange(SIZE, dtype=torch.float32).view(1, 1, -1)
+    return src_idx * 1000 + rank_idx * 100 + j
 
 
 def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
     """Each rank r fills input[r, d, j] = r*1000 + d*100 + j (chunk for dest d)."""
-    rows = torch.zeros((n_ranks, n_ranks, SIZE), dtype=torch.float32)
-    for r in range(n_ranks):
-        for d in range(n_ranks):
-            for j in range(SIZE):
-                rows[r, d, j] = float(r * 1000 + d * 100 + j)
-    return rows
+    r = torch.arange(n_ranks, dtype=torch.float32).view(-1, 1, 1)
+    d = torch.arange(n_ranks, dtype=torch.float32).view(1, -1, 1)
+    j = torch.arange(SIZE, dtype=torch.float32).view(1, 1, -1)
+    return r * 1000 + d * 100 + j
 
 
 def _build_all_to_all_program(n_ranks: int):
