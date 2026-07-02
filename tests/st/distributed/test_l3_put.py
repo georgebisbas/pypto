@@ -361,7 +361,6 @@ class TestL3Put:
             f"pipeline ring put mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
-    @pytest.mark.skip(reason="atomic-add put still fails on the current runtime/PTOAS stack")
     def test_atomic_add_accumulate(self, test_config, device_ids):
         """Atomic add: all ranks accumulate into root rank 0's single cell."""
         if len(device_ids) < 2:
