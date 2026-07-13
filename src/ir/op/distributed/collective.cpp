@@ -610,8 +610,11 @@ TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
   const size_t target_idx = args.size() == 2 ? 0 : 1;
   const size_t signal_idx = args.size() == 2 ? 1 : 2;
   if (args.size() == 3) {
-    auto local_type = As<TileType>(args[0]->GetType());
-    CHECK(local_type) << kOpName << " local_data must be a Tile, got " << args[0]->GetType()->TypeName();
+    auto local_type = As<DistributedTensorType>(args[0]->GetType());
+    CHECK(local_type) << kOpName << " input must be a DistributedTensor (window-bound), got "
+                      << args[0]->GetType()->TypeName();
+    CHECK(local_type->shape_.size() == 2)
+        << kOpName << " input must be 2D [NR, SIZE], got " << local_type->shape_.size() << " dims";
   }
   auto target_type = As<DistributedTensorType>(args[target_idx]->GetType());
   CHECK(target_type) << kOpName << " target must be a DistributedTensor, got "
@@ -627,7 +630,8 @@ TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
   if (args.size() == 2) {
     return args[target_idx]->GetType();
   }
-  return std::make_shared<TileType>(target_type->shape_, target_type->dtype_);
+  // 3-arg HOST builtin (input, target, signal): return target in-place.
+  return args[target_idx]->GetType();
 }
 
 }  // namespace
@@ -635,8 +639,8 @@ TypePtr DeduceBuiltinTensorAllGatherType(const std::vector<ExprPtr>& args,
 REGISTER_OP("builtin.tensor.allgather")
     .set_description("Internal chip-dispatch builtin for pld.tensor.allgather.")
     .set_op_category("DistributedOp")
-    .add_argument("local_data", "Local tile chunk to stage")
-    .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] staging window")
+    .add_argument("input", "Window-bound DistributedTensor[NR, SIZE] — this rank's staging window (TPUT source)")
+    .add_argument("target", "Window-bound DistributedTensor[NR, SIZE] result window (TPUT destination)")
     .add_argument("signal", "Window-bound INT32 DistributedTensor signal buffer")
     .set_attr<DataType>("dtype")
     .no_memory_spec()
