@@ -49,15 +49,20 @@ namespace {
   return call && call->op_ && IsOp(call, "pld.tensor.allreduce");
 }
 
-// pld.tensor.all_to_all(input, target, signal) returns `target` in-place
+// pld.tensor.all_to_all(input, target, signal) and the 3-arg HOST
+// pld.tensor.allgather(input, target, signal) return `target` in-place
 // (args_[1]) — unlike allreduce, which aliases args_[0]. A window view
-// bound to an all_to_all call's result must resolve back through this arg
+// bound to such a call's result must resolve back through this arg
 // index so the target allocation's device coverage is inferred correctly
 // even when no dispatch site references the pre-call view directly (e.g.
 // when input and target are two distinct buffers, as they must be — see
 // kernel.cpp.in for why aliasing them is unsafe).
 [[nodiscard]] bool IsTensorAllToAll(const CallPtr& call) {
   return call && call->op_ && IsOp(call, "pld.tensor.all_to_all");
+}
+
+[[nodiscard]] bool IsHostTensorAllGather(const CallPtr& call) {
+  return call && call->op_ && IsOp(call, "pld.tensor.allgather") && call->args_.size() == 3;
 }
 
 /// Device coverage descriptor inferred from a dispatch ``device=`` expression.
@@ -326,14 +331,17 @@ class DispatchAnalyzer : public IRVisitor {
     }
 
     if (IsOp(op, "pld.tensor.allgather")) {
-      if (op->args_.size() == 2) {
-        collective_consumers.push_back({ResolveWindowAlloc(op->args_[0], "pld.tensor.allgather", "target"),
-                                        ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "signal"),
+      if (op->args_.size() == 3) {
+        // 3-arg HOST form: pld.tensor.allgather(input, target, signal)
+        // Track target + signal for device-coverage inheritance (input
+        // coverage comes from prior publish/stage dispatch sites).
+        collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
+                                        ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
                                         op->span_});
         return;
       }
       INTERNAL_CHECK_SPAN(op->args_.size() == 4, op->span_)
-          << "MaterializeCommDomainScopes: pld.tensor.allgather expects 2 args (host builtin) or "
+          << "MaterializeCommDomainScopes: pld.tensor.allgather expects 3 args (host builtin) or "
              "4 args (InCore composite)";
       collective_consumers.push_back({ResolveWindowAlloc(op->args_[1], "pld.tensor.allgather", "target"),
                                       ResolveWindowAlloc(op->args_[2], "pld.tensor.allgather", "signal"),
@@ -397,6 +405,9 @@ class DispatchAnalyzer : public IRVisitor {
       return ResolveWindowRecord(As<Var>(call->args_[0]), visited);
     }
     if (call && IsTensorAllToAll(call) && call->args_.size() > 1) {
+      return ResolveWindowRecord(As<Var>(call->args_[1]), visited);
+    }
+    if (call && IsHostTensorAllGather(call)) {
       return ResolveWindowRecord(As<Var>(call->args_[1]), visited);
     }
     return nullptr;
