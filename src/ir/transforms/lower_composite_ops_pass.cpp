@@ -1539,7 +1539,8 @@ class LowerCompositeOpsMutator : public IRMutator {
       return call->args_.size() == 2;
     }
     return IsOp(call, "pld.tensor.allreduce") || IsOp(call, "pld.tensor.barrier") ||
-           IsOp(call, "pld.tensor.broadcast") || IsOp(call, "pld.tensor.reduce_scatter");
+           IsOp(call, "pld.tensor.broadcast") || IsOp(call, "pld.tensor.reduce_scatter") ||
+           IsOp(call, "pld.tensor.all_to_all");
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {
