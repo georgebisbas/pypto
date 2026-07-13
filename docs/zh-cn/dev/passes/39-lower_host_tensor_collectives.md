@@ -45,6 +45,11 @@ data = pld.tensor.all_to_all(stage, data, signal)
 comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生成顺序
 `for r in pld.system.world_size()` 循环。
 
+Host orch codegen 随后将这些 per-device builtin 打包成单个
+`orch.submit_next_level_group(...)` DAG 节点（N 个 `TaskArgs` + 一份
+`workers=[...]`），使后续芯片任务在所有参与者完成该 collective 之前
+不能在任意 rank 上启动。
+
 每个生成的 builtin call 携带来源 `pld.tensor.*` 调用中 collective 特定的
 参数和 kwarg 属性。窗口绑定的 INOUT tensor 原样传递；标量 kwarg 值
 （`op`、`root`、`dtype`）转发给 builtin。

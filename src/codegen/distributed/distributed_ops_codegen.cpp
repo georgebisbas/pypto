@@ -126,7 +126,6 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
       << "Internal error: builtin tensor collective dispatch needs at least one window-bound arg";
 
   const std::string ta_var = codegen.NextTaskArgsVar();
-  const std::string cfg_var = ta_var + "_config";
 
   codegen.Emit(ta_var + " = TaskArgs()");
   for (size_t i = 0; i < call->args_.size(); ++i) {
@@ -160,6 +159,13 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
 
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
+  if (codegen.InCollectiveGroupAccumulate()) {
+    // Pack N per-rank TaskArgs into one DAG node so consume cannot start on any
+    // chip until all chips finish this collective (Plan A / host orch contract).
+    codegen.AccumulateCollectiveGroupMember(ta_var, rank_expr, variant);
+    return;
+  }
+  const std::string cfg_var = ta_var + "_config";
   codegen.Emit(cfg_var + " = CallConfig()");
   codegen.Emit(cfg_var + ".block_dim = 1");
   codegen.Emit(cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");

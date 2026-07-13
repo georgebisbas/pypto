@@ -546,13 +546,17 @@ def test_host_allreduce_builtin_codegen_uses_next_level_callable_key():
     generated, cg = _lower_host_collectives(Prog)
 
     assert 'callables["builtin.tensor.allreduce__sum__fp32"]' in generated, generated
-    assert "orch.submit_next_level" in generated, generated
-    assert "_ta_1_config = CallConfig()" in generated, generated
-    assert "_ta_1_config.block_dim = 1" in generated, generated
-    assert "_ta_1_config.aicpu_thread_num = config.aicpu_thread_num" in generated, generated
+    assert "orch.submit_next_level_group" in generated, generated
+    assert "_collective_cfg_0 = CallConfig()" in generated, generated
+    assert "_collective_cfg_0.block_dim = 1" in generated, generated
+    assert "_collective_cfg_0.aicpu_thread_num = config.aicpu_thread_num" in generated, generated
+    assert "_ta_group_0 = []" in generated, generated
+    assert "_workers_0 = []" in generated, generated
+    assert "_ta_group_0.append(" in generated, generated
+    assert "_workers_0.append(" in generated, generated
     assert (
-        'orch.submit_next_level(callables["builtin.tensor.allreduce__sum__fp32"], _ta_1, _ta_1_config'
-        in generated
+        'orch.submit_next_level_group(callables["builtin.tensor.allreduce__sum__fp32"], '
+        "_ta_group_0, _collective_cfg_0, workers=_workers_0)" in generated
     ), generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert ".add_scalar((64))" not in generated, generated
@@ -593,7 +597,7 @@ def test_implicit_host_allreduce_builtin_codegen_materializes_signal():
     assert 'buffer_ptrs["__allreduce_signal_buf_0"]' in generated, generated
     assert 'buffer_ptrs["data_buf"]' in generated, generated
     assert 'buffer_ptrs["signal_buf"]' not in generated, generated
-    assert "orch.submit_next_level" in generated, generated
+    assert "orch.submit_next_level_group" in generated, generated
     assert ".add_scalar(__comm_d0[" in generated and "].domain_size)" in generated, generated
     assert "data = data" not in generated, generated
 
@@ -626,7 +630,84 @@ def test_host_allreduce_builtin_variant_is_recorded_once():
     generated, cg = _lower_host_collectives(Prog)
 
     assert generated.count('callables["builtin.tensor.allreduce__sum__fp32"]') == 2, generated
+    assert generated.count("orch.submit_next_level_group") == 2, generated
     assert len(cg.get_builtin_next_level_specs()) == 1
+
+
+def test_host_allgather_codegen_uses_submit_next_level_group():
+    """Concurrent allgather must emit one group DAG node, not N submits."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            pld.tensor.allgather(stage, data, signal)
+            return 0
+
+    generated, _cg = _lower_host_collectives(Prog)
+    variant = "builtin.tensor.allgather__fp32"
+    assert f'callables["{variant}"]' in generated, generated
+    assert (
+        f'orch.submit_next_level_group(callables["{variant}"], '
+        "_ta_group_0, _collective_cfg_0, workers=_workers_0)" in generated
+    ), generated
+    assert "_ta_group_0.append(" in generated, generated
+    assert "_workers_0.append(" in generated, generated
+
+
+def test_host_all_to_all_codegen_uses_submit_next_level_group():
+    """Concurrent all_to_all must emit one group DAG node, not N submits."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            stage: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[4, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            stage_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            data_buf = pld.alloc_window_buffer(4 * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(4 * 4)
+            stage = pld.window(stage_buf, [4, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [4, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(stage, data, signal, device=r)
+            pld.tensor.all_to_all(stage, data, signal)
+            return 0
+
+    generated, _cg = _lower_host_collectives(Prog)
+    variant = "builtin.tensor.all_to_all__fp32"
+    assert f'callables["{variant}"]' in generated, generated
+    assert (
+        f'orch.submit_next_level_group(callables["{variant}"], '
+        "_ta_group_0, _collective_cfg_0, workers=_workers_0)" in generated
+    ), generated
+    assert "_ta_group_0.append(" in generated, generated
+    assert "_workers_0.append(" in generated, generated
 
 
 def test_backend_materializes_builtin_next_level_files(tmp_path):

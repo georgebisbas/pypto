@@ -101,6 +101,16 @@ class DistributedCodegen : public CodegenBase {
   /// codegen functions that emit their own submit path.
   [[nodiscard]] std::string NextTaskArgsVar();
 
+  /// True while codegen is packing consecutive/looped host window-collective
+  /// chip dispatches into one ``orch.submit_next_level_group`` DAG node.
+  [[nodiscard]] bool InCollectiveGroupAccumulate() const { return collective_group_.active; }
+
+  /// Record one per-rank TaskArgs into the open collective group. Emits
+  /// ``_keep.append`` + list/workers append; the group submit is deferred to
+  /// :func:`EndCollectiveGroupAccumulate`.
+  void AccumulateCollectiveGroupMember(const std::string& ta_var, const std::string& rank_expr,
+                                       const std::string& variant);
+
   /// Resolve a dispatch call's ``device=`` attr to a Python rank expression.
   [[nodiscard]] std::string ResolveRankExpr(const ir::CallPtr& call) const;
 
@@ -260,6 +270,14 @@ class DistributedCodegen : public CodegenBase {
   [[nodiscard]] bool IsSubWorker(const ir::FunctionPtr& func) const;
   [[nodiscard]] static std::string DataTypeToPythonDType(const DataType& dtype);
 
+  /// Host window collectives must complete on all chips before any chip's
+  /// downstream consume. Pack N per-device builtins into one group submit.
+  void BeginCollectiveGroupAccumulate();
+  void EndCollectiveGroupAccumulate();
+  [[nodiscard]] static bool IsWindowCollectiveBuiltinCall(const ir::CallPtr& call);
+  [[nodiscard]] static ir::CallPtr GetWindowCollectiveBuiltinFromStmt(const ir::StmtPtr& stmt);
+  bool TryEmitCollectiveGroupFor(const ir::ForStmtPtr& op);
+
   /// Look up the innermost open CommDomainScopeStmt whose ``slots_`` contain
   /// ``wb`` (by shared_ptr identity — ``MaterializeCommDomainScopes`` shares
   /// the same ``shared_ptr<const WindowBuffer>`` between the scope's slots
@@ -297,6 +315,16 @@ class DistributedCodegen : public CodegenBase {
   std::set<std::string> declared_vars_;
   bool is_worker_context_{false};
   int task_args_counter_{0};  // Counter for generating unique TaskArgs variable names
+  int collective_group_counter_{0};
+
+  struct CollectiveGroupAccumulateState {
+    bool active{false};
+    std::string list_var;
+    std::string workers_var;
+    std::string cfg_var;
+    std::string variant;
+  };
+  CollectiveGroupAccumulateState collective_group_;
 
   // HOST orchestrator alloc-hoisting state. Populated by
   // CollectHostOrchHoistableAllocs() before EmitFunction() runs on the HOST

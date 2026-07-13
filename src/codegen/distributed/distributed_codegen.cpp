@@ -163,6 +163,94 @@ bool DistributedCodegen::MarkBuiltinEmitted(const std::string& variant) {
 
 std::string DistributedCodegen::NextTaskArgsVar() { return "_ta_" + std::to_string(task_args_counter_++); }
 
+void DistributedCodegen::BeginCollectiveGroupAccumulate() {
+  INTERNAL_CHECK(!collective_group_.active) << "Internal error: nested collective group accumulate";
+  const int id = collective_group_counter_++;
+  collective_group_.active = true;
+  collective_group_.list_var = "_ta_group_" + std::to_string(id);
+  collective_group_.workers_var = "_workers_" + std::to_string(id);
+  collective_group_.cfg_var = "_collective_cfg_" + std::to_string(id);
+  collective_group_.variant.clear();
+  Emit(collective_group_.list_var + " = []");
+  Emit(collective_group_.workers_var + " = []");
+  Emit(collective_group_.cfg_var + " = CallConfig()");
+  Emit(collective_group_.cfg_var + ".block_dim = 1");
+  Emit(collective_group_.cfg_var + ".aicpu_thread_num = config.aicpu_thread_num");
+}
+
+void DistributedCodegen::AccumulateCollectiveGroupMember(const std::string& ta_var,
+                                                         const std::string& rank_expr,
+                                                         const std::string& variant) {
+  INTERNAL_CHECK(collective_group_.active)
+      << "Internal error: AccumulateCollectiveGroupMember without an open group";
+  INTERNAL_CHECK(!variant.empty()) << "Internal error: collective group member needs a variant key";
+  if (collective_group_.variant.empty()) {
+    collective_group_.variant = variant;
+  } else {
+    INTERNAL_CHECK(collective_group_.variant == variant)
+        << "Internal error: mixed collective variants in one group submit (" << collective_group_.variant
+        << " vs " << variant << ")";
+  }
+  Emit("_keep.append(" + ta_var + ")");
+  Emit(collective_group_.list_var + ".append(" + ta_var + ")");
+  Emit(collective_group_.workers_var + ".append(" + rank_expr + ")");
+}
+
+void DistributedCodegen::EndCollectiveGroupAccumulate() {
+  INTERNAL_CHECK(collective_group_.active) << "Internal error: EndCollectiveGroupAccumulate without open group";
+  INTERNAL_CHECK(!collective_group_.variant.empty())
+      << "Internal error: collective group submit emitted with no members";
+  Emit("orch.submit_next_level_group(callables[\"" + collective_group_.variant + "\"], " +
+       collective_group_.list_var + ", " + collective_group_.cfg_var +
+       ", workers=" + collective_group_.workers_var + ")");
+  collective_group_ = CollectiveGroupAccumulateState{};
+}
+
+bool DistributedCodegen::IsWindowCollectiveBuiltinCall(const ir::CallPtr& call) {
+  if (!call || !call->op_) return false;
+  const std::string& name = call->op_->name_;
+  return name == "builtin.tensor.allreduce" || name == "builtin.tensor.barrier" ||
+         name == "builtin.tensor.broadcast" || name == "builtin.tensor.reduce_scatter" ||
+         name == "builtin.tensor.allgather" || name == "builtin.tensor.all_to_all";
+}
+
+ir::CallPtr DistributedCodegen::GetWindowCollectiveBuiltinFromStmt(const ir::StmtPtr& stmt) {
+  auto eval = ir::As<ir::EvalStmt>(stmt);
+  if (!eval) return nullptr;
+  auto call = ir::As<ir::Call>(eval->expr_);
+  if (!IsWindowCollectiveBuiltinCall(call)) return nullptr;
+  return call;
+}
+
+bool DistributedCodegen::TryEmitCollectiveGroupFor(const ir::ForStmtPtr& op) {
+  if (!GetWindowCollectiveBuiltinFromStmt(op->body_)) return false;
+
+  BeginCollectiveGroupAccumulate();
+
+  std::string loop_var = SanitizeName(op->loop_var_->name_hint_);
+  declared_vars_.insert(loop_var);
+
+  VisitExpr(op->start_);
+  std::string start = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->stop_);
+  std::string stop = current_expr_value_;
+  current_expr_value_ = "";
+
+  VisitExpr(op->step_);
+  std::string step = current_expr_value_;
+  current_expr_value_ = "";
+
+  emitter_.EmitLine("for " + loop_var + " in range(" + start + ", " + stop + ", " + step + "):");
+  emitter_.IncreaseIndent();
+  VisitStmt(op->body_);
+  emitter_.DecreaseIndent();
+
+  EndCollectiveGroupAccumulate();
+  return true;
+}
+
 void DistributedCodegen::RecordBuiltinNextLevel(const ir::CallPtr& call, const std::string& variant,
                                                 std::map<std::string, std::string> template_vars) {
   INTERNAL_CHECK(call && call->op_) << "Internal error: builtin next-level record needs a valid Call";
@@ -775,6 +863,12 @@ void DistributedCodegen::VisitStmt_(const ir::ReturnStmtPtr& /* op */) {
 void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null ForStmt";
 
+  // Host window collectives lowered as ``for r in world_size(): builtin(..., device=r)``
+  // must become one ``submit_next_level_group`` so peers finish before consume.
+  if (TryEmitCollectiveGroupFor(op)) {
+    return;
+  }
+
   std::string loop_var = SanitizeName(op->loop_var_->name_hint_);
   declared_vars_.insert(loop_var);
 
@@ -824,8 +918,31 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
 
 void DistributedCodegen::VisitStmt_(const ir::SeqStmtsPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null SeqStmts";
-  for (const auto& stmt : op->stmts_) {
-    VisitStmt(stmt);
+  // Static-device host collectives lower to N consecutive EvalStmts. Pack them
+  // into one group submit so the DAG waits for every chip.
+  for (size_t i = 0; i < op->stmts_.size();) {
+    auto head = GetWindowCollectiveBuiltinFromStmt(op->stmts_[i]);
+    if (!head) {
+      VisitStmt(op->stmts_[i]);
+      ++i;
+      continue;
+    }
+    size_t j = i + 1;
+    while (j < op->stmts_.size()) {
+      auto next = GetWindowCollectiveBuiltinFromStmt(op->stmts_[j]);
+      if (!next || next->op_->name_ != head->op_->name_) break;
+      ++j;
+    }
+    if (j - i == 1) {
+      VisitStmt(op->stmts_[i]);
+      ++i;
+      continue;
+    }
+    BeginCollectiveGroupAccumulate();
+    for (; i < j; ++i) {
+      VisitStmt(op->stmts_[i]);
+    }
+    EndCollectiveGroupAccumulate();
   }
 }
 
