@@ -248,8 +248,8 @@ strided 目标、DN partial view 和无法按该方式表示的 partial 区域�
   wait-all (Ge 1) / remote_load+accumulate / store-back，外加
   写后读 (WAR) 防护屏障 (AtomicAdd 1 → Ge 2)。
 - **`"ring"`** — NCCL 风格的分块 reduce-scatter + allgather 调度，
-  O(1) 个 HCCL 窗口。信号 shape `[2 * (NR − 1), NR]`（每轮 ring 一行，
-  每 rank 一个槽位）。2(P−1) 轮 ring 步骤，每轮带有屏障 (AtomicAdd 1 →
+  O(1) 个 HCCL 窗口。信号 shape `[2 * (NR - 1) + 1, NR]`（每轮 ring 一行，
+  每 rank 一个槽位）。2(P-1) 轮 ring 步骤，每轮带有屏障 (AtomicAdd 1 →
   Ge 1)。块大小 = `SIZE // NR`，且 `SIZE` 必须是 `NR` 的整数倍；当 `SIZE`
   与 `NR` 均为编译期常量时，`LowerCompositeOps` 会常量折叠块大小。
 
@@ -262,8 +262,11 @@ signal）。该阶段会先插入 standalone `world_size = pld.world_size()` bin
 lowering 和内部测试使用的形态。通信域物化会把该 signal buffer 保留在与 `src`
 相同的 comm-domain 中，即使它没有传给用户自定义 chip kernel。public op 当前接受
 `ReduceOp.Sum`，并会拒绝预留的 `Max` / `Min` / `Prod` 变体，直到这些
-lowering 落地。host builtin lowering 路径当前支持 `Sum` + FP32 变体，并接受
-rank-1 `[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。
+lowering 落地。host builtin lowering 路径当前支持 `Sum` + FP32 变体。mesh 模式
+（`mode="mesh"`，默认）降级为 `builtin.tensor.allreduce`，接受 rank-1
+`[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。ring 模式
+（`mode="ring"`）降级为 `builtin.tensor.allreduce_ring`，要求显式 rank-2
+`[2 * (NR - 1) + 1, NR]` INT32 signal（与 InCore ring composite 相同，额外增加一行用于返回屏障）。
 
 ### `pld.system.notify`（TNOTIFY）
 
@@ -331,6 +334,7 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   P=2/P=4）、`test_l3_tensor_allreduce_intrinsic.py`、
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
+  `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`，以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
