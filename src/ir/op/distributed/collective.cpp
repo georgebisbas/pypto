@@ -461,11 +461,12 @@ TypePtr DeduceTensorReduceScatterType(const std::vector<ExprPtr>& args,
       << "pld.tensor.reduce_scatter signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Validate op kwarg — kSum only for first version (same as allreduce).
+  // Validate op kwarg falls in the known ReduceOp range.
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", "pld.tensor.reduce_scatter");
-  CHECK(op_value == static_cast<int>(ReduceOp::kSum))
-      << "pld.tensor.reduce_scatter op must be ReduceOp.Sum (got int " << op_value
-      << "); Max / Min / Prod lowerings are not yet implemented";
+  CHECK(op_value >= static_cast<int>(ReduceOp::kSum) &&
+        op_value <= static_cast<int>(ReduceOp::kProd))
+      << "pld.tensor.reduce_scatter op must be a valid ReduceOp value (Sum=0, Max=1, Min=2, Prod=3), got int "
+      << op_value;
 
   // Result type: same as target (in-place rebind — rank r's row now holds
   // the reduced chunk r).

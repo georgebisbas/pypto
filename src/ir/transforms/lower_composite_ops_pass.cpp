@@ -146,6 +146,28 @@ class LoweringBuilder {
   ExprPtr Mul(const ExprPtr& a, const ExprPtr& b, const Span& span) {
     return OpRegistry::GetInstance().Create("tile.mul", {a, b}, {}, span);
   }
+  ExprPtr Maximum(const ExprPtr& a, const ExprPtr& b, const Span& span) {
+    return OpRegistry::GetInstance().Create("tile.maximum", {a, b}, {}, span);
+  }
+  ExprPtr Minimum(const ExprPtr& a, const ExprPtr& b, const Span& span) {
+    return OpRegistry::GetInstance().Create("tile.minimum", {a, b}, {}, span);
+  }
+  ExprPtr ReduceOpAccum(const ExprPtr& acc, const ExprPtr& rhs, int reduce_op, const Span& span) {
+    switch (reduce_op) {
+      case static_cast<int>(ReduceOp::kSum):
+        return Add(acc, rhs, span);
+      case static_cast<int>(ReduceOp::kMax):
+        return Maximum(acc, rhs, span);
+      case static_cast<int>(ReduceOp::kMin):
+        return Minimum(acc, rhs, span);
+      case static_cast<int>(ReduceOp::kProd):
+        return Mul(acc, rhs, span);
+      default:
+        INTERNAL_CHECK_SPAN(false, span)
+            << "ReduceOpAccum: unknown reduce_op value " << reduce_op;
+        return ExprPtr{};
+    }
+  }
   ExprPtr Cast(const ExprPtr& x, DataType to, int mode, const Span& span) {
     std::vector<std::pair<std::string, std::any>> kw = {{"target_type", to}, {"mode", mode}};
     return OpRegistry::GetInstance().Create("tile.cast", {x}, kw, span);
@@ -609,11 +631,12 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   INTERNAL_CHECK_SPAN(target_type, span)
       << "pld.tensor.allreduce target must be DistributedTensorType (deducer-rejected otherwise)";
 
-  // First-version constraint — Max / Min / Prod lowerings not yet implemented.
+  // Validate op_value falls in the known ReduceOp range — the deducer already
+  // gated this, but this INTERNAL_CHECK catches any bypass of the deducer path.
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.allreduce");
-  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
-      << "pld.tensor.allreduce lowering supports ReduceOp::kSum only (got int " << op_value
-      << ") — deducer should have rejected this";
+  INTERNAL_CHECK_SPAN(op_value >= static_cast<int>(ReduceOp::kSum) &&
+                      op_value <= static_cast<int>(ReduceOp::kProd), span)
+      << "pld.tensor.allreduce lowering: unknown ReduceOp value " << op_value;
 
   // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
   // ring schedule; "mesh" (default) uses the direct-exchange lowering below.
@@ -707,10 +730,9 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
                                      "pld.tile.remote_load",
                                      {flat_target, peer, zero_offsets, flat_valid_shape_tuple}, {}, span),
                                  span);
-              // Bind the add result so codegen sees a named tile buffer to
-              // write into (pto.tadd lowers to `ins(...) outs(<bound>)`);
-              // yielding a raw Call leaves outs() empty and MLIR rejects it.
-              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+              // Bind the result so codegen sees a named tile buffer to
+              // write into; yielding a raw Call leaves outs() empty and MLIR rejects it.
+              return then_body.Bind("acc_next", then_body.ReduceOpAccum(acc, recv, op_value, span), span);
             },
             [&](LoweringBuilder& /*else_body*/) -> ExprPtr {
               // peer == my_rank: pass acc through unchanged.
@@ -1148,8 +1170,9 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
       << "pld.tensor.reduce_scatter target must be 2D [NR, SIZE]";
 
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.reduce_scatter");
-  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
-      << "pld.tensor.reduce_scatter lowering supports ReduceOp::kSum only (got int " << op_value << ")";
+  INTERNAL_CHECK_SPAN(op_value >= static_cast<int>(ReduceOp::kSum) &&
+                      op_value <= static_cast<int>(ReduceOp::kProd), span)
+      << "pld.tensor.reduce_scatter lowering: unknown ReduceOp value " << op_value;
 
   auto& reg = OpRegistry::GetInstance();
   auto comm = b.EmitCommSetup(target, span);
@@ -1191,7 +1214,7 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
                   OpRegistry::GetInstance().Create("pld.tile.remote_load",
                                                    {target, peer, my_data_offsets, chunk_shape}, {}, span),
                   span);
-              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+              return then_body.Bind("acc_next", then_body.ReduceOpAccum(acc, recv, op_value, span), span);
             },
             [&](LoweringBuilder&) -> ExprPtr { return acc; }, span);
       },

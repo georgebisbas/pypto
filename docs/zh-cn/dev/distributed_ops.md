@@ -84,9 +84,9 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `AtomicType` | `kNone` | 普通远程写 —— 覆盖 peer 的 dst 切片 |
 | `AtomicType` | `kAdd` | 原子地把源数据加到 peer 的 dst 切片 |
 | `ReduceOp` | `kSum` | 对所有参与 rank 的窗口切片做求和规约 |
-| `ReduceOp` | `kMax` | 预留的最大值规约变体；lowering 待实现 |
-| `ReduceOp` | `kMin` | 预留的最小值规约变体；lowering 待实现 |
-| `ReduceOp` | `kProd` | 预留的乘法规约变体；lowering 待实现 |
+| `ReduceOp` | `kMax` | 对所有参与 rank 的窗口切片做最大值规约 |
+| `ReduceOp` | `kMin` | 对所有参与 rank 的窗口切片做最小值规约 |
+| `ReduceOp` | `kProd` | 对所有参与 rank 的窗口切片做乘法规约 |
 
 每个枚举跨三层保持一致（C++ `enum class` → bindings 中的 `nb::enum_` → `.pyi`
 存根）,并以 `pld.NotifyOp` / `pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp` 暴露给 DSL。
@@ -260,9 +260,9 @@ signal）。该阶段会先插入 standalone `world_size = pld.world_size()` bin
 再用该变量构造 buffer size 和 window shape。循环内的所有调用都会被拒绝，因为当前 signal 协议只能
 单次使用。显式 `signal` 仍然是 InCore
 lowering 和内部测试使用的形态。通信域物化会把该 signal buffer 保留在与 `src`
-相同的 comm-domain 中，即使它没有传给用户自定义 chip kernel。public op 当前接受
-`ReduceOp.Sum`，并会拒绝预留的 `Max` / `Min` / `Prod` 变体，直到这些
-lowering 落地。host builtin lowering 路径当前支持 `Sum` + FP32 变体，并接受
+相同的 comm-domain 中，即使它没有传给用户自定义 chip kernel。public op 接受所有
+`ReduceOp` 变体（`Sum`、`Max`、`Min`、`Prod`）。
+host builtin lowering 路径当前支持 `Sum` + FP32 变体，并接受
 rank-1 `[world_size]` 或合成的 rank-2 `[world_size, 1]` signal。
 
 ### `pld.system.notify`（TNOTIFY）

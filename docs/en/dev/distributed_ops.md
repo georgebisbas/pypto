@@ -92,9 +92,9 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 | `AtomicType` | `kNone` | plain remote store — overwrite the peer's dst slice |
 | `AtomicType` | `kAdd` | atomically add the source data into the peer's dst slice |
 | `ReduceOp` | `kSum` | sum-reduce every participating rank's window slice |
-| `ReduceOp` | `kMax` | reserved max-reduce variant; lowering pending |
-| `ReduceOp` | `kMin` | reserved min-reduce variant; lowering pending |
-| `ReduceOp` | `kProd` | reserved product-reduce variant; lowering pending |
+| `ReduceOp` | `kMax` | max-reduce every participating rank's window slice |
+| `ReduceOp` | `kMin` | min-reduce every participating rank's window slice |
+| `ReduceOp` | `kProd` | product-reduce every participating rank's window slice |
 
 Each enum is mirrored across three layers (C++ `enum class` → `nb::enum_` in the
 bindings → `.pyi` stub) and surfaced to the DSL as `pld.NotifyOp` /
@@ -297,9 +297,9 @@ loops are rejected because the current signal protocol is single-use. Explicit
 `signal` remains the internal form used by InCore lowering and by tests that
 intentionally construct the internal protocol. Comm-domain materialisation then
 keeps the signal buffer in the same domain as `src`, even when it is not passed
-to a user chip kernel. The public op currently accepts `ReduceOp.Sum` and
-rejects the reserved reduce variants (`Max`, `Min`, `Prod`) until their
-lowerings land. The host builtin lowering path currently supports the `Sum` +
+to a user chip kernel. The public op accepts all four
+`ReduceOp` variants (`Sum`, `Max`, `Min`, `Prod`).
+The host builtin lowering path currently supports the `Sum` +
 FP32 variant and accepts either a rank-1 `[world_size]` signal or the
 synthesized rank-2 `[world_size, 1]` signal.
 

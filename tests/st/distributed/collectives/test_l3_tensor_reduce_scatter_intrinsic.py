@@ -29,11 +29,21 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 SIZE = 64
 
 
-def _expected_reduce_scatter(inputs: torch.Tensor) -> torch.Tensor:
-    """Per-rank golden: sum of chunk r across all ranks."""
+def _expected_reduce_scatter(inputs: torch.Tensor, reduce_op: str = "sum") -> torch.Tensor:
+    """Per-rank golden: reduce chunk r across all ranks."""
     n_ranks = inputs.shape[0]
-    chunks = [inputs[:, 0, r * SIZE : (r + 1) * SIZE].sum(dim=0) for r in range(n_ranks)]
-    return torch.stack(chunks).reshape(n_ranks, 1, SIZE)
+    chunks = [inputs[:, 0, r * SIZE : (r + 1) * SIZE] for r in range(n_ranks)]
+    if reduce_op == "sum":
+        reduced = [c.sum(dim=0) for c in chunks]
+    elif reduce_op == "max":
+        reduced = [c.amax(dim=0) for c in chunks]
+    elif reduce_op == "min":
+        reduced = [c.amin(dim=0) for c in chunks]
+    elif reduce_op == "prod":
+        reduced = [c.prod(dim=0) for c in chunks]
+    else:
+        raise ValueError(f"Unknown reduce_op: {reduce_op}")
+    return torch.stack(reduced).reshape(n_ranks, 1, SIZE)
 
 
 def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
@@ -45,7 +55,7 @@ def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
     return torch.stack(rows)
 
 
-def _build_reduce_scatter_program(n_ranks: int):
+def _build_reduce_scatter_program(n_ranks: int, reduce_op=pld.ReduceOp.Sum):
     """Build an N-rank reduce-scatter program at call time using the intrinsic.
 
     Deferred construction lets this file collect even if the embedded body
@@ -70,7 +80,7 @@ def _build_reduce_scatter_program(n_ranks: int):
                 pl.store(chunk, [j, 0], data)
 
             # Reduce-scatter — one call.
-            data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
+            data = pld.tensor.reduce_scatter(data, signal, op=reduce_op)
 
             # Stage-out: read my reduced chunk.
             acc = pl.load(data, [my_rank, 0], [1, SIZE])
@@ -108,17 +118,23 @@ def _build_reduce_scatter_program(n_ranks: int):
 class TestL3TensorReduceScatterIntrinsic:
     """L3 distributed runtime: N-rank reduce-scatter via ``pld.tensor.reduce_scatter``.
 
-    Validates that the lowered composite produces an on-board result
-    bit-identical to the hand-written ``test_l3_reduce_scatter.py`` reference.
+    Validates that the lowered composite produces correct on-board results
+    for all four ReduceOp variants: Sum, Max, Min, Prod.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_reduce_scatter_intrinsic(self, test_config, device_ids, n_ranks):
-        """Compile and run mesh reduce-scatter for P=2 or P=4; skip when devices are scarce."""
+    @pytest.mark.parametrize("op_name, reduce_op, torch_op", [
+        ("Sum", pld.ReduceOp.Sum, "sum"),
+        ("Max", pld.ReduceOp.Max, "max"),
+        ("Min", pld.ReduceOp.Min, "min"),
+        ("Prod", pld.ReduceOp.Prod, "prod"),
+    ])
+    def test_reduce_scatter_intrinsic(self, test_config, device_ids, n_ranks, op_name, reduce_op, torch_op):
+        """Compile and run mesh reduce-scatter for each ReduceOp variant."""
         if len(device_ids) < n_ranks:
             pytest.skip(f"reduce-scatter P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
-        program = _build_reduce_scatter_program(n_ranks)
+        program = _build_reduce_scatter_program(n_ranks, reduce_op)
         compiled = ir.compile(
             program,
             platform=test_config.platform,
@@ -133,9 +149,9 @@ class TestL3TensorReduceScatterIntrinsic:
 
         compiled(inputs, outputs)
 
-        expected = _expected_reduce_scatter(inputs)
+        expected = _expected_reduce_scatter(inputs, torch_op)
         assert torch.allclose(outputs, expected), (
-            f"reduce-scatter intrinsic P={n_ranks} mismatch: "
+            f"reduce-scatter intrinsic op={op_name} P={n_ranks} mismatch: "
             f"max diff = {(outputs - expected).abs().max().item()}"
         )
 
