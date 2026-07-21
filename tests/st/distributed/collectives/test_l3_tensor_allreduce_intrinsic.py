@@ -152,12 +152,15 @@ class TestL3TensorAllReduceIntrinsic:
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    @pytest.mark.parametrize("op_name, reduce_op, torch_op", [
-        ("Sum", pld.ReduceOp.Sum, "sum"),
-        ("Max", pld.ReduceOp.Max, "max"),
-        ("Min", pld.ReduceOp.Min, "min"),
-        ("Prod", pld.ReduceOp.Prod, "prod"),
-    ])
+    @pytest.mark.parametrize(
+        "op_name, reduce_op, torch_op",
+        [
+            ("Sum", pld.ReduceOp.Sum, "sum"),
+            ("Max", pld.ReduceOp.Max, "max"),
+            ("Min", pld.ReduceOp.Min, "min"),
+            ("Prod", pld.ReduceOp.Prod, "prod"),
+        ],
+    )
     def test_allreduce_intrinsic(self, test_config, device_ids, n_ranks, op_name, reduce_op, torch_op):
         """Compile and run mesh allreduce for each ReduceOp variant."""
         if len(device_ids) < n_ranks:

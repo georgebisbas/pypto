@@ -163,8 +163,7 @@ class LoweringBuilder {
       case static_cast<int>(ReduceOp::kProd):
         return Mul(acc, rhs, span);
       default:
-        INTERNAL_CHECK_SPAN(false, span)
-            << "ReduceOpAccum: unknown reduce_op value " << reduce_op;
+        INTERNAL_CHECK_SPAN(false, span) << "ReduceOpAccum: unknown reduce_op value " << reduce_op;
         return ExprPtr{};
     }
   }
@@ -634,8 +633,8 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // Validate op_value falls in the known ReduceOp range — the deducer already
   // gated this, but this INTERNAL_CHECK catches any bypass of the deducer path.
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.allreduce");
-  INTERNAL_CHECK_SPAN(op_value >= static_cast<int>(ReduceOp::kSum) &&
-                      op_value <= static_cast<int>(ReduceOp::kProd), span)
+  INTERNAL_CHECK_SPAN(
+      op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
       << "pld.tensor.allreduce lowering: unknown ReduceOp value " << op_value;
 
   // Mode dispatch: "ring" delegates to the chunked reduce-scatter + allgather
@@ -1170,8 +1169,8 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
       << "pld.tensor.reduce_scatter target must be 2D [NR, SIZE]";
 
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.reduce_scatter");
-  INTERNAL_CHECK_SPAN(op_value >= static_cast<int>(ReduceOp::kSum) &&
-                      op_value <= static_cast<int>(ReduceOp::kProd), span)
+  INTERNAL_CHECK_SPAN(
+      op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
       << "pld.tensor.reduce_scatter lowering: unknown ReduceOp value " << op_value;
 
   auto& reg = OpRegistry::GetInstance();

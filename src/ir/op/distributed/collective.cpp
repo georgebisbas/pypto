@@ -463,8 +463,7 @@ TypePtr DeduceTensorReduceScatterType(const std::vector<ExprPtr>& args,
 
   // Validate op kwarg falls in the known ReduceOp range.
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", "pld.tensor.reduce_scatter");
-  CHECK(op_value >= static_cast<int>(ReduceOp::kSum) &&
-        op_value <= static_cast<int>(ReduceOp::kProd))
+  CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
       << "pld.tensor.reduce_scatter op must be a valid ReduceOp value (Sum=0, Max=1, Min=2, Prod=3), got int "
       << op_value;
 
