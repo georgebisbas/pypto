@@ -1019,10 +1019,31 @@ def test_allreduce_deducer_rejects_plain_tensor():
                 return local
 
 
-def test_allreduce_deducer_rejects_unsupported_reduce_op():
-    """First-version lowering supports ``ReduceOp.Sum`` only — the deducer
-    must reject other variants so users get a clear error rather than
-    silently wrong codegen."""
+def test_allreduce_deducer_accepts_all_reduce_ops():
+    """The deducer now accepts all four ReduceOp variants (Sum, Max, Min, Prod)
+    for mesh mode allreduce. The lowering dispatches on the op value."""
+    SIZE = _ALLREDUCE_SIZE
+
+    for reduce_op in (pld.ReduceOp.Sum, pld.ReduceOp.Max, pld.ReduceOp.Min, pld.ReduceOp.Prod):
+
+        @pl.program
+        class AcceptsOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+                data = pld.tensor.allreduce(data, signal, op=reduce_op)
+                return data
+
+        After = passes.lower_composite_ops()(AcceptsOp)
+        op_names = set(_collect_op_names(After))
+        assert "pld.tensor.allreduce" not in op_names, f"lower_composite_ops must decompose allreduce with {reduce_op}"
+
+
+def test_allreduce_deducer_rejects_invalid_reduce_op():
+    """The deducer rejects an int value outside the ReduceOp range (e.g. 99)."""
     SIZE = _ALLREDUCE_SIZE
 
     with pytest.raises((ValueError, TypeError, ParserError)):
@@ -1035,7 +1056,7 @@ def test_allreduce_deducer_rejects_unsupported_reduce_op():
                 data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
                 signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
             ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Max)
+                data = pld.tensor.allreduce(data, signal, op=99)
                 return data
 
 
@@ -1321,9 +1342,33 @@ def test_reduce_scatter_lowering_is_idempotent():
     ir.assert_structural_equal(twice, once)
 
 
-def test_reduce_scatter_deducer_rejects_unsupported_reduce_op():
-    """First-version lowering supports ``ReduceOp.Sum`` only — the deducer
-    must reject other variants."""
+def test_reduce_scatter_deducer_accepts_all_reduce_ops():
+    """The reduce_scatter deducer now accepts all four ReduceOp variants."""
+    SIZE = _REDUCE_SCATTER_SIZE
+    nr = _REDUCE_SCATTER_NRANKS
+
+    for reduce_op in (pld.ReduceOp.Sum, pld.ReduceOp.Max, pld.ReduceOp.Min, pld.ReduceOp.Prod):
+
+        @pl.program
+        class AcceptsOp:
+            @pl.function(type=pl.FunctionType.InCore)
+            def f(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
+                data = pld.tensor.reduce_scatter(data, signal, op=reduce_op)
+                return data
+
+        After = passes.lower_composite_ops()(AcceptsOp)
+        op_names = set(_collect_op_names(After))
+        assert "pld.tensor.reduce_scatter" not in op_names, (
+            f"lower_composite_ops must decompose reduce_scatter with {reduce_op}"
+        )
+
+
+def test_reduce_scatter_deducer_rejects_invalid_reduce_op():
+    """The deducer rejects an int value outside the ReduceOp range."""
     SIZE = _REDUCE_SCATTER_SIZE
     nr = _REDUCE_SCATTER_NRANKS
 
@@ -1337,7 +1382,7 @@ def test_reduce_scatter_deducer_rejects_unsupported_reduce_op():
                 data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
                 signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
-                data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Max)
+                data = pld.tensor.reduce_scatter(data, signal, op=99)
                 return data
 
 
@@ -1480,24 +1525,26 @@ def test_ring_allreduce_mesh_default_unchanged():
     )
 
 
-def test_ring_allreduce_deducer_rejects_unsupported_reduce_op():
-    """Ring mode inherits the kSum-only restriction from mesh."""
+def test_ring_allreduce_lowering_rejects_non_sum_reduce_op():
+    """Ring mode allreduce still restricts to ReduceOp::kSum in the lowering
+    rule (the deducer accepts all ops, but the ring INTERNAL_CHECK fires)."""
     SIZE = _RING_ALLREDUCE_SIZE
     nr = _RING_ALLREDUCE_NRANKS
     total_rounds = 2 * (nr - 1)
 
-    with pytest.raises((ValueError, TypeError, ParserError)):
+    @pl.program
+    class RingMaxOp:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Max, mode="ring")
+            return data
 
-        @pl.program
-        class BadRingOp:
-            @pl.function(type=pl.FunctionType.InCore)
-            def f(
-                self,
-                data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-                signal: pl.InOut[pld.DistributedTensor[[total_rounds, nr], pl.INT32]],
-            ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-                data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Max, mode="ring")
-                return data
+    with pytest.raises(Exception, match="ring"):
+        passes.lower_composite_ops()(RingMaxOp)
 
 
 if __name__ == "__main__":
