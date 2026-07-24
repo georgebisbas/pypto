@@ -227,6 +227,22 @@ void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
       {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
 }
 
+[[nodiscard]] CallPtr MakeBuiltinAllToAllV(const CallPtr& call, const ExprPtr& device) {
+  // Emit namesake builtin: in-kernel TPUT push (this rank's variable-size
+  // chunks from the `input` staging window into every peer's `target` window)
+  // + barrier (TNOTIFY / TWAIT), all in a single AIV kernel. `input` and
+  // `target` must be two DISTINCT windows. Each peer `dest` receives
+  // signal[dest] rows (read at runtime from the signal buffer). All chips
+  // must run concurrently — the host orchestrator submits asynchronously.
+  CheckDistinctInputTargetWindows(call, "pld.tensor.all_to_all_v");
+  auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
+  return MakeBuiltinCallWithAttrs(
+      "builtin.tensor.all_to_all_v", call,
+      {call->args_[0], call->args_[1], call->args_[2]},  // (input, target, signal)
+      {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
+      {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
+}
+
 struct HostCollectiveRule {
   const char* pld_name;
   using MakeBuiltinFn = std::function<CallPtr(const CallPtr&, const ExprPtr&)>;
@@ -301,6 +317,19 @@ struct HostCollectiveRule {
                 GetWindowBuffer(call->args_[0], "all_to_all input"),
                 GetWindowBuffer(call->args_[1], "all_to_all target"),
                 GetWindowBuffer(call->args_[2], "all_to_all signal"),
+            };
+          },
+          [](const CallPtr& call) { return call->args_[2]; },
+          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+      },
+      {
+          "pld.tensor.all_to_all_v",
+          &MakeBuiltinAllToAllV,
+          [](const CallPtr& call) {
+            return std::vector<WindowBufferPtr>{
+                GetWindowBuffer(call->args_[0], "all_to_all_v input"),
+                GetWindowBuffer(call->args_[1], "all_to_all_v target"),
+                GetWindowBuffer(call->args_[2], "all_to_all_v signal"),
             };
           },
           [](const CallPtr& call) { return call->args_[2]; },

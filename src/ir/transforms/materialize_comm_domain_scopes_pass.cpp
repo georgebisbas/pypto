@@ -61,6 +61,10 @@ namespace {
   return call && call->op_ && IsOp(call, "pld.tensor.all_to_all");
 }
 
+[[nodiscard]] bool IsTensorAllToAllV(const CallPtr& call) {
+  return call && call->op_ && IsOp(call, "pld.tensor.all_to_all_v");
+}
+
 [[nodiscard]] bool IsTensorAllGather(const CallPtr& call) {
   return call && call->op_ && IsOp(call, "pld.tensor.allgather");
 }
@@ -359,6 +363,24 @@ class DispatchAnalyzer : public IRVisitor {
       collective_consumers.push_back({data_alloc, signal_alloc, op->span_});
       return;
     }
+
+    if (IsOp(op, "pld.tensor.all_to_all_v")) {
+      // 3-arg push-based form: pld.tensor.all_to_all_v(input, target, signal)
+      // args[0] = input  (Tensor or DistributedTensor — on HOST path this
+      //                    must be a DISTINCT window from args[1], never the
+      //                    same one; on InCore it is a plain Tensor.)
+      // args[1] = target (DistributedTensor, window-bound)
+      // args[2] = signal (DistributedTensor, window-bound)
+      INTERNAL_CHECK_SPAN(op->args_.size() == 3, op->span_)
+          << "MaterializeCommDomainScopes: pld.tensor.all_to_all_v expects exactly 3 args";
+      auto* data_alloc = ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all_v", "target");
+      auto* signal_alloc = ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all_v", "signal");
+      // Device-coverage inheritance from data to signal is handled generically
+      // in the Phase 3 loop below (every collective consumer with a data_alloc
+      // triggers the merge automatically).  No manual merge needed here.
+      collective_consumers.push_back({data_alloc, signal_alloc, op->span_});
+      return;
+    }
   }
 
   void VisitExpr_(const CallPtr& op) override {
@@ -398,6 +420,9 @@ class DispatchAnalyzer : public IRVisitor {
       return ResolveWindowRecord(As<Var>(call->args_[0]), visited);
     }
     if (call && IsTensorAllToAll(call) && call->args_.size() > 1) {
+      return ResolveWindowRecord(As<Var>(call->args_[1]), visited);
+    }
+    if (call && IsTensorAllToAllV(call) && call->args_.size() > 1) {
       return ResolveWindowRecord(As<Var>(call->args_[1]), visited);
     }
     if (call && IsTensorAllGather(call) && call->args_.size() > 1) {

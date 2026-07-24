@@ -30,7 +30,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——基于推送的分解，使用平面 2D 暂存窗口，返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite InCore |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——基于推送的分解，使用平面 2D 暂存窗口，返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式）。HOST 路径通过 ``LowerHostTensorCollectives`` 降级为 ``builtin.tensor.all_to_all_v``。 | `DistributedTensorType`（与 target 相同） | composite InCore / HOST builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 

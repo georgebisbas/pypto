@@ -860,5 +860,105 @@ REGISTER_OP("builtin.tensor.all_to_all")
     .set_template_dir(":pypto.runtime.builtins.collectives.all_to_all")
     .f_deduce_type(DeduceBuiltinTensorAllToAllType);
 
+// ============================================================================
+// builtin.tensor.all_to_all_v — host dispatch for pld.tensor.all_to_all_v
+// ============================================================================
+
+namespace {
+
+TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
+                                         const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  constexpr const char* kOpName = "builtin.tensor.all_to_all_v";
+  CHECK(args.size() == 3) << kOpName
+                          << " requires exactly 3 positional arguments (input, target, signal), but got "
+                          << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
+  }
+  // input: a SEPARATE window, distinct from target, holding this rank's
+  // per-destination outgoing chunks (packed flat [NR*MAX_RECV, SIZE]).
+  // Never a destination for any incoming TPUT.
+  CHECK(args[0].get() != args[1].get())
+      << kOpName
+      << " input and target must be different windows, but the same expression was "
+         "passed for both";
+  auto input_type = As<DistributedTensorType>(args[0]->GetType());
+  CHECK(input_type) << kOpName << " input must be a DistributedTensor (window-bound), got "
+                    << args[0]->GetType()->TypeName();
+  CHECK(input_type->shape_.size() == 2)
+      << kOpName << " input must be 2D [NR*MAX_RECV, SIZE], got " << input_type->shape_.size() << " dims";
+
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(target_type) << kOpName << " target must be a DistributedTensor, got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(target_type->shape_.size() == 2)
+      << kOpName << " target must be 2D [NR*MAX_RECV, SIZE], got " << target_type->shape_.size() << " dims";
+  // Dim 0 (NR*MAX_RECV): input and target are two separate windows.
+  // Dim 1 (SIZE) is always a plain literal — strict structural check.
+  CheckDimAgreesIfStatic(target_type->shape_[0], input_type->shape_[0], kOpName, "target", "input");
+  CHECK(AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
+      << kOpName << " target shape must equal input shape";
+  CHECK(target_type->dtype_ == input_type->dtype_)
+      << kOpName << " target dtype " << target_type->dtype_.ToString() << " must match input dtype "
+      << input_type->dtype_.ToString();
+
+  // signal: DistributedTensor INT32 [NR] or [NR, 1]
+  auto signal_type = As<DistributedTensorType>(args[2]->GetType());
+  CHECK(signal_type) << kOpName << " signal must be a DistributedTensor, got "
+                     << args[2]->GetType()->TypeName();
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << kOpName << " signal dtype must be INT32, got " << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 1 || signal_type->shape_.size() == 2)
+      << kOpName << " signal must be rank-1 [world_size] or rank-2 [world_size, 1], got rank "
+      << signal_type->shape_.size();
+  if (signal_type->shape_.size() == 2) {
+    auto second_extent = As<ConstInt>(signal_type->shape_[1]);
+    CHECK(second_extent) << kOpName << " rank-2 signal shape[1] must be the constant 1";
+    CHECK(second_extent->value_ == 1)
+        << kOpName << " rank-2 signal shape[1] must be 1, got " << second_extent->value_;
+  }
+
+  // MAX_RECV = target.shape[0] / signal.shape[0] (compile-time constants;
+  // same validation as the pld.tensor.all_to_all_v deducer).
+  auto target_dim0 = As<ConstInt>(target_type->shape_[0]);
+  CHECK(target_dim0)
+      << kOpName << " target dim 0 (NR*MAX_RECV) must be a compile-time constant";
+  auto signal_dim0 = As<ConstInt>(signal_type->shape_[0]);
+  CHECK(signal_dim0) << kOpName << " signal dim 0 (NR) must be a compile-time constant";
+  CHECK(signal_dim0->value_ > 0) << kOpName << " signal dim 0 (NR) must be positive, got "
+                                 << signal_dim0->value_;
+  CHECK(target_dim0->value_ % signal_dim0->value_ == 0)
+      << kOpName << " signal dim 0 (" << signal_dim0->value_ << ") must divide target dim 0 ("
+      << target_dim0->value_ << ")";
+
+  auto dtype = GetRequiredKwarg<DataType>(kwargs, "dtype", kOpName);
+  CHECK(dtype == target_type->dtype_)
+      << kOpName << " dtype kwarg (" << dtype.ToString() << ") must match target dtype ("
+      << target_type->dtype_.ToString() << ")";
+  CheckSupportedFp32BuiltinVariant(dtype, kOpName);
+  return args[1]->GetType();
+}
+
+}  // namespace
+
+REGISTER_OP("builtin.tensor.all_to_all_v")
+    .set_description("Internal chip-dispatch builtin for pld.tensor.all_to_all_v "
+                     "(variable-size all-to-all).")
+    .set_op_category("DistributedOp")
+    .add_argument("input",
+                  "Window-bound DistributedTensor[NR*MAX_RECV, SIZE] — this rank's outgoing "
+                  "staging window (flat packed, zero-padded to MAX_RECV per peer)")
+    .add_argument("target",
+                  "Window-bound DistributedTensor[NR*MAX_RECV, SIZE] result window "
+                  "(TPUT destination)")
+    .add_argument("signal",
+                  "Window-bound INT32 DistributedTensor signal buffer — encodes per-dest "
+                  "send counts (signal[dest] rows for peer dest)")
+    .set_attr<DataType>("dtype")
+    .no_memory_spec()
+    .set_internal_only(true)
+    .set_template_dir(":pypto.runtime.builtins.collectives.all_to_all_v")
+    .f_deduce_type(DeduceBuiltinTensorAllToAllVType);
+
 }  // namespace ir
 }  // namespace pypto

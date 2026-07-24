@@ -308,6 +308,43 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all, "builtin.tensor.all_to_all") 
 }
 
 // ============================================================================
+// builtin.tensor.all_to_all_v: compiler-generated chip dispatch for
+// pld.tensor.all_to_all_v (variable-size all-to-all).
+// ============================================================================
+REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_v") {
+  auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
+  INTERNAL_CHECK(dist_codegen) << "builtin.tensor.all_to_all_v codegen requires DistributedCodegen";
+  const auto dtype = op->GetAttr<DataType>("dtype");
+  const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
+
+  if (dist_codegen->MarkBuiltinEmitted(variant)) {
+    // Derive MAX_RECV from the op's target and signal shapes at codegen time.
+    // target = args_[1]: DistributedTensor [NR*MAX_RECV, SIZE]
+    // signal = args_[2]: DistributedTensor [NR] or [NR, 1]
+    auto target_type = As<DistributedTensorType>(op->args_[1]->GetType());
+    INTERNAL_CHECK(target_type)
+        << "builtin.tensor.all_to_all_v: target arg must have DistributedTensorType";
+    auto signal_type = As<DistributedTensorType>(op->args_[2]->GetType());
+    INTERNAL_CHECK(signal_type)
+        << "builtin.tensor.all_to_all_v: signal arg must have DistributedTensorType";
+    auto target_dim0 = As<ConstInt>(target_type->shape_[0]);
+    INTERNAL_CHECK(target_dim0)
+        << "builtin.tensor.all_to_all_v: target dim 0 must be a compile-time constant";
+    auto signal_dim0 = As<ConstInt>(signal_type->shape_[0]);
+    INTERNAL_CHECK(signal_dim0)
+        << "builtin.tensor.all_to_all_v: signal dim 0 must be a compile-time constant";
+    int64_t max_recv = target_dim0->value_ / signal_dim0->value_;
+
+    dist_codegen->RecordBuiltinNextLevel(op, variant, {
+        {"dtype_cpp", Fp32TypeCpp(dtype)},
+        {"max_recv", std::to_string(max_recv)},
+    });
+  }
+  EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant);
+  return "";
+}
+
+// ============================================================================
 // tensor.slice — emit Python tensor indexing into ``tensors[...]``.
 //
 // IR form:
