@@ -836,12 +836,11 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   // leaks into the merged scope and raises NameError at prepare().
   if (!op->return_vars_.empty()) {
     // ── Extract trailing yields from both branches ──────────────────
-    const auto then_yield = ir::transform_utils::GetLastYieldStmt(
-        ir::transform_utils::UnwrapAutoScope(op->then_body_));
+    const auto then_yield =
+        ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(op->then_body_));
     const ir::YieldStmtPtr else_yield = [&]() -> ir::YieldStmtPtr {
       if (!op->else_body_.has_value()) return nullptr;
-      return ir::transform_utils::GetLastYieldStmt(
-          ir::transform_utils::UnwrapAutoScope(*op->else_body_));
+      return ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(*op->else_body_));
     }();
 
     // ── Helper: find the AssignStmt that defines a yield var in a branch ──
@@ -851,10 +850,9 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     // This matters for the then-branch where ``boundary = zero`` creates a
     // bare Python name that is NOT in the ``tensors`` dict, while
     // ``zero`` (a kernel param) IS.
-    auto find_yield_source = [](const ir::StmtPtr& branch_body,
-                                const ir::VarPtr& yield_var) -> ir::ExprPtr {
-      const auto stmts = ir::transform_utils::FlattenToStmts(
-          ir::transform_utils::UnwrapAutoScope(branch_body));
+    auto find_yield_source = [](const ir::StmtPtr& branch_body, const ir::VarPtr& yield_var) -> ir::ExprPtr {
+      const auto stmts =
+          ir::transform_utils::FlattenToStmts(ir::transform_utils::UnwrapAutoScope(branch_body));
       // Walk backwards (excluding the trailing YieldStmt) to find the
       // most recent assignment to this var.
       for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
@@ -893,14 +891,32 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
     }
 
     // ── Pre-declare phi variables before the ``if`` ─────────────────
+    // Derive each tensor phi's initializer from its own yield source in
+    // the then-branch (preserving shape/dtype), falling back to the
+    // shared param-derived init or a zero-placeholder.
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const std::string phi_name = SanitizeName(op->return_vars_[i]->name_hint_);
       if (ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
-        if (!tensor_phi_init.empty()) {
+        // Try a per-phi init from the then-branch yield first.
+        std::string per_phi_init;
+        if (then_yield && i < then_yield->value_.size()) {
+          const auto yield_var = ir::As<ir::Var>(then_yield->value_[i]);
+          if (yield_var) {
+            auto src = find_yield_source(op->then_body_, yield_var);
+            const bool is_var_alias = src && ir::As<ir::Var>(src) != nullptr;
+            VisitExpr(is_var_alias ? src : yield_var);
+            per_phi_init = current_expr_value_;
+            current_expr_value_ = "";
+          }
+        }
+        if (!per_phi_init.empty()) {
+          emitter_.EmitLine("tensors[\"" + phi_name + "\"] = tensors[\"" + per_phi_init + "\"]");
+        } else if (!tensor_phi_init.empty()) {
           emitter_.EmitLine("tensors[\"" + phi_name + "\"] = tensors[\"" + tensor_phi_init + "\"]");
         } else {
           emitter_.EmitLine("if \"" + phi_name + "\" not in tensors:");
-          emitter_.EmitLine("    tensors[\"" + phi_name + "\"] = torch.zeros((1,), dtype=torch.float32).share_memory_()");
+          emitter_.EmitLine("    tensors[\"" + phi_name +
+                            "\"] = torch.zeros((1,), dtype=torch.float32).share_memory_()");
         }
       } else {
         emitter_.EmitLine(phi_name + " = None");

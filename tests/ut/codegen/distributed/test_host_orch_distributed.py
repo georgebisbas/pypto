@@ -973,46 +973,53 @@ def test_if_cross_branch_phi_predeclares_and_yields_tensors() -> None:
             return self.identity(x)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(self, x: pl.Tensor[[SIZE, SIZE], pl.FP32],
-                      zero: pl.Tensor[[SIZE, SIZE], pl.FP32]) -> pl.Scalar[pl.INT32]:
+        def host_orch(
+            self, x: pl.Tensor[[SIZE, SIZE], pl.FP32], zero: pl.Tensor[[SIZE, SIZE], pl.FP32]
+        ) -> pl.Scalar[pl.INT32]:
             for r in pl.range(P):
                 if r == 0:
                     boundary = zero
                 else:
                     boundary = self.chip_run(x)
                 self.chip_run(boundary)
-            return 0
+            return 0  # pyright: ignore[reportReturnType]
 
     code = _lower(Prog, convert_to_ssa=True)
 
     # Pre-declared phi before the ``if`` — must use tensors[...] for tensor phis.
-    assert re.search(r'tensors\["boundary__phi_v\d+"\]\s*=.*tensors', code), (
+    pre_if = code.split("if", 1)[0]
+    assert re.search(r'tensors\["boundary__phi_v\d+"\]\s*=.*tensors', pre_if), (
         "Tensor phi must be pre-declared via tensors[...] before if block:\n" + code
     )
+
+    # Isolate the then-branch body: everything after the ``if ...:`` line header
+    # (first newline after the ``if`` keyword) up to the ``else:`` boundary.
+    if "else:" in code:
+        post_if = code.split("if", 1)[1].split("\n", 1)[1]  # strip ``<cond>:\n`` header
+        then_block = post_if.split("else:")[0]
+        else_block = post_if.split("else:")[1]
+    else:
+        post_if = code.split("if", 1)[1].split("\n", 1)[1]
+        then_block = post_if
+        else_block = ""
 
     # Yield in the then-branch must reference a valid tensors-dict entry (no
     # bare Python names for tensor phis).
     then_yield = re.search(
         r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
-        re.split(r"\belse\b:", code)[0],
+        then_block,
     )
-    assert then_yield is not None, (
-        "Then-branch must yield phi via tensors[...] = tensors[...]:\n" + code
-    )
+    assert then_yield is not None, "Then-branch must yield phi via tensors[...] = tensors[...]:\n" + code
 
     # Yield in the else-branch likewise.
-    else_block = code.split("else:")[1] if "else:" in code else ""
     else_yield = re.search(
         r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
         else_block,
     )
-    assert else_yield is not None, (
-        "Else-branch must yield phi via tensors[...] = tensors[...]:\n" + code
-    )
+    assert else_yield is not None, "Else-branch must yield phi via tensors[...] = tensors[...]:\n" + code
 
     # No bare-Python-name tensor assignment in the then-branch (the bug was
     # ``boundary__ssa_v0 = zero__ssa_v0`` which raised NameError).
-    then_block = re.split(r"\belse\b:", code)[0]
     assert not re.search(r"(?<!\")boundary__ssa_v\d+\s*=\s*(?!tensors)\w+__ssa", then_block), (
         "Then-branch must not contain bare Python tensor assignments:\n" + code
     )
