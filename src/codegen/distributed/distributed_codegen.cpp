@@ -880,7 +880,10 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
         const auto var = ir::As<ir::Var>(val);
         if (var && ir::AsTensorTypeLike(var->GetType())) {
           auto src = find_yield_source(op->then_body_, var);
-          if (src) {
+          // Only resolve Var→Var aliases for init discovery.  Call RHS
+          // triggers EmitCallToWorker which would submit a chip task
+          // before the `if` condition is evaluated.
+          if (src && ir::As<ir::Var>(src) != nullptr) {
             VisitExpr(src);
             tensor_phi_init = current_expr_value_;
             current_expr_value_ = "";
@@ -903,10 +906,15 @@ void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
           const auto yield_var = ir::As<ir::Var>(then_yield->value_[i]);
           if (yield_var) {
             auto src = find_yield_source(op->then_body_, yield_var);
-            const bool is_var_alias = src && ir::As<ir::Var>(src) != nullptr;
-            VisitExpr(is_var_alias ? src : yield_var);
-            per_phi_init = current_expr_value_;
-            current_expr_value_ = "";
+            // Only visit Var→Var aliases (e.g. ``boundary = zero``).
+            // For Call RHS, EmitCallToWorker would submit a chip task
+            // before the `if` condition — skip init discovery and fall
+            // through to the shared tensor_phi_init or zero placeholder.
+            if (src && ir::As<ir::Var>(src) != nullptr) {
+              VisitExpr(src);
+              per_phi_init = current_expr_value_;
+              current_expr_value_ = "";
+            }
           }
         }
         if (!per_phi_init.empty()) {
