@@ -67,8 +67,10 @@ def pass_verification_context():
         yield
 
 
-def _lower(program) -> str:
+def _lower(program, convert_to_ssa=False) -> str:
     """Apply the late host-distributed pipeline, then run distributed codegen directly."""
+    if convert_to_ssa:
+        program = passes.convert_to_ssa()(program)
     program = passes.synthesize_allreduce_signals()(program)
     program = passes.materialize_comm_domain_scopes()(program)
     program = passes.materialize_dist_tensor_ctx()(program)
@@ -947,6 +949,73 @@ def test_host_collective_builtin_template_package_exists(package_name, variant):
         assert (templates / name).is_file(), f"missing {name} in {package_name}"
     assert (root / "__init__.py").is_file(), f"missing __init__.py in {package_name}"
     assert variant.startswith("builtin.tensor."), variant
+
+
+# ---------------------------------------------------------------------------
+#  IfStmt phi codegen (issue #2180)
+# ---------------------------------------------------------------------------
+
+
+def test_if_cross_branch_phi_predeclares_and_yields_tensors() -> None:
+    """Tensor phi emitted by ConvertToSSA for a cross-branch diverging variable
+    is pre-declared and yielded via ``tensors[...]``, not bare Python names."""
+    SIZE = 4
+    P = 2
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def identity(self, x: pl.Tensor[[SIZE, SIZE], pl.FP32]) -> pl.Tensor[[SIZE, SIZE], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_run(self, x: pl.Tensor[[SIZE, SIZE], pl.FP32]) -> pl.Tensor[[SIZE, SIZE], pl.FP32]:
+            return self.identity(x)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, x: pl.Tensor[[SIZE, SIZE], pl.FP32],
+                      zero: pl.Tensor[[SIZE, SIZE], pl.FP32]) -> pl.Scalar[pl.INT32]:
+            for r in pl.range(P):
+                if r == 0:
+                    boundary = zero
+                else:
+                    boundary = self.chip_run(x)
+                self.chip_run(boundary)
+            return 0
+
+    code = _lower(Prog, convert_to_ssa=True)
+
+    # Pre-declared phi before the ``if`` — must use tensors[...] for tensor phis.
+    assert re.search(r'tensors\["boundary__phi_v\d+"\]\s*=.*tensors', code), (
+        "Tensor phi must be pre-declared via tensors[...] before if block:\n" + code
+    )
+
+    # Yield in the then-branch must reference a valid tensors-dict entry (no
+    # bare Python names for tensor phis).
+    then_yield = re.search(
+        r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
+        re.split(r"\belse\b:", code)[0],
+    )
+    assert then_yield is not None, (
+        "Then-branch must yield phi via tensors[...] = tensors[...]:\n" + code
+    )
+
+    # Yield in the else-branch likewise.
+    else_block = code.split("else:")[1] if "else:" in code else ""
+    else_yield = re.search(
+        r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
+        else_block,
+    )
+    assert else_yield is not None, (
+        "Else-branch must yield phi via tensors[...] = tensors[...]:\n" + code
+    )
+
+    # No bare-Python-name tensor assignment in the then-branch (the bug was
+    # ``boundary__ssa_v0 = zero__ssa_v0`` which raised NameError).
+    then_block = re.split(r"\belse\b:", code)[0]
+    assert not re.search(r"(?<!\")boundary__ssa_v\d+\s*=\s*(?!tensors)\w+__ssa", then_block), (
+        "Then-branch must not contain bare Python tensor assignments:\n" + code
+    )
 
 
 if __name__ == "__main__":
