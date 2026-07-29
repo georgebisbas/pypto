@@ -936,6 +936,31 @@ class TestTileReadWriteOffsetCodegen:
         assert "arith.muli" in mlir, f"Expected arith.muli for 2D partial-constant index, got:\n{mlir}"
         assert "arith.addi" in mlir, f"Expected arith.addi for 2D partial-constant index, got:\n{mlir}"
 
+    def test_store_dynamic_offset_clamped_to_non_negative(self):
+        """pl.store with a dynamic offset emits arith.maxsi clamp against zero.
+
+        A runtime INT32 scalar used as a store offset (e.g. a rank-derived ring
+        index) could evaluate to a negative value.  The offset must be clamped
+        to non-negative before it reaches pto.partition_view, which does not
+        handle negative indices.  Regression for issue #2201.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 8], pl.FP32],
+                config: pl.Tensor[[1], pl.INT32],
+                out: pl.Tensor[[1, 32], pl.FP32],
+            ) -> pl.Tensor[[1, 32], pl.FP32]:
+                offset: pl.Scalar[pl.INT32] = pl.read(config, [0])
+                ones: pl.Tile[[1, 8], pl.FP32] = pl.load(src, [0, 0], [1, 8])
+                return pl.store(ones, [0, offset], out)
+
+        mlir = self._generate_mlir(Prog)
+        assert "arith.maxsi" in mlir, f"Expected arith.maxsi clamp for dynamic store offset, got:\n{mlir}"
+
 
 class TestBroadcastOpsCodegen:
     """Tests for broadcast (expand) operations PTO code generation."""
