@@ -748,7 +748,9 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   // reference so both names resolve via ``tensors[...]`` in the generated
   // Python.  Bare Python names for tensors are invisible to the prepared
   // runtime's tensor registry (issue #2180).
-  if (ir::AsTensorTypeLike(op->var_->GetType()) && ir::As<ir::Var>(op->value_)) {
+  // Only plain TensorType (not DistributedTensorType) goes through the
+  // tensors dict; distributed tensors use window_buffer_ references.
+  if (ir::As<ir::TensorType>(op->var_->GetType()) && ir::AsVarLike(op->value_)) {
     VisitExpr(op->value_);
     if (!current_expr_value_.empty()) {
       emitter_.EmitLine("tensors[\"" + var_name + "\"] = tensors[\"" + current_expr_value_ + "\"]");
@@ -829,173 +831,46 @@ void DistributedCodegen::VisitStmt_(const ir::ForStmtPtr& op) {
 void DistributedCodegen::VisitStmt_(const ir::IfStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null IfStmt";
 
-  // When ConvertToSSA synthesized phi return_vars_ for diverging variables
-  // across branches, we must emit pre-declarations AND yield-to-phi
-  // assignments so the phi name is visible to post-if consumers. Without
-  // this a branch-local SSA name (defined inside one branch's Python scope)
-  // leaks into the merged scope and raises NameError at prepare().
-  if (!op->return_vars_.empty()) {
-    // ── Extract trailing yields from both branches ──────────────────
-    const auto then_yield =
-        ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(op->then_body_));
-    const ir::YieldStmtPtr else_yield = [&]() -> ir::YieldStmtPtr {
-      if (!op->else_body_.has_value()) return nullptr;
-      return ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(*op->else_body_));
-    }();
+  // ConvertToSSA always appends an else carrying the phi's incoming values
+  // (convert_to_ssa_pass.cpp:936-939), so a phi is always defined on both paths.
+  INTERNAL_CHECK_SPAN(op->return_vars_.empty() || op->else_body_.has_value(), op->span_)
+      << "Internal error: IfStmt with return_vars_ must carry an else_body "
+         "holding the phi's incoming values";
 
-    // ── Helper: find the AssignStmt that defines a yield var in a branch ──
-    // The yield value is the SSA name of the diverging variable inside the
-    // branch. For tensor-typed phis, we need to resolve this to the
-    // tensor's actual source — the RHS of the assignment that sets it.
-    // This matters for the then-branch where ``boundary = zero`` creates a
-    // bare Python name that is NOT in the ``tensors`` dict, while
-    // ``zero`` (a kernel param) IS.
-    auto find_yield_source = [](const ir::StmtPtr& branch_body, const ir::VarPtr& yield_var) -> ir::ExprPtr {
-      const auto stmts =
-          ir::transform_utils::FlattenToStmts(ir::transform_utils::UnwrapAutoScope(branch_body));
-      // Walk backwards (excluding the trailing YieldStmt) to find the
-      // most recent assignment to this var.
-      for (auto it = stmts.rbegin(); it != stmts.rend(); ++it) {
-        if (ir::As<ir::YieldStmt>(*it)) continue;
-        if (auto assign = ir::As<ir::AssignStmt>(*it)) {
-          if (assign->var_ == yield_var) return assign->value_;
-        }
-      }
-      return nullptr;
-    };
-
-    // ── Find a tensor init for tensor-typed phis ────────────────────
-    // Tensor phis need an in-scope init to reference in the tensors dict.
-    // Scan function params first (guaranteed in tensors dict at runtime),
-    // then fall back to the then-branch yield's first tensor value.
-    std::string tensor_phi_init;
-    for (const auto& param : current_func_->params_) {
-      if (ir::AsTensorTypeLike(param->GetType())) {
-        tensor_phi_init = SanitizeName(param->name_hint_);
-        break;
-      }
-    }
-    if (tensor_phi_init.empty() && then_yield) {
-      for (const auto& val : then_yield->value_) {
-        const auto var = ir::As<ir::Var>(val);
-        if (var && ir::AsTensorTypeLike(var->GetType())) {
-          auto src = find_yield_source(op->then_body_, var);
-          // Only resolve Var→Var aliases for init discovery.  Call RHS
-          // triggers EmitCallToWorker which would submit a chip task
-          // before the `if` condition is evaluated.
-          if (src && ir::As<ir::Var>(src) != nullptr) {
-            VisitExpr(src);
-            tensor_phi_init = current_expr_value_;
-            current_expr_value_ = "";
-          }
-          break;
-        }
-      }
-    }
-
-    // ── Pre-declare phi variables before the ``if`` ─────────────────
-    // Derive each tensor phi's initializer from its own yield source in
-    // the then-branch (preserving shape/dtype), falling back to the
-    // shared param-derived init or a zero-placeholder.
-    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      const std::string phi_name = SanitizeName(op->return_vars_[i]->name_hint_);
-      if (ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
-        // Try a per-phi init from the then-branch yield first.
-        std::string per_phi_init;
-        if (then_yield && i < then_yield->value_.size()) {
-          const auto yield_var = ir::As<ir::Var>(then_yield->value_[i]);
-          if (yield_var) {
-            auto src = find_yield_source(op->then_body_, yield_var);
-            // Only visit Var→Var aliases (e.g. ``boundary = zero``).
-            // For Call RHS, EmitCallToWorker would submit a chip task
-            // before the `if` condition — skip init discovery and fall
-            // through to the shared tensor_phi_init or zero placeholder.
-            if (src && ir::As<ir::Var>(src) != nullptr) {
-              VisitExpr(src);
-              per_phi_init = current_expr_value_;
-              current_expr_value_ = "";
-            }
-          }
-        }
-        if (!per_phi_init.empty()) {
-          emitter_.EmitLine("tensors[\"" + phi_name + "\"] = tensors[\"" + per_phi_init + "\"]");
-        } else if (!tensor_phi_init.empty()) {
-          emitter_.EmitLine("tensors[\"" + phi_name + "\"] = tensors[\"" + tensor_phi_init + "\"]");
-        } else {
-          emitter_.EmitLine("if \"" + phi_name + "\" not in tensors:");
-          emitter_.EmitLine("    tensors[\"" + phi_name +
-                            "\"] = torch.zeros((1,), dtype=torch.float32).share_memory_()");
-        }
-      } else {
-        emitter_.EmitLine(phi_name + " = None");
-      }
-      declared_vars_.insert(phi_name);
-    }
-
-    // ── Emit below-branch yield-to-phi assignments ─────────────────
-    // Use the assignment RHS as the yield source when the RHS is a Var
-    // (e.g. ``boundary = zero`` — a kernel-param alias).  For Call RHS
-    // (e.g. ``boundary = self.chip_run(...)``), EmitCallToWorker already
-    // places the result in ``tensors[yield_var_name]``, so use the yield
-    // var name directly.
-    auto emit_branch_yields = [&](const ir::StmtPtr& branch_body, const ir::YieldStmtPtr& yld) {
-      if (!yld) return;
-      for (size_t i = 0; i < op->return_vars_.size() && i < yld->value_.size(); ++i) {
-        const auto yield_var = ir::As<ir::Var>(yld->value_[i]);
-        if (!yield_var) continue;
-
-        // Find the assignment that defines this yield var.
-        auto src = find_yield_source(branch_body, yield_var);
-        // Only trace Var→Var aliases.  For Call RHS the result is already
-        // in ``tensors[yield_var_name]`` via EmitCallToWorker.
-        const bool is_var_alias = src && ir::As<ir::Var>(src) != nullptr;
-        const ir::ExprPtr yield_expr = is_var_alias ? src : yield_var;
-        VisitExpr(yield_expr);
-        const std::string yield_val = current_expr_value_;
-        current_expr_value_ = "";
-        const std::string phi_name = SanitizeName(op->return_vars_[i]->name_hint_);
-        if (ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
-          emitter_.EmitLine("tensors[\"" + phi_name + "\"] = tensors[\"" + yield_val + "\"]");
-        } else {
-          emitter_.EmitLine(phi_name + " = " + yield_val);
-        }
-      }
-    };
-    // ── Emit condition and if/else with yield-to-phi ────────────────
-    VisitExpr(op->condition_);
-    std::string condition = current_expr_value_;
-    current_expr_value_ = "";
-
-    emitter_.EmitLine("if " + condition + ":");
-    emitter_.IncreaseIndent();
-    VisitStmt(op->then_body_);
-    emit_branch_yields(op->then_body_, then_yield);
-    emitter_.DecreaseIndent();
-
-    if (op->else_body_.has_value()) {
-      emitter_.EmitLine("else:");
-      emitter_.IncreaseIndent();
-      VisitStmt(*op->else_body_);
-      emit_branch_yields(*op->else_body_, else_yield);
-      emitter_.DecreaseIndent();
-    }
-    return;
-  }
-
-  // ── Simple if/else without return_vars_ (no phi nodes) ───────────
   VisitExpr(op->condition_);
-  std::string condition = current_expr_value_;
+  const std::string condition = current_expr_value_;
   current_expr_value_ = "";
+
+  // Merge each branch's yield into the phi name so post-if consumers see one
+  // name instead of a branch-local SSA name (issue #2180).
+  auto emit_yields = [&](const ir::StmtPtr& body) {
+    const auto yld = ir::transform_utils::GetLastYieldStmt(ir::transform_utils::UnwrapAutoScope(body));
+    if (!yld) return;
+    for (size_t i = 0; i < op->return_vars_.size() && i < yld->value_.size(); ++i) {
+      VisitExpr(yld->value_[i]);
+      const std::string val = current_expr_value_;
+      current_expr_value_ = "";
+      const std::string phi = SanitizeName(op->return_vars_[i]->name_hint_);
+      if (ir::AsTensorTypeLike(op->return_vars_[i]->GetType())) {
+        emitter_.EmitLine("tensors[\"" + phi + "\"] = tensors[\"" + val + "\"]");
+      } else {
+        emitter_.EmitLine(phi + " = " + val);
+      }
+      declared_vars_.insert(phi);
+    }
+  };
 
   emitter_.EmitLine("if " + condition + ":");
   emitter_.IncreaseIndent();
   VisitStmt(op->then_body_);
+  emit_yields(op->then_body_);
   emitter_.DecreaseIndent();
 
   if (op->else_body_.has_value()) {
     emitter_.EmitLine("else:");
     emitter_.IncreaseIndent();
     VisitStmt(*op->else_body_);
+    emit_yields(*op->else_body_);
     emitter_.DecreaseIndent();
   }
 }

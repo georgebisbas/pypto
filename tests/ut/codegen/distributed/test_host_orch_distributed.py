@@ -956,9 +956,9 @@ def test_host_collective_builtin_template_package_exists(package_name, variant):
 # ---------------------------------------------------------------------------
 
 
-def test_if_cross_branch_phi_predeclares_and_yields_tensors() -> None:
+def test_if_cross_branch_phi_yields_tensors() -> None:
     """Tensor phi emitted by ConvertToSSA for a cross-branch diverging variable
-    is pre-declared and yielded via ``tensors[...]``, not bare Python names."""
+    is yielded via ``tensors[...]`` assignments, not bare Python names (issue #2180)."""
     SIZE = 4
     P = 2
 
@@ -986,41 +986,45 @@ def test_if_cross_branch_phi_predeclares_and_yields_tensors() -> None:
 
     code = _lower(Prog, convert_to_ssa=True)
 
-    # Pre-declared phi before the ``if`` — must use tensors[...] for tensor phis.
-    pre_if = code.split("if", 1)[0]
-    assert re.search(r'tensors\["boundary__phi_v\d+"\]\s*=.*tensors', pre_if), (
-        "Tensor phi must be pre-declared via tensors[...] before if block:\n" + code
-    )
+    # Sanity check: the generated Python must be syntactically valid.
+    compile(code, "<host_orch>", "exec")
 
-    # Isolate the then-branch body: everything after the ``if ...:`` line header
-    # (first newline after the ``if`` keyword) up to the ``else:`` boundary.
-    if "else:" in code:
-        post_if = code.split("if", 1)[1].split("\n", 1)[1]  # strip ``<cond>:\n`` header
-        then_block = post_if.split("else:")[0]
-        else_block = post_if.split("else:")[1]
-    else:
-        post_if = code.split("if", 1)[1].split("\n", 1)[1]
-        then_block = post_if
-        else_block = ""
+    # Locate the ``if`` line via line-anchored regex (avoids false matches
+    # on substrings within comments, identifiers, or guard lines).
+    lines = code.splitlines()
+    if_idx = None
+    for i, line in enumerate(lines):
+        if re.search(r"^\s*if\s+.*:\s*$", line):
+            if_idx = i
+            break
+    assert if_idx is not None, f"No if statement found in generated code:\n{code}"
 
-    # Yield in the then-branch must reference a valid tensors-dict entry (no
-    # bare Python names for tensor phis).
-    then_yield = re.search(
-        r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
-        then_block,
-    )
-    assert then_yield is not None, "Then-branch must yield phi via tensors[...] = tensors[...]:\n" + code
+    # Find the matching ``else:`` at the same indent level.
+    if_indent = len(lines[if_idx]) - len(lines[if_idx].lstrip())
+    else_idx = None
+    for i in range(if_idx + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("else:") and (len(lines[i]) - len(stripped)) == if_indent:
+            else_idx = i
+            break
+    assert else_idx is not None, f"No else at indent level {if_indent} in generated code:\n{code}"
 
-    # Yield in the else-branch likewise.
-    else_yield = re.search(
-        r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]',
-        else_block,
+    then_block = "\n".join(lines[if_idx + 1 : else_idx])
+    else_block = "\n".join(lines[else_idx + 1 :])
+
+    # Both branches must emit a tensors-based phi assignment so the merged
+    # scope has a single ``tensors["boundary__phi_v<...>"]`` entry.
+    phi_yield_pat = r'tensors\["boundary__phi_v\d+"\]\s*=\s*tensors\["[^"]+"\]'
+    assert re.search(phi_yield_pat, then_block), (
+        "Then-branch must yield tensor phi via tensors[...] = tensors[...]:\n" + code
     )
-    assert else_yield is not None, "Else-branch must yield phi via tensors[...] = tensors[...]:\n" + code
+    assert re.search(phi_yield_pat, else_block), (
+        "Else-branch must yield tensor phi via tensors[...] = tensors[...]:\n" + code
+    )
 
     # No bare-Python-name tensor assignment in the then-branch (the bug was
     # ``boundary__ssa_v0 = zero__ssa_v0`` which raised NameError).
-    assert not re.search(r"(?<!\")boundary__ssa_v\d+\s*=\s*(?!tensors)\w+__ssa", then_block), (
+    assert not re.search(r"boundary__ssa_v\d+\s*=.*\w+__ssa", then_block), (
         "Then-branch must not contain bare Python tensor assignments:\n" + code
     )
 
