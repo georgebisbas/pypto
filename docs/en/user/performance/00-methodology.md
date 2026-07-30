@@ -122,7 +122,12 @@ class MatAdd:
         return pl.store(pl.add(ta, tb), [0, 0], c)
 
     @pl.function(type=pl.FunctionType.Orchestration)
-    def chip_orch(self, a, b, c):
+    def chip_orch(
+        self,
+        a: pl.Tensor[[ROWS, COLS], pl.FP32],
+        b: pl.Tensor[[ROWS, COLS], pl.FP32],
+        c: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
         return self.add_kernel(a, b, c)
 
 compiled = ir.compile(MatAdd, platform="a2a3sim")

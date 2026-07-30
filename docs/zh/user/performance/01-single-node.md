@@ -81,8 +81,12 @@ SPMD 并行——启动 N 个相同 kernel 副本。
 
 ### `target_memory`
 
-为 tile 分配选择片上内存空间（`MemorySpace.DDR` 为片外；`.Vec`/`.Mat`/
-`.Left`/`.Right`/`.Acc` 为片上 buffer）。
+为 tile 选择片上内存空间（`MemorySpace.DDR` 为片外；`.Vec`/`.Mat`/
+`.Left`/`.Right`/`.Acc` 为片上 buffer）。并非每个 op 都接受所有空间：
+`pl.load`（DDR 到片上）只接受 `.Vec` 或 `.Mat`——其余值会抛出
+`ValueError`。要把数据放到 `.Left`/`.Right`，需先 load 到 `.Vec`/`.Mat`，
+再用 `pl.move` 搬运。`.Acc` 是 matmul 累加的输出空间，不是
+`load`/`move` 的目标。
 
 - **适用场景：** 数据放置优化
 - **成本：** 片上空间更快但远小于 DDR

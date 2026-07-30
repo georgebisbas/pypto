@@ -121,9 +121,12 @@ accumulation.
 
 ### `target_memory`
 
-Select the on-chip memory space for a tile allocation (`MemorySpace.DDR`
-for off-chip, or `.Vec` / `.Mat` / `.Left` / `.Right` / `.Acc` for on-chip
-buffers).
+Select the on-chip memory space for a tile (`MemorySpace.DDR` for off-chip,
+or `.Vec` / `.Mat` / `.Left` / `.Right` / `.Acc` for on-chip buffers). Not
+every op accepts every space: `pl.load` (DDR to on-chip) only accepts `.Vec`
+or `.Mat` — it raises `ValueError` for the others. To land data in `.Left` /
+`.Right`, load into `.Vec` / `.Mat` first, then use `pl.move` to relocate it.
+`.Acc` is a matmul-accumulate output space, not a `load`/`move` destination.
 
 - **When:** Data placement optimization
 - **Cost:** On-chip spaces are faster but much smaller than DDR
