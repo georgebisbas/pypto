@@ -145,7 +145,8 @@ def notify(
        The first parameter is named ``target`` for legacy reasons (inherited
        from early signal protocol drafts).  The companion :func:`wait` names
        the same logical operand ``signal``.  Both refer to the signal
-       :class:`DistributedTensor` — always use positional args:
+       :class:`DistributedTensor` — pass the first operand positionally; the
+       remaining operands may be positional or keyword:
        ``notify(signal, peer=..., ...)``.
 
     Args:

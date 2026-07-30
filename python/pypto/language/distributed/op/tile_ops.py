@@ -145,8 +145,10 @@ def remote_store(
 
     .. code-block:: python
 
-       # Write a computed tile into peer rank 1's signal cell.
-       pld.tile.remote_store(tile, signal, peer=1, offsets=[0, 0])
+       # Write a computed tile into peer rank 1's data window.
+       pld.tile.remote_store(tile, data, peer=1, offsets=[0, 0])
+       # remote_store is a raw write with no synchronization of its own —
+       # pair it with pld.system.notify()/wait() to signal completion.
 
     All arguments are positional-or-keyword (mirroring :func:`pl.tile.store`),
     so the printed IR — which emits them positionally — round-trips through

@@ -100,7 +100,7 @@ class DistributedCompiledProgram:
 
     **Persistent dispatch** (repeated launches without re-registering)::
 
-        with DistributedWorker(compiled) as rt:
+        with compiled.prepare() as rt:
             for step in steps:
                 rt(host_x, host_out)
         # rt.close() on exit — releases buffers and shuts down workers

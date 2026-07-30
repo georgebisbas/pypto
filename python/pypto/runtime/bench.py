@@ -420,7 +420,7 @@ class BenchmarkStats:
     ``stats.device_us_max``        Maximum device wall (µs).
     ``stats.device_us_mean``       Arithmetic mean device wall (µs).
     ``stats.device_us_stdev``      Std-dev of device wall (µs).
-    ``stats.all_zero_device``      True if every sample is 0 (e.g. sim builds).
+    ``stats.all_zero_device``      True if samples exist and every sample is 0 (e.g. sim builds).
     ``stats.samples``              Alias for ``device_wall_us`` (the raw list).
     ``stats.per_round("device")``  List[float]: device wall per round.
     ``stats.per_rank("device")``   Dict[int, List[float]]: per-rank breakdown (L3).
