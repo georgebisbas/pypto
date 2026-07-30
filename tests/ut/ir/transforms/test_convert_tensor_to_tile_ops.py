@@ -4599,6 +4599,49 @@ class TestWindowSliceIncoreConversion:
             elif bp.name_hint == "local_data":
                 assert after_dir == ir.ParamDirection.In, f"local_data must be In, got {after_dir}"
 
+    def test_all_to_all_v_keeps_send_counts_read_only(self):
+        """``pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)``
+        upgrades ``target``, ``signal``, and ``recv_counts`` to InOut, while
+        ``input`` and ``send_counts`` stay In: the lowering only *reads* the
+        send counts (``tensor.read``) and *writes* recv_counts via peer notify (Set).
+        """
+        SIZE = 16
+        nr = 2
+        total = nr * 2
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                inp: pl.Tensor[[total, SIZE], pl.FP32],
+                counts: pl.Tensor[[nr, 1], pl.INT32],
+                target: pld.DistributedTensor[[total, SIZE], pl.FP32],
+                signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+                recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
+                result = pld.tensor.all_to_all_v(inp, target, signal, counts, recv_counts)  # type: ignore[arg-type]
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_fn = After["kernel"]
+        assert after_fn is not None
+        before_fn = Before["kernel"]
+        assert before_fn is not None
+
+        expected_directions = {
+            "inp": ir.ParamDirection.In,
+            "counts": ir.ParamDirection.In,
+            "target": ir.ParamDirection.InOut,
+            "signal": ir.ParamDirection.InOut,
+            "recv_counts": ir.ParamDirection.InOut,
+        }
+        for i, bp in enumerate(before_fn.params):
+            want = expected_directions.get(bp.name_hint)
+            if want is not None:
+                got = after_fn.param_directions[i]
+                assert got == want, f"{bp.name_hint} must be {want}, got {got}"
+
     def test_reduce_scatter_upgrades_target_and_signal_to_inout(self):
         """``pld.tensor.reduce_scatter(target, signal, op=...)`` upgrades both
         params to InOut (same 5-phase pattern as allreduce)."""

@@ -1868,5 +1868,135 @@ def test_get_rejects_non_scalar_peer():
         )
 
 
+# ---------------------------------------------------------------------------
+# pld.tensor.all_to_all_v — type deduction (5-arg, send_counts + recv_counts)
+# ---------------------------------------------------------------------------
+
+_AAV_NR = 2
+_AAV_MAX_RECV = 4
+_AAV_TOTAL = _AAV_NR * _AAV_MAX_RECV
+_AAV_SIZE = 64
+
+
+def _make_tensor_var(name: str, shape: list[int], dtype: DataType, span: ir.Span) -> ir.Var:
+    shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in shape]
+    return ir.Var(name, ir.TensorType(shape_exprs, dtype), span)
+
+
+def _make_all_to_all_v_args(
+    span: ir.Span,
+    *,
+    counts_shape: list[int] | None = None,
+    counts_dtype: DataType = DataType.INT32,
+    recv_shape: list[int] | None = None,
+) -> list[ir.Expr]:
+    """Build a valid 5-arg operand list, with the counts operands overridable."""
+    shape = counts_shape or [_AAV_NR, 1]
+    # recv_counts is always [NR, 1] (same layout as the barrier signal).
+    return [
+        _make_tensor_var("inp", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
+        _make_distributed_tensor_var("target", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
+        _make_distributed_tensor_var("signal", [_AAV_NR, 1], DataType.INT32, span),
+        _make_tensor_var("counts", shape, counts_dtype, span),
+        _make_distributed_tensor_var("recv_counts", recv_shape or [_AAV_NR, 1], DataType.INT32, span),
+    ]
+
+
+def test_all_to_all_v_returns_target_window_type():
+    """Positive: window-as-result — the deduced type is the target window's."""
+    span = ir.Span.unknown()
+    call = ir.create_op_call("pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+    assert call.type.dtype == DataType.FP32
+
+
+def test_all_to_all_v_accepts_1d_send_counts():
+    """send_counts may be 1D [NR] as well as 2D [NR, 1]; recv_counts stays [NR, 1]."""
+    span = ir.Span.unknown()
+    call = ir.create_op_call(
+        "pld.tensor.all_to_all_v",
+        _make_all_to_all_v_args(span, counts_shape=[_AAV_NR]),
+        {},
+        span,
+    )
+    assert isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_all_to_all_v_accepts_window_bound_send_counts():
+    """Counts published into a window by a preceding exchange are accepted."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[3] = _make_distributed_tensor_var("counts_win", [_AAV_NR, 1], DataType.INT32, span)
+    call = ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_all_to_all_v_accepts_window_bound_input():
+    """Input published into a window by a preceding exchange is accepted."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[0] = _make_distributed_tensor_var("inp_win", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span)
+    call = ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_all_to_all_v_rejects_1d_signal():
+    """Signal must be 2D [NR, 1] — lowering emits 2-D MakeSignalOffsets."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[2] = _make_distributed_tensor_var("signal_1d", [_AAV_NR], DataType.INT32, span)
+    with pytest.raises(ValueError, match="signal must be 2D"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_requires_recv_counts_operand():
+    """The 4-arg form is rejected — recv_counts exposes the receive-side counts."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)[:4]
+    with pytest.raises(ValueError, match="requires 5 args"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_recv_counts_bad_width():
+    """recv_counts second dim must be 1 (same layout as the barrier signal)."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, recv_shape=[_AAV_NR, 8])
+    with pytest.raises(ValueError, match="recv_counts second dimension must be 1"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_non_int32_send_counts():
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, counts_dtype=DataType.FP32)
+    with pytest.raises(ValueError, match="send_counts must have INT32 element type"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_send_counts_rank_mismatch():
+    """send_counts dim 0 must be NR — otherwise a destination has no count."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, counts_shape=[_AAV_NR + 1, 1])
+    with pytest.raises(ValueError, match="send_counts dim 0"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_3d_send_counts():
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, counts_shape=[_AAV_NR, 1, 1])
+    with pytest.raises(ValueError, match="send_counts must be 1D"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+def test_all_to_all_v_rejects_non_divisible_target_rows():
+    """NR must divide target dim 0 — MAX_RECV is that quotient."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    odd_rows = _AAV_NR * _AAV_MAX_RECV + 1
+    args[0] = _make_tensor_var("inp", [odd_rows, _AAV_SIZE], DataType.FP32, span)
+    args[1] = _make_distributed_tensor_var("target", [odd_rows, _AAV_SIZE], DataType.FP32, span)
+    with pytest.raises(ValueError, match="must divide target dim 0"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

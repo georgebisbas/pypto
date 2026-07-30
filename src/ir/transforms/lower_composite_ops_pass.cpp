@@ -1781,6 +1781,197 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   return target;
 }
 
+// ============================================================================
+// LowerTensorAllToAllVRule — pld.tensor.all_to_all_v (variable-size all-to-all)
+//
+// Variable-size all-to-all (MPI_Alltoallv pattern).  Each rank sends a
+// different, *runtime* number of rows to each peer: ``send_counts[dest]`` is
+// read from device data during the exchange and bounds that destination's push
+// loop, so only the rows that carry payload cross the interconnect.  The 5-arg
+// API signature (input, target, signal, send_counts, recv_counts) extends the
+// symmetric all_to_all's window-as-result pattern: the intrinsic returns
+// target, and the caller reads back from the window with tile.load.  During
+// the push phase each rank also publishes ``send_counts[dest]`` into peer
+// ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set) —
+// MPI_Alltoallv recvcounts — so after the barrier the receiver can skip the
+// unwritten holes at the tail of each source's MAX_RECV slot.  Notify writes
+// a scalar INT32 cell (same path as the barrier signal), so ``recv_counts``
+// stays ``[NR, 1]`` and no post-convert ``tensor.create`` scratch is needed
+// (ConvertTensorToTileOps already ran before this pass).
+//
+// 2-phase push-based decomposition:
+//
+//   Phase 1 (push):
+//     For each dest ∈ [0, NR):
+//       rows = min(send_counts[dest], MAX_RECV)        // runtime scalar read
+//       notify(recv_counts, dest, [my_rank, 0], rows, Set)  // clamped count
+//       // Single pld.tile.put per destination: contiguous [MAX_RECV, SIZE]
+//       // block at input[dest*MAX_RECV, :] → target[my_rank*MAX_RECV, :].
+//       // Transfer shape is static [MAX_RECV, SIZE] (PTOAS requires static
+//       // partition-view dims for pto.comm.tput).  A [1, SIZE] staging tile
+//       // feeds the TPUT engine, which 2-D-slides the transfer through it.
+//
+//   Phase 2a: notify-all (Set 1)
+//   Phase 2b: wait-all  (Ge 1)
+//
+// MAX_RECV = target.shape[0] / NR (both must be compile-time constants) is the
+// per-peer *capacity*, not the transfer size: it fixes the flat row-index
+// arithmetic (dest*MAX_RECV+r) so a receiver can locate each sender's block
+// without knowing that sender's count.  Counts are clamped to MAX_RECV so an
+// out-of-range count cannot push past peer dest's capacity slice.  Rows beyond
+// a sender's count are never written, so those receive-window rows keep their
+// prior contents — the same guarantee MPI_Alltoallv gives for the untouched
+// tail of a receive buffer.  Valid rows for source src are therefore
+// recv_counts[src] (already clamped to MAX_RECV at publish time).
+// ============================================================================
+
+ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 5, span) << "pld.tensor.all_to_all_v rule expects 5 args "
+                                                 "(input, target, signal, send_counts, recv_counts), got "
+                                              << args.size();
+  const auto& input = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+  const auto& send_counts = args[3];
+  const auto& recv_counts = args[4];
+
+  // input may be a plain Tensor or a window (DistributedTensor) — pld.tile.put
+  // accepts Tensor-like sources via AsTensorTypeLike.
+  auto input_type = AsTensorTypeLike(input->GetType());
+  INTERNAL_CHECK_SPAN(input_type, span)
+      << "pld.tensor.all_to_all_v input must be Tensor or DistributedTensor, got "
+      << input->GetType()->TypeName();
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.all_to_all_v target must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(target_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all_v target must be 2D [NR*MAX_RECV, SIZE]";
+  auto counts_type = AsTensorTypeLike(send_counts->GetType());
+  INTERNAL_CHECK_SPAN(counts_type, span)
+      << "pld.tensor.all_to_all_v send_counts must be Tensor-like (deducer-rejected otherwise)";
+  const size_t counts_rank = counts_type->shape_.size();
+  INTERNAL_CHECK_SPAN(counts_rank == 1 || counts_rank == 2, span)
+      << "pld.tensor.all_to_all_v send_counts must be 1D [NR] or 2D [NR, 1] (deducer-rejected otherwise)";
+  auto recv_type = As<DistributedTensorType>(recv_counts->GetType());
+  INTERNAL_CHECK_SPAN(recv_type, span)
+      << "pld.tensor.all_to_all_v recv_counts must be DistributedTensorType (deducer-rejected otherwise)";
+  INTERNAL_CHECK_SPAN(recv_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all_v recv_counts must be 2D [NR, 1] (deducer-rejected otherwise)";
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // SIZE = target[1].
+  auto size_expr = target_type->shape_[1];
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+  // MAX_RECV = target[0] / NR.  NR is extracted from signal[0]
+  // (deducer-enforced compile-time constant).  Signal is required to be 2D
+  // [NR, 1] so MakeSignalOffsets(rank) → [rank, 0] matches notify/wait.
+  auto total_rows_c = As<ConstInt>(target_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(total_rows_c, span) << "target dim 0 must be a compile-time constant";
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  INTERNAL_CHECK_SPAN(signal_type, span) << "signal must be DistributedTensorType";
+  INTERNAL_CHECK_SPAN(signal_type->shape_.size() == 2, span)
+      << "pld.tensor.all_to_all_v signal must be 2D [NR, 1] (deducer-rejected otherwise)";
+  auto nr_c = As<ConstInt>(signal_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(nr_c, span) << "signal dim 0 (NR) must be a compile-time constant";
+  int64_t max_recv_value = total_rows_c->value_ / nr_c->value_;
+  INTERNAL_CHECK_SPAN(max_recv_value * nr_c->value_ == total_rows_c->value_, span)
+      << "target dim 0 (" << total_rows_c->value_ << ") must be divisible by NR (" << nr_c->value_ << ")";
+  auto max_recv_expr = std::make_shared<ConstInt>(max_recv_value, DataType::INDEX, span);
+
+  // Per-destination staging tile: static [1, SIZE] — pto-isa auto-chunks the
+  // transfer through it.  The Transfer shape is static [MAX_RECV, SIZE]
+  // (PTOAS requires static partition-view dims for pto.comm.tput).
+  auto stage_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{one_idx, size_expr}, span);
+
+  // ---- Phase 1: push per-destination blocks to peer windows ----
+  // One shared [1, SIZE] VEC staging tile reused across all destinations;
+  // a single pld.tile.put per destination transfers the full [MAX_RECV, SIZE]
+  // capacity per peer (static partition-view size, required by PTOAS).
+  // Flat row-index arithmetic:
+  // source[dest*MAX_RECV, :] → target[my_rank*MAX_RECV, :].
+  auto put_stage =
+      b.Bind("aav_stage",
+             reg.Create("tile.create", {stage_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  // Offset of this rank's slot in peer recv_counts ([my_rank, 0]).
+  auto my_recv_offsets = tile_conversion_utils::MakeSignalOffsets(comm.my_rank, span);
+
+  b.EmitFor(
+      "dest", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& dest_var) {
+        auto dest_base = MakeMul(dest_var, max_recv_expr, span);
+        auto my_base = MakeMul(comm.my_rank, max_recv_expr, span);
+
+        // Per-destination row count, read from device data at runtime
+        // (``tensor.read`` → ``pto.load_scalar``) and clamped to the
+        // compile-time capacity: a count above MAX_RECV would otherwise push
+        // into the next destination's slice of the peer window.
+        std::vector<ExprPtr> count_indices{dest_var};
+        if (counts_rank == 2) count_indices.push_back(zero_idx);
+        auto count_value =
+            body.Bind("aav_count",
+                      reg.Create("tensor.read",
+                                 {send_counts, std::make_shared<MakeTuple>(count_indices, span)}, {}, span),
+                      span);
+        auto rows = body.Bind(
+            "aav_rows", MakeMin(MakeCast(count_value, DataType::INDEX, span), max_recv_expr, span), span);
+
+        // Publish the *clamped* transfer count into peer dest's
+        // recv_counts[my_rank, 0] via TNOTIFY Set — same scalar-cell path as
+        // the barrier signal, including self (CommRemoteOffset identity).
+        // The TPUT transfers the full MAX_RECV capacity; the published
+        // clamped value tells the receiver how many rows are valid.
+        auto count_i32 = body.Bind("aav_count_i32", MakeCast(rows, DataType::INT32, span), span);
+        body.Bind("aav_count_notify",
+                  reg.Create("pld.system.notify", {recv_counts, dest_var, my_recv_offsets, count_i32},
+                             {{"op", static_cast<int>(NotifyOp::kSet)}}, span),
+                  span);
+
+        // Single pld.tile.put per destination transferring the full
+        // [MAX_RECV, SIZE] capacity (static — required by PTOAS).
+        // The [1, SIZE] VEC staging tile feeds the TPUT engine, which
+        // 2-D-slides the larger transfer through it.
+        // 2D source offsets: input[dest * MAX_RECV, :]
+        auto src_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{dest_base, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+        // 2D target offsets: target[my_rank * MAX_RECV, :]
+        auto dst_offsets = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{my_base, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
+        // Static transfer shape: [MAX_RECV, SIZE] — required by PTOAS
+        // (pto.comm.tput partition-view dims must be static).
+        auto transfer_shape =
+            std::make_shared<MakeTuple>(std::vector<ExprPtr>{max_recv_expr, size_expr}, span);
+        body.Bind("aav_put",
+                  reg.Create("pld.tile.put",
+                             {target, dest_var, input, put_stage, dst_offsets, src_offsets, transfer_shape},
+                             {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                  span);
+      },
+      span);
+
+  // ---- Phase 2a: notify-all ----
+  b.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kSet, one_i32, "", span);
+
+  // ---- Phase 2b: wait-all ----
+  b.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, one_i32, "", span);
+
+  // Window-as-result: target[src*MAX_RECV+r, :] now holds the chunk from
+  // rank src, offset r (full MAX_RECV capacity). The caller reads back from
+  // the window with tile.load, using recv_counts[src] (clamped to MAX_RECV
+  // at publish time) to identify valid rows and skip capacity holes.
+  return target;
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -1808,6 +1999,7 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"pld.tensor.barrier", &LowerTensorBarrierRule},
       {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
       {"pld.tensor.all_to_all", &LowerTensorAllToAllRule},
+      {"pld.tensor.all_to_all_v", &LowerTensorAllToAllVRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;
@@ -1954,20 +2146,40 @@ class LowerCompositeOpsMutator : public IRMutator {
     // uniformly here so the flag alone governs which functions defer lowering.
     return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
            IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
-           IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all");
+           IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all") ||
+           IsOp(call, "pld.tensor.all_to_all_v");
+  }
+
+  // Collectives that only have an InCore lowering — i.e. no matching entry in
+  // LowerHostTensorCollectives' kRules table.  Deferring one of these from a
+  // HOST orchestrator would drop it between the two passes (this pass skips it,
+  // the host pass never recognises it) and leave the composite op unlowered all
+  // the way into codegen, so it is rejected up front instead.  Keep in sync
+  // with kRules in src/ir/transforms/lower_host_tensor_collectives_pass.cpp.
+  [[nodiscard]] static bool IsInCoreOnlyCollective(const CallPtr& call) {
+    return IsOp(call, "pld.tensor.all_to_all_v");
   }
 
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {
     if (skip_host_collectives_ && ShouldSkipHostCollective(call)) {
+      CHECK_SPAN(!IsInCoreOnlyCollective(call), call->span_)
+          << call->op_->name_
+          << " is not supported in a HOST orchestration function — it has no host-level "
+             "lowering. Call it from an InCore function instead.";
       return nullptr;
     }
     return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;
   }
 
+  // allreduce and all_to_all_v share the single-use Set(1)/wait>=1 signal
+  // protocol: a second invocation (e.g. inside for/while) can observe a stale
+  // completion value and race with in-flight TPUTs.
   void CheckAllReduceLoopUse(const CallPtr& call) const {
-    if (!call || !call->op_ || !IsOp(call, "pld.tensor.allreduce")) return;
+    if (!call || !call->op_) return;
+    if (!IsOp(call, "pld.tensor.allreduce") && !IsOp(call, "pld.tensor.all_to_all_v")) return;
     CHECK_SPAN(repeating_scope_depth_ == 0, call->span_)
-        << "pld.tensor.allreduce is not supported inside a for/while loop. "
+        << call->op_->name_
+        << " is not supported inside a for/while loop. "
            "The signal protocol is single-use and cannot reuse a signal across dynamic invocations.";
   }
 

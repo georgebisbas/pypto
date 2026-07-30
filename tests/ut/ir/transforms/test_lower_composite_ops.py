@@ -625,6 +625,142 @@ def test_new_host_collectives_in_host_orchestrator_are_left_for_host_collective_
     assert "pld.system.notify" not in op_names
 
 
+class _StmtProbe(ir.IRVisitor):
+    """Collect ForStmt ``stop`` expressions and AssignStmt values."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.for_stops: list[ir.Expr] = []
+        self.assign_values: list[ir.Expr] = []
+
+    def visit_for_stmt(self, op: ir.ForStmt) -> None:
+        self.for_stops.append(op.stop)
+        self._walk_stmt(op.body)
+
+    def visit_if_stmt(self, op: ir.IfStmt) -> None:
+        self._walk_stmt(op.then_body)
+        if op.else_body is not None:
+            self._walk_stmt(op.else_body)
+
+    def visit_assign_stmt(self, op: ir.AssignStmt) -> None:
+        self.assign_values.append(op.value)
+
+    def _walk_stmt(self, stmt: ir.Stmt) -> None:
+        # The nanobind trampoline does not redispatch nested statement
+        # callbacks to Python overrides (see _StmtKindCollector).
+        if isinstance(stmt, ir.SeqStmts):
+            for child in stmt.stmts:
+                self._walk_stmt(child)
+        elif isinstance(stmt, ir.ForStmt):
+            self.visit_for_stmt(stmt)
+        elif isinstance(stmt, ir.IfStmt):
+            self.visit_if_stmt(stmt)
+        elif isinstance(stmt, ir.AssignStmt):
+            self.visit_assign_stmt(stmt)
+
+
+def _probe_stmts(prog) -> _StmtProbe:
+    probe = _StmtProbe()
+    probe.visit_program(prog)
+    return probe
+
+
+_AAV_SIZE = 16
+_AAV_NRANKS = 2
+_AAV_MAX_RECV = 2
+_AAV_TOTAL = _AAV_NRANKS * _AAV_MAX_RECV
+
+
+def _build_all_to_all_v_before():
+    """InCore program calling ``pld.tensor.all_to_all_v`` with runtime counts."""
+    SIZE = _AAV_SIZE
+    nr = _AAV_NRANKS
+    total = _AAV_TOTAL
+
+    @pl.program
+    class AllToAllV:
+        @pl.function(type=pl.FunctionType.InCore)
+        def exchange_step(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            counts: pl.Tensor[[nr, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pl.Tensor[[total, SIZE], pl.FP32]:
+            result = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
+            row = pl.load(result, [0, 0], [1, SIZE])
+            return pl.store(row, [0, 0], out)
+
+    return AllToAllV
+
+
+def test_all_to_all_v_push_loop_is_bounded_by_runtime_send_counts():
+    """The push loop is bounded by ``send_counts[dest]`` read at runtime, not by
+    the compile-time MAX_RECV capacity — a capacity-bounded loop would transfer
+    padding rows the destination never asked for."""
+    After = passes.lower_composite_ops()(_build_all_to_all_v_before())
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.all_to_all_v" not in op_names, "composite op must be fully lowered"
+    assert "tensor.read" in op_names, "send_counts must be read at runtime to bound the push loop"
+    assert "pld.tile.put" in op_names, "rows are pushed to peers via TPUT"
+    assert "pld.system.notify" in op_names
+    assert "pld.system.wait" in op_names
+
+    probe = _probe_stmts(After)
+
+    # No loop may be bounded by the MAX_RECV capacity constant: the row loop's
+    # bound is the (clamped) runtime count.
+    const_stops = [s.value for s in probe.for_stops if isinstance(s, ir.ConstInt)]
+    assert _AAV_MAX_RECV not in const_stops, (
+        f"a loop is still bounded by the MAX_RECV capacity ({_AAV_MAX_RECV}); "
+        f"constant loop bounds found: {const_stops}"
+    )
+
+    # The runtime count is clamped against the capacity, so a count larger than
+    # MAX_RECV cannot push into the next destination's slice of the peer window.
+    clamps = [v for v in probe.assign_values if isinstance(v, ir.Min)]
+    assert clamps, "the runtime send count must be clamped (min) against the MAX_RECV capacity"
+    clamp_operands = [
+        operand.value
+        for clamp in clamps
+        for operand in (clamp.left, clamp.right)
+        if isinstance(operand, ir.ConstInt)
+    ]
+    assert _AAV_MAX_RECV in clamp_operands, (
+        f"the clamp must bound the count by MAX_RECV ({_AAV_MAX_RECV}); "
+        f"constant clamp operands found: {clamp_operands}"
+    )
+
+
+def test_all_to_all_v_is_rejected_in_host_orchestrator():
+    """all_to_all_v is InCore-only: LowerHostTensorCollectives has no rule for
+    it, so deferring it from a HOST orchestrator would leave the composite op
+    unlowered all the way into codegen. It must be rejected up front."""
+    SIZE = _AAV_SIZE
+    nr = _AAV_NRANKS
+    total = _AAV_TOTAL
+
+    @pl.program
+    class HostAllToAllV:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            counts: pl.Tensor[[nr, 1], pl.INT32],
+            data: pld.DistributedTensor[[total, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[nr, 1], pl.INT32],
+            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+        ):
+            data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)  # type: ignore[arg-type]
+            return 0
+
+    with pytest.raises(ValueError, match="not supported in a HOST orchestration function"):
+        passes.lower_composite_ops()(HostAllToAllV)
+
+
 def test_allreduce_without_signal_is_rejected_outside_host_orchestrator():
     SIZE = _ALLREDUCE_SIZE
 
@@ -725,6 +861,55 @@ def test_allreduce_in_while_loop_is_rejected():
 
     with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
         passes.lower_composite_ops()(LoopAllreduce)
+
+
+def test_all_to_all_v_in_for_loop_is_rejected():
+    """Same single-use Set(1)/wait≥1 signal protocol as allreduce — looped reuse races."""
+    SIZE = _AAV_SIZE
+    nr = _AAV_NRANKS
+    total = _AAV_TOTAL
+
+    @pl.program
+    class LoopAllToAllV:
+        @pl.function(type=pl.FunctionType.InCore)
+        def exchange_step(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            counts: pl.Tensor[[nr, 1], pl.INT32],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
+            for _ in pl.range(2):
+                data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
+            return data
+
+    with pytest.raises(ValueError, match="all_to_all_v is not supported inside a for/while loop"):
+        passes.lower_composite_ops()(LoopAllToAllV)
+
+
+def test_all_to_all_v_in_while_loop_is_rejected():
+    SIZE = _AAV_SIZE
+    nr = _AAV_NRANKS
+    total = _AAV_TOTAL
+
+    @pl.program
+    class LoopAllToAllV:
+        @pl.function(type=pl.FunctionType.InCore)
+        def exchange_step(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            counts: pl.Tensor[[nr, 1], pl.INT32],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
+            while True:
+                data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
+            return data
+
+    with pytest.raises(ValueError, match="all_to_all_v is not supported inside a for/while loop"):
+        passes.lower_composite_ops()(LoopAllToAllV)
 
 
 def test_allreduce_emits_for_and_if_control_flow():

@@ -810,8 +810,84 @@ def all_to_all(
     return DistributedTensor(expr=call)
 
 
+def all_to_all_v(
+    input: Tensor | DistributedTensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    send_counts: Tensor | DistributedTensor,
+    recv_counts: DistributedTensor,
+) -> DistributedTensor:
+    """All-to-all: variable-size personalized exchange (push-based, window-as-result).
+
+    5-arg form: ``pld.tensor.all_to_all_v(input, target, signal, send_counts,
+    recv_counts)``.
+
+    Each rank sends ``send_counts[dest]`` rows to peer ``dest`` — the counts are
+    read at runtime, so they may be data-dependent (e.g. MoE tokens per expert),
+    and only those rows cross the interconnect.  Mirrors the symmetric
+    ``pld.tensor.all_to_all`` otherwise: rows are pushed into a flat 2D staging
+    window via ``pld.tile.put``, and the window is returned so the caller can
+    read back via ``pl.load``.  There is no built-in read-back phase — the user
+    writes the read-back loop in the InCore function.
+
+    ``input`` is a flat 2D [NR*MAX_RECV, SIZE] Tensor or DistributedTensor whose
+    rows ``dest*MAX_RECV .. dest*MAX_RECV + send_counts[dest] - 1`` hold the
+    chunk for peer ``dest``.  ``target`` is a flat 2D DistributedTensor
+    [NR*MAX_RECV, SIZE] — the staging window that doubles as the result;
+    rank ``src``'s rows land at ``src*MAX_RECV ...``.
+
+    ``MAX_RECV = target.shape[0] // NR`` is the compile-time per-peer
+    *capacity*, not the transfer size: it fixes the row-index arithmetic so a
+    receiver can locate each sender's block without knowing that sender's
+    count.  Counts are clamped to ``MAX_RECV``.  Rows beyond a sender's count
+    are never written, so those window rows keep their prior contents — as with
+    ``MPI_Alltoallv``, the untouched tail of the receive buffer is not zeroed.
+    Zero it yourself if the read-back path relies on it.
+
+    During the same push, each rank also publishes
+    ``min(send_counts[dest], MAX_RECV)`` into peer ``dest``'s
+    ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set). After the
+    barrier, ``recv_counts[src, 0]`` tells this rank how many valid rows ``src``
+    wrote — use that count to skip the unwritten holes. This is the
+    MPI_Alltoallv recvcounts side (published value equals rows actually
+    transferred).
+
+    The barrier ``signal`` is single-use (same Set(1)/wait≥1 protocol as
+    allreduce) and must not be reused inside a ``for``/``while`` loop.
+
+    Args:
+        input: Flat 2D Tensor or DistributedTensor [NR*MAX_RECV, SIZE] with
+            per-destination chunks (e.g. a window published by a preceding
+            exchange).
+        target: :class:`pld.DistributedTensor` [NR*MAX_RECV, SIZE] —
+            flat 2D staging window (InOut); returned as the result.
+        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier (InOut).
+        send_counts: INT32 [NR] or [NR, 1] rows-per-destination counts (Input).
+            A plain :class:`pl.Tensor` or a window-bound
+            :class:`pld.DistributedTensor` (e.g. counts published by a
+            preceding exchange).
+        recv_counts: :class:`pld.DistributedTensor` INT32 [NR, 1] — after the
+            call, ``recv_counts[src, 0]`` holds how many rows ``src`` actually
+            sent here (clamped to ``MAX_RECV``) (InOut).
+
+    Returns:
+        The ``target`` :class:`pld.DistributedTensor` with received chunks.
+    """
+    target_expr, signal_expr, recv_expr = _unwrap_distributed_tensors(
+        "pld.tensor.all_to_all_v",
+        target=target,
+        signal=signal,
+        recv_counts=recv_counts,
+    )
+    input_expr = _unwrap(input)
+    counts_expr = _unwrap(send_counts)
+    call = _ir_tensor.all_to_all_v(input_expr, target_expr, signal_expr, counts_expr, recv_expr)
+    return DistributedTensor(expr=call)
+
+
 __all__ = [
     "all_to_all",
+    "all_to_all_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

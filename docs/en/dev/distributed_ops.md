@@ -20,7 +20,7 @@ the `dst` side via `AsTensorTypeLike` — TGET only needs a writable local GM
 region to receive into, so kernels can TGET directly into host-backed output
 tensors; `src` still requires a window-bound `DistributedTensor`.
 
-There are **twelve ops** and **four ABI enums**:
+There are **thirteen ops** and **four ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
@@ -34,6 +34,7 @@ There are **twelve ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `min(send_counts[dest], MAX_RECV)` rows per destination into a flat 2D staging window, and publishes that clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver can skip unwritten holes; returns window as result (same window-as-result pattern as symmetric `all_to_all`). Rows beyond a sender's count are not transferred, so those window rows keep their prior contents. InCore only — there is no HOST-orchestration lowering | `DistributedTensorType` (same as target) | composite InCore |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
@@ -273,6 +274,29 @@ region is in bounds (checked on static dims); any dynamic transfer dim requires
 a matching static chunk. Besides `chunk_rows` / `chunk_cols`, `get` accepts no
 keyword attributes.
 
+### `pld.tensor.all_to_all_v`
+
+```text
+pld.tensor.all_to_all_v(
+    input, target, signal, send_counts, recv_counts
+) -> DistributedTensorType(target)
+```
+
+InCore-only variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
+
+- `input` — Tensor or DistributedTensor `[NR*MAX_RECV, SIZE]`
+- `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
+- `signal` — DistributedTensor INT32 `[NR, 1]` (single-use Set(1)/wait≥1 barrier)
+- `send_counts` — Tensor-like INT32 `[NR]` or `[NR, 1]` (runtime rows per dest)
+- `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
+
+`MAX_RECV = target.shape[0] // NR`. Lowering reads `send_counts[dest]` at
+runtime, clamps to `MAX_RECV`, TPUTs that many rows into the peer window, and
+publishes the **clamped** count into peer `recv_counts[my_rank, 0]` via
+`pld.system.notify` (Set). After the barrier the receiver uses
+`recv_counts[src, 0]` to skip unwritten holes. Rows beyond the count are not
+transferred (window tails keep prior contents).
+
 ### `pld.tensor.allreduce`
 
 ```text
@@ -416,7 +440,8 @@ dispatches before the final `Simplify`.
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
-  `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
+  `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
+  `test_l3_tensor_all_to_all_v_intrinsic.py`, and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),

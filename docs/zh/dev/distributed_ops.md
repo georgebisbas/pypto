@@ -16,7 +16,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 区域来接收数据,因此 kernel 可以将 TGET 结果直接写入 host 输出 tensor；
 `src` 仍然必须是窗口绑定的 `DistributedTensor`。
 
-共有**十二个算子**和**四个 ABI 枚举**：
+共有**十三个算子**和**四个 ABI 枚举**：
 
 | 算子 | 方向 | 结果 | 硬件 |
 | ---- | ---- | ---- | ---- |
@@ -30,6 +30,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按 `min(send_counts[dest], MAX_RECV)` 向每个目标推送对应行数，写入平面 2D 暂存窗口，同时通过 `pld.system.notify`（Set）把该钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方能跳过未写入的空洞；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式）。超出发送方计数的行不会传输，因此窗口中这些行保留原有内容。仅支持 InCore——没有 HOST 编排层的下降实现 | `DistributedTensorType`（与 target 相同） | composite InCore |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 
@@ -238,6 +239,27 @@ full-slice `get` 要求 `dst` / `src` 形状一致；subregion `get` 允许完�
 不同,只要显式传输区域不越界（仅校验静态维）；任何动态传输维都需配套静态 chunk。
 除 `chunk_rows` / `chunk_cols` 外,`get` 不接受 keyword attributes。
 
+### `pld.tensor.all_to_all_v`
+
+```text
+pld.tensor.all_to_all_v(
+    input, target, signal, send_counts, recv_counts
+) -> DistributedTensorType(target)
+```
+
+仅 InCore 的变长 all-to-all（MPI_Alltoallv）。平面 2D 布局：
+
+- `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
+- `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
+- `signal` — DistributedTensor INT32 `[NR, 1]`（单次使用的 Set(1)/wait≥1 屏障）
+- `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
+- `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
+
+`MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
+`MAX_RECV`、按该行数 TPUT 到对端窗口，并把**钳制后**的计数通过
+`pld.system.notify`（Set）写入对端 `recv_counts[my_rank, 0]`。屏障之后接收方用
+`recv_counts[src, 0]` 跳过未写入的空洞。计数之外的行不传输（窗口尾部保留原有内容）。
+
 ### `pld.tensor.allreduce`
 
 ```text
@@ -364,7 +386,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   P=2/P=4）、`test_l3_tensor_allreduce_intrinsic.py`、
   `test_l3_tensor_allreduce_ring_intrinsic.py`、
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
-  `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`，以及
+  `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
+  `test_l3_tensor_all_to_all_v_intrinsic.py`，以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`
