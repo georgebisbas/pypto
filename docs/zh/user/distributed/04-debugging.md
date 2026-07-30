@@ -43,9 +43,14 @@ SIMPLER_DEVICE_STRACE_ENABLE=0 python script.py
 
 ### 分布式 DFX 入口点
 
-- **L2 swimlane：** `RunConfig(enable_l2_swimlane=True)`
-- **Scope 统计：** `RunConfig(enable_scope_stats=True)`
-- **依赖图：** `RunConfig(enable_dep_gen=True)`
+- **L2 swimlane：** `RunConfig(enable_l2_swimlane=True)`——在 worker 内部启用
+  逐任务计时，并透传到 L3 编排。写入 `dfx_outputs/l2_swimlane_records.json`
+  （onboard 场景会与下面的依赖图合并为 `merged_swimlane_*.json`）。
+- **Scope 统计：** `RunConfig(enable_scope_stats=True)`——写入
+  `dfx_outputs/scope_stats/scope_stats.jsonl`，包含 task_window、heap 和
+  tensormap 水位。
+- **依赖图：** `RunConfig(enable_dep_gen=True)`——写入 `dfx_outputs/deps.json`，
+  供调度器分析的任务依赖图。
 
 ## 相关链接
 

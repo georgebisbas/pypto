@@ -1,12 +1,13 @@
 # 集合通信
 
-本页介绍五种内置集合通信及算法选择。所有集合通信在各 rank 间**同步执行**——
+本页介绍六种内置集合通信及算法选择。所有集合通信在各 rank 间**同步执行**——
 每个 rank 必须以相同形状的 signal tensor 调用同一集合通信，否则程序会挂起
 或静默数据损坏。
 
 ## AllReduce
 
-每个 rank 提交其本地数据；每个 rank 接收求和结果。
+每个 rank 提交其本地数据；每个 rank 接收规约结果（`op=` 选择 `Sum`、`Max`、
+`Min` 或 `Prod`）。
 
 ```python
 # Host 编排器——最简形式（编译器合成 signal）。
@@ -74,57 +75,76 @@ buffer。
 将 root rank 的数据广播到所有 rank。
 
 ```python
+# Root 在调用前写入数据。
 if my_rank == ROOT_RANK:
     data = pl.store(local, [0, 0], data)
 data = pld.tensor.broadcast(data, signal, root=ROOT_RANK)
+# 调用后每个 rank 的 data[0, 0:SIZE] 都持有 root 的数据。
 ```
+
+Root 必须在调用前写入数据；非 root rank 的输入槽位会被忽略。调用结束后，
+每个 rank 都持有 root 的数据。
 
 ## AllGather
 
-推式 allgather。
+推式 all-gather——每个 rank 推送自己的本地分片，每个 rank 都收到完整的
+汇总矩阵。
 
 ```python
+# Stage buffer：本 rank 的 [1, SIZE] 分片（推送源）。
 stage_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
 stage = pld.window(stage_buf, [1, SIZE], dtype=pl.FP32)
 stage = pl.store(local_input, [0, 0], stage)
 
+# 结果 buffer：汇总后的 [NR, SIZE]（推送目标）。
 data_buf = pld.alloc_window_buffer(NR * SIZE * pl.FP32.get_byte())
 data = pld.window(data_buf, [NR, SIZE], dtype=pl.FP32)
 sig_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
 sig = pld.window(sig_buf, [NR], dtype=pl.INT32)
 
 data = pld.tensor.allgather(stage, data, sig)
+# 调用后 data[src, :] 持有 rank src 的分片，对所有 src 均成立。
 ```
 
-`local_data` 和 `target` **必须是不同的** window buffer。
+`local_data` 和 `target` **必须是不同的** window buffer。stage buffer 是
+每个 rank 的推送源；target buffer 接收汇总后的 `[NR, SIZE]` 结果。
 
 ## ReduceScatter
 
+Reduce-scatter：每个 rank 写入全部 NR 个分片，接收自己的规约结果分片。
+
 ```python
+# 屏障用 signal（host builtin 要求一维）。
 sig_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
 sig = pld.window(sig_buf, [NR], dtype=pl.INT32)
 
+# 将全部 NR 个分片写入 data[NR, SIZE]。
 for j in pl.range(nranks):
     data = pl.store(chunk_j, [j, 0], data)
 data = pld.tensor.reduce_scatter(data, sig, op=pld.ReduceOp.Sum)
+# data[my_rank, 0:SIZE] 持有本 rank 的规约结果分片。
 ```
 
 ## AllToAll
 
-个性化 all-to-all 交换。
+个性化 all-to-all 交换——每个 rank 向每个对端发送一个专属分片，并从每个
+对端接收一个专属分片。
 
 ```python
+# Stage buffer：推送源，[NR, SIZE]，每行是发往对应目标的分片。
 stage_buf = pld.alloc_window_buffer(NR * SIZE * pl.FP32.get_byte())
 stage = pld.window(stage_buf, [NR, SIZE], dtype=pl.FP32)
 for dest in pl.range(nranks):
     stage = pl.store(chunk_for_dest, [dest, 0], stage)
 
+# 结果 buffer：推送目标，[NR, SIZE]。
 data_buf = pld.alloc_window_buffer(NR * SIZE * pl.FP32.get_byte())
 data = pld.window(data_buf, [NR, SIZE], dtype=pl.FP32)
 sig_buf = pld.alloc_window_buffer(NR * pl.INT32.get_byte())
 sig = pld.window(sig_buf, [NR], dtype=pl.INT32)
 
 data = pld.tensor.all_to_all(stage, data, sig)
+# data[src, :] 持有从 rank src 收到的分片。
 ```
 
 `input` 和 `target` 必须是**不同的** window buffer。
@@ -143,9 +163,11 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | **Signal 形状** | 取决于自己的分配 | mesh 为 `[nranks, 1]`（rank 数量可为动态）；ring 为 `[2×(NR−1), NR]`（`NR` 必须是编译期常量） | 一维 `[world_size]` 或二维 `[world_size, 1]`——编译器合成的 signal 为二维 |
 | **适用场景** | 学习、自定义协议 | 需要 `ring` 模式，或已身处 InCore kernel 内部 | 日常的 host 编排集合通信 |
 
-日常 host 编排代码优先使用 Host 级别内置——它们自动处理 signal 分配、
-屏障编排和分块。当需要 `mode="ring"` 时改用 InCore 组合调用，因为 Host
-内置路径只 lowering `mesh`。
+日常 host 编排代码优先使用 Host 级别内置——它们自动处理屏障编排和分块。
+只有 `allreduce` 可以省略 signal 参数（编译器会在循环外自动合成一个）；
+其余五种集合通信（`barrier`、`broadcast`、`allgather`、`reduce_scatter`、
+`all_to_all`）始终需要调用方显式分配并传入 signal。当需要 `mode="ring"`
+时改用 InCore 组合调用，因为 Host 内置路径只 lowering `mesh`。
 
 ## 相关链接
 

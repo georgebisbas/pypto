@@ -1,14 +1,14 @@
 # Collectives
 
-This page covers the five built-in collectives and when to use each algorithm.
+This page covers the six built-in collectives and when to use each algorithm.
 All collectives are **synchronous** across ranks — every rank must call the same
 collective with identically shaped signal tensors, or the program hangs or
 silently corrupts data.
 
 ## AllReduce
 
-Every rank contributes its local data; every rank receives the summed
-result.
+Every rank contributes its local data; every rank receives the reduced
+result (`op=` selects `Sum`, `Max`, `Min`, or `Prod`).
 
 ```python
 # Host orchestrator — simplest form (compiler synthesizes signal).
@@ -167,9 +167,12 @@ runs and whether you need `mode="ring"`:
 | **When** | Learning, custom protocols | Need `ring` mode, or already inside an InCore kernel | Day-to-day host-orchestrated collectives |
 
 Prefer HOST builtins for day-to-day host-orchestrated code — they handle
-signal allocation, barrier orchestration, and chunking automatically. Reach
-for the InCore composite specifically when you need `mode="ring"`, since the
-HOST builtin path only lowers `mesh`.
+barrier orchestration and chunking automatically. Only `allreduce` can also
+omit the signal argument (the compiler synthesizes one outside loops); the
+other five collectives (`barrier`, `broadcast`, `allgather`,
+`reduce_scatter`, `all_to_all`) always take an explicit, caller-allocated
+signal. Reach for the InCore composite specifically when you need
+`mode="ring"`, since the HOST builtin path only lowers `mesh`.
 
 ## See Also
 

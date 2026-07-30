@@ -16,17 +16,20 @@ lower-level primitives only when building a custom protocol.
 
 ## System Substrate (`pld.system.*`)
 
-These are the lowest-level distributed primitives. Host-only queries are valid only outside
-InCore scopes; the remaining ops work in both host orchestrator and InCore kernel code.
+These are the lowest-level distributed primitives. Scope varies per op —
+`world_size` is host-only; `get_comm_ctx` works in both host orchestrator and
+InCore kernel code; `rank`, `nranks`, `notify`, and `wait` have codegen
+support only in InCore kernel code (there is no host-orchestrator lowering
+for them).
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `world_size` | `() -> Scalar` | **Host-only.** Number of ranks in the distributed execution. Returns `INT64`. |
-| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | Lift a `DistributedTensor` to its `CommCtx` handle. The verifier rejects plain `pl.Tensor`. |
-| `rank` | `(ctx: Ctx) -> Scalar` | Local rank index (`INT32`). Lowers to a load of `CommContext::rankId`. |
-| `nranks` | `(ctx: Ctx) -> Scalar` | Number of ranks in this comm group (`INT32`). Lowers to a load of `CommContext::rankNum`. |
-| `notify` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], value: IntLike, *, op: NotifyOp) -> Call` | Cross-rank signal deposit. **Side-effect-only** — no return value. Lowers to `TNOTIFY`. |
-| `wait` | `(signal: DT, offsets: Sequence[IntLike], expected: IntLike, *, cmp: WaitCmp) -> Call` | Cross-rank wait. **Side-effect-only** — blocks until the local signal slot satisfies `cmp(expected)`. Lowers to `TWAIT`. |
+| `get_comm_ctx` | `(dist_tensor: DT) -> Ctx` | Lift a `DistributedTensor` to its `CommCtx` handle. Works in host orchestrator and InCore code. The verifier rejects plain `pl.Tensor`. |
+| `rank` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Local rank index (`INT32`). Lowers to a load of `CommContext::rankId`. |
+| `nranks` | `(ctx: Ctx) -> Scalar` | **InCore-only.** Number of ranks in this comm group (`INT32`). Lowers to a load of `CommContext::rankNum`. |
+| `notify` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], value: IntLike, *, op: NotifyOp) -> Call` | **InCore-only.** Cross-rank signal deposit. **Side-effect-only** — no return value. Lowers to `TNOTIFY`. |
+| `wait` | `(signal: DT, offsets: Sequence[IntLike], expected: IntLike, *, cmp: WaitCmp) -> Call` | **InCore-only.** Cross-rank wait. **Side-effect-only** — blocks until the local signal slot satisfies `cmp(expected)`. Lowers to `TWAIT`. |
 
 ## Window Buffer Management (`pld.tensor.*`)
 
@@ -162,9 +165,14 @@ for src in pl.range(nranks):
         )
 ```
 
-`AtomicAdd` is used because N ranks write the same signal cell — each adds
-1, so after all notifies land the cell reaches N-1 and every `WaitGe(1)`
-unblocks. With `Set` the last writer would overwrite earlier contributions.
+With `offsets=[my_rank, 0]`, each rank owns a dedicated row — cell `[r, 0]`
+in every peer's window has exactly one writer, rank `r` itself, so `Set`
+would work identically here. `AtomicAdd` is shown because this is the same
+notify call every barrier in this doc uses; the "many writers, one slot"
+case that actually requires `AtomicAdd` is a *shared*-cell barrier (see the
+table above) — give every rank a distinct offset like this one only when you
+need to distinguish *which* peers have arrived, not just *whether* everyone
+has.
 
 ### Remote Accumulate
 
