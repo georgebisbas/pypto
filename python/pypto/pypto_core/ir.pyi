@@ -2298,7 +2298,15 @@ class ReduceOp(enum.IntEnum):
     """Reduction operator for collective reductions — ``pld.tensor.allreduce`` and friends.
 
     Stored as ``int`` in op kwargs; the C++ deducer validates the int falls
-    within this enum's range.
+    within this enum's range. Support is per-operation, not uniform across
+    the enum:
+
+    .. note::
+
+       **Per-operation support:** ``pld.tensor.allreduce`` (both the InCore
+       composite and the HOST builtin) accepts all four values. Other
+       reducing collectives are narrower — ``pld.tensor.reduce_scatter``
+       accepts only :attr:`Sum` and rejects the rest at the deducer.
     """
 
     Sum = 0
