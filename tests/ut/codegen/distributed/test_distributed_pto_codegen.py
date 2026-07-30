@@ -904,6 +904,60 @@ def test_notify_value_type_matches_value_ir_dtype():
     assert "!pto.partition_tensor_view<1x1xi32>" in tnotify_line
 
 
+def test_wait_casts_loop_induction_expected_to_i32():
+    """A pl.range loop induction variable used as ``expected`` is cast to i32.
+
+    ``pl.range``'s induction variable defaults to DataType.INDEX; arithmetic
+    on it (``step + 1``) stays INDEX. PTOAS's TWaitOp declares ``cmpValue``
+    as AnySignlessInteger with a 32-bit-width verifier check, so an
+    uncast ``index`` operand fails to parse ("invalid kind of type
+    specified"). Regression for issue #2222.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            signal: pld.DistributedTensor[[16, 16], pl.INT32],
+        ):
+            for step in pl.range(4):
+                pld.system.wait(signal, offsets=[0, 0], expected=step + 1, cmp=pld.WaitCmp.Ge)
+
+    mlir = _generate_mlir(P)
+    twait_line = next(line for line in mlir.splitlines() if "pto.comm.twait(" in line)
+    assert twait_line.rstrip().endswith("i32) {cmp = #pto<wait_cmp ge>}"), twait_line
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert "arith.index_cast" in body and "to i32" in body, body
+
+
+def test_notify_casts_loop_induction_value_to_i32():
+    """A pl.range loop induction variable used as ``value`` is cast to i32.
+
+    Same root cause as ``test_wait_casts_loop_induction_expected_to_i32``,
+    for TNotifyOp's ``value`` operand. Regression for issue #2222.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            signal: pld.DistributedTensor[[16, 16], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            for step in pl.range(4):
+                pld.system.notify(
+                    signal, peer=peer, offsets=[0, 0], value=step + 1, op=pld.NotifyOp.Set
+                )
+
+    mlir = _generate_mlir(P)
+    tnotify_line = next(line for line in mlir.splitlines() if "pto.comm.tnotify(" in line)
+    assert tnotify_line.rstrip().endswith("i32) {notifyOp = #pto<notify_op set>}"), tnotify_line
+    body = mlir.split("func.func @kernel", 1)[1]
+    assert "arith.index_cast" in body and "to i32" in body, body
+
+
 def test_get_comm_ctx_emits_no_mlir_aliases_ctx_arg():
     """``pld.system.get_comm_ctx(dist_t)`` is a pure SSA alias.
 

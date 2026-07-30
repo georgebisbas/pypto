@@ -451,15 +451,20 @@ static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase&
       binding.var->name_hint_ + "_peer", peer_view.ssa, peer_view.view_type_str, partition_type,
       GetIndexOffsetCodes(offsets_tuple->elements_, codegen), one_size_ssa, codegen);
 
-  // PTOAS contract: tnotify value's MLIR type must match the signal element
-  // type. Emit using the value's own ScalarType — mismatched IR-level dtypes
-  // surface here as a PTOAS verifier diagnostic rather than as silently
-  // garbled DMA.
+  // PTOAS's TNotifyOp declares `value` as AnySignlessInteger with an
+  // additional 32-bit-width verifier check (the comm ISA's signal slot is a
+  // fixed i32 register) — MLIR's IndexType does not satisfy that, so a
+  // pl.range loop induction variable (default dtype INDEX) used as `value`
+  // would otherwise reach PTOAS as `index` and fail to parse ("invalid kind
+  // of type specified"). Cast to i32 the same way pto_ops_datamove.cpp casts
+  // blockLen for its own "must be i32 per PTO ISA" operand; EmitCastToI32 is
+  // a no-op when the operand is already INT32.
   std::string value_ssa = codegen.GetExprAsCode(op->args_[3]);
   auto value_scalar = As<ir::ScalarType>(op->args_[3]->GetType());
   CHECK(value_scalar) << "pld.system.notify value must have ScalarType, got "
                       << op->args_[3]->GetType()->TypeName();
-  std::string value_type = codegen.GetTypeString(value_scalar->dtype_);
+  value_ssa = codegen.EmitCastToI32(op->args_[3], value_ssa);
+  std::string value_type = codegen.GetTypeString(DataType::INT32);
   // A notify publishes completion to a peer. Drain every local pipeline first
   // so the peer cannot observe the signal before preceding VEC work or GM
   // accesses are complete. PTOAS's TNOTIFY lowering only drains MTE2/MTE3,
@@ -514,14 +519,18 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
       EmitPartitionViewPTO(signal_var->name_hint_ + "_local", local_view, local_view_type, partition_type,
                            GetIndexOffsetCodes(offsets_tuple->elements_, codegen), one_size_ssa, codegen);
 
-  // PTOAS contract: twait expected value's MLIR type must match the signal
-  // element type. Emit using the expected value's own ScalarType — see notify
-  // codegen above for the rationale.
+  // PTOAS's TWaitOp declares `cmpValue` as AnySignlessInteger with an
+  // additional 32-bit-width verifier check — see notify codegen above for
+  // the full rationale. Cast to i32 so a pl.range loop induction variable
+  // (default dtype INDEX, e.g. `expected=step + 1`) doesn't reach PTOAS as
+  // `index` and fail with "invalid kind of type specified". EmitCastToI32
+  // is a no-op when the operand is already INT32.
   std::string expected_ssa = codegen.GetExprAsCode(op->args_[2]);
   auto expected_scalar = As<ir::ScalarType>(op->args_[2]->GetType());
   CHECK(expected_scalar) << "pld.system.wait expected must have ScalarType, got "
                          << op->args_[2]->GetType()->TypeName();
-  std::string expected_type = codegen.GetTypeString(expected_scalar->dtype_);
+  expected_ssa = codegen.EmitCastToI32(op->args_[2], expected_ssa);
+  std::string expected_type = codegen.GetTypeString(DataType::INT32);
   std::ostringstream twait;
   twait << "pto.comm.twait(" << partition_view << ", " << expected_ssa << " : " << partition_type << ", "
         << expected_type << ") {cmp = #pto<wait_cmp " << cmp_attr << ">}";
