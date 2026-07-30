@@ -277,3 +277,26 @@ packed predicate mask；A2/A3 上如需得到数值结果，请配合 `sel` 和�
 | `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | 创建张量（从 `pl.tensor` 提升；`init_value` 由 AICPU 预填充缓冲区——`0` 对任意 dtype 清零，非零值需整型或 ≥32 位浮点 dtype） |
 | `max` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | 两个**标量**取最大值（不是 tile 规约 —— 请用 `pl.tile.row_max` / `pl.tile.col_max`） |
 | `min` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | 两个**标量**取最小值（不是 tile 规约 —— 请用 `pl.tile.row_min` / `pl.tile.col_min`） |
+
+## 分布式 / 集合通信操作 (`pld.*`)
+
+分布式和集合通信操作位于 `pld` 命名空间（`import pypto.language.distributed as pld`）。
+完整参考见 [distributed/index.md](distributed/index.md)；
+教程见 [distributed/00-model.md](distributed/00-model.md)。
+
+### 功能矩阵
+
+| 操作 | API | 模式 | ReduceOp | Atomic | 支持的 dtype | 说明 |
+| ---- | --- | ---- | -------- | ------ | ------------ | ---- |
+| AllReduce | `pld.tensor.allreduce` | `mesh`（InCore + HOST），`ring`（仅 InCore） | `Sum`、`Max`、`Min`、`Prod` | — | FP16、FP32——编译期硬性检查（`allreduce.cpp`），InCore 和 HOST 均适用 | Mesh: O(N) 远程流量。Ring: O(N/P) 流量，2(P-1) 步；目前仅限 InCore。 |
+| AllGather | `pld.tensor.allgather` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 推式。输入和 target 必须是不同的 buffer。 |
+| ReduceScatter | `pld.tensor.reduce_scatter` | — | 仅 `Sum` | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
+| Broadcast | `pld.tensor.broadcast` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | Root 在调用前将数据写入。 |
+| All-to-All | `pld.tensor.all_to_all` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 个性化交换。输入和 target 必须是不同的 buffer。 |
+| Barrier | `pld.tensor.barrier` | — | — | — | — | Signal 为 INT32，每次调用单次使用。 |
+| Put | `pld.tensor.put` | — | — | `None_` / `Add` | 所有 GM dtype | `dst` 必须是 window-bound。支持分块和流水线 staging。 |
+| Get | `pld.tensor.get` | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
+| Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
+| Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
+| Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
+| Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |

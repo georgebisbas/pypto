@@ -145,6 +145,10 @@ and read `l2_swimlane_records.json`.
 
 ### Benchmarking (`benchmark`)
 
+The full benchmarking guide is at [performance/00-methodology.md](performance/00-methodology.md)
+— it covers the programmatic `benchmark()` API, L3 distributed timing,
+bus-bandwidth formulas, and common caveats.
+
 For the register-once + rounds pattern, `pypto.runtime.benchmark` owns the loop
 and aggregation: it registers *compiled* once and dispatches `rounds` cheap
 launches (no per-round register/load), reads each launch's `[STRACE]` markers,
@@ -228,6 +232,61 @@ dispatch shape is non-deterministic, `stats.fallback_flattened` is set and the
 per-rank / `union` views are empty.
 
 ### Distributed (L3+) programs
+
+The complete distributed programming model — from `alloc_window_buffer` through
+collectives like `allreduce`, `barrier`, and `broadcast` — is covered in the
+[Distributed Programming](distributed/00-model.md). Here's the minimal mesh allreduce
+Hello World:
+
+```python
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+NR = pl.dynamic("NR")
+
+@pl.program
+class HelloAllReduce:
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[1, 256], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, 256], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 256], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+
+        # 1. Stage-in: copy local input into this rank's window slice.
+        data = pl.store(pl.load(inp, [0, 0], [1, 256]), [0, 0], data)
+
+        # 2. Barrier: notify every peer, then wait on every peer.
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(signal, peer=peer, offsets=[my_rank, 0],
+                                  value=1, op=pld.NotifyOp.AtomicAdd)
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(signal, offsets=[src, 0],
+                                expected=1, cmp=pld.WaitCmp.Ge)
+
+        # 3. Compute: load own slice, remote-load every peer, accumulate.
+        acc = pl.load(data, [0, 0], [1, 256])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                peer_tile = pld.tile.remote_load(
+                    data, peer=peer, offsets=[0, 0], shape=[1, 256])
+                acc = pl.add(acc, peer_tile)
+
+        # 4. Stage-out: store accumulator to output.
+        out = pl.store(acc, [0, 0], out)
+        return out
+```
+
+The guide includes a **line-by-line walkthrough, ring allreduce trade-offs,
+notify/wait handshake patterns, and a debugging table**. The full chapter is
+at [distributed/index.md](distributed/index.md).
 
 L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)
 accept `DeviceTensor` arguments the same way as `CompiledProgram`: pass a

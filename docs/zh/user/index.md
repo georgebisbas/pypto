@@ -4,7 +4,7 @@
 
 ## 阅读路径
 
-按你当前要做的事挑一条。三条路径都假设[安装](01-installation.md)已完成。
+按你当前要做的事挑一条。四条路径都假设[安装](01-installation.md)已完成。
 
 ### 我要写第一个 kernel
 
@@ -24,12 +24,19 @@
 
 ### 我有 kernel，但太慢
 
-[编程模型 § 内存层次](03-programming-model.md) →
-[诊断](../dev/passes/92-diagnostics.md) →
-[运行时 DFX](../dev/03-runtime-dfx.md)
+[性能](performance/index.md) →
+[编程模型 § 内存层次](03-programming-model.md)
 
 在动手测量之前，先看编译产物里的 `report/perf_hints.log` —— 编译器可能已经告诉你了。
-性能专章尚未编写，其内容当前的位置见下表。
+性能专章覆盖单节点和分布式程序完整的测量 → 定位 → 优化 → 验证循环。
+
+### 我想跨多个设备运行
+
+[分布式编程](distributed/index.md) → [性能 § 分布式](performance/02-distributed.md)
+
+先让单设备 kernel 跑通 —— 分布式程序是在 `pld.*` 集合通信和 HOST 编排器之上
+组合同样的 `pl.*` kernel。跑通之后，分布式性能页面覆盖 ring 与 mesh 的
+开销取舍以及跨 rank 重叠。
 
 ## 目录
 
@@ -42,6 +49,8 @@
 | [操作参考](02-operation_reference.md) | `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌 |
 | [在设备上运行](00-getting_started.md) | 常驻设备张量、显式派发、性能基准、分布式执行 |
 | [Torch Codegen 调试指南](03-torch_codegen_debug.md) | 从 IR 生成 PyTorch 参考实现，用于定位精度问题 |
+| [分布式编程](distributed/index.md) | 跨 rank 程序的对称内存模型、集合通信、底层原语、执行与调试 |
+| [性能](performance/index.md) | 测量方法论、单节点与分布式优化技巧、以及实际案例 |
 
 ## PyPTO 提供了什么
 
@@ -54,7 +63,8 @@
 | `@pl.jit` 全家族（`.incore`、`.inline`、`.opaque`、`.host`） | [快速上手](02-quickstart.md)、[语言指南](01-language_guide.md) |
 | 手写 C++ kernel 接入 | [外部 Kernel](../dev/language/01-external-kernels.md) |
 | 设备常驻张量、显式派发、性能基准 | [在设备上运行](00-getting_started.md) |
-| 分布式（多卡）程序与集合通信 | [分布式算子](../dev/distributed_ops.md) |
+| 分布式（多卡）程序与集合通信 | [分布式编程](distributed/index.md) |
+| 单节点与分布式的性能测量与调优 | [性能](performance/index.md) |
 | 对照 PyTorch 参考实现做精度定位 | [Torch Codegen 调试指南](03-torch_codegen_debug.md) |
 | 编译期诊断与性能提示 | [诊断](../dev/passes/92-diagnostics.md) |
 | 运行时 DFX：swimlane、PMU、依赖图、scope stats | [运行时 DFX](../dev/03-runtime-dfx.md) |
@@ -62,14 +72,13 @@
 
 ## 尚未收录的内容
 
-本手册正在扩展为完整的分章结构 —— 教程、分布式编程、性能优化、精度定位各自成章。
+本手册正在扩展为完整的分章结构 —— 教程、精度定位各自成章。
 在这些章节落地之前，相应内容位于[开发者文档](../dev/index.md)：
 
 | 主题 | 当前位置 |
 | ---- | -------- |
 | 任务与依赖、`manual_scope` / `submit` | [Python IR 语法规范](../dev/language/00-python_syntax.md)、[AutoDeriveTaskDependencies](../dev/passes/36-auto_derive_task_dependencies.md) |
 | 混合 kernel（AIC + AIV 同一函数） | [LowerAutoVectorSplit](../dev/passes/19-lower_auto_vector_split.md)、[ExpandMixedKernel](../dev/passes/20-expand_mixed_kernel.md)、[TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
-| 分布式 DSL 与集合通信 | [分布式算子](../dev/distributed_ops.md) |
 | 性能提示与诊断 | [诊断](../dev/passes/92-diagnostics.md)、[编译性能剖析](../dev/01-compile-profiling.md) |
 | 运行时 DFX 开关、ring sizing、memory map | [运行时 DFX](../dev/03-runtime-dfx.md)、[逐任务 Ring Sizing](../dev/05-runtime-ring-sizing.md)、[内存图](../dev/07-memory-map.md) |
 | 外部 C++ kernel | [集成手写 C++ Kernel](../dev/language/01-external-kernels.md) |

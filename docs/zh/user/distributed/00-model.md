@@ -1,0 +1,184 @@
+# 分布式编程模型
+
+> **前置知识：** [快速入门](../00-getting_started.md) — 基本 PyPTO tensor/tile 模型。
+> 本指南使用 `pld` 命名空间（`import pypto.language.distributed as pld`）。
+
+## 快速开始：2-Rank AllReduce
+
+最简单的分布式程序——两个 rank 对各自数据求和，结果相同。
+
+```python
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+NR = pl.dynamic("NR")
+SIZE = 256
+
+@pl.program
+class HelloAllReduce:
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+
+        # 1. Stage-in：将本地输入数据复制到本 rank 的 window 分片。
+        local = pl.load(inp, [0, 0], [1, SIZE])
+        data = pl.store(local, [0, 0], data)
+
+        # 2. Barrier：通知每个对端，然后等待每个对端。
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(
+                    signal, peer=peer, offsets=[my_rank, 0],
+                    value=1, op=pld.NotifyOp.AtomicAdd,
+                )
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(
+                    signal, offsets=[src, 0],
+                    expected=1, cmp=pld.WaitCmp.Ge,
+                )
+
+        # 3. 计算：累加每个对端的分片。
+        acc = pl.load(data, [0, 0], [1, SIZE])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                peer_tile = pld.tile.remote_load(
+                    data, peer=peer, offsets=[0, 0], shape=[1, SIZE]
+                )
+                acc = pl.add(acc, peer_tile)
+
+        # 4. Stage-out：将累加器写入本地输出。
+        return pl.store(acc, [0, 0], out)
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def chip_orch(
+        self,
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        # 逐设备的编排包装函数——HOST 派发的是它，而不是直接派发 InCore kernel。
+        return self.reduce_step(inp, out, data, signal)
+
+    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+    def orchestrator(
+        self,
+        inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+            self.chip_orch(inputs[r], outputs[r], data, signal, device=r)
+        return outputs
+```
+
+### 预期输出
+
+每个 rank `r` 的 `outputs[r] == sum(inputs[*])`。2 个 rank 输入分别为
+`[[1, 2, 3]]` 和 `[[10, 20, 30]]`，两个 rank 均看到 `[[11, 22, 33]]`。
+
+### 启动命令
+
+```bash
+python script.py
+```
+
+不涉及任何多进程启动器。`DistributedConfig(device_ids=[...])` 告诉编译后的
+程序使用哪些设备；运行时会从这一个 Python 进程中为每个设备 fork 出一个
+worker 进程。
+
+## PyPTO 中的分布式编程是什么？
+
+PyPTO 的分布式模型采用**对称内存 + 信号**范式。每个 rank 有一个 per-rank
+**window buffer**，各对端的地址空间是对称的。通信通过单边
+`put`/`get`/`remote_load` 加**信号同步**（`notify`/`wait`）来完成。
+**通信域** 是共享对称 window pool 的 rank 子集；整个 world 为默认通信域。
+
+编译器 lowering 出的每个 allreduce、broadcast、barrier 都是这些相同原语的
+组合——`pld.tensor.*` 集合通信（`allreduce`、`barrier` 等）是它们的语法糖，
+而非另一套独立的库。完整 API 见 [01-collectives](01-collectives.md)。
+
+## 模型
+
+### HOST 编排器
+
+HOST 函数分配 window buffer、分发 kernel 并管理控制平面：
+
+- 声明为 `@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)` 或 `@pl.jit.host`
+- 调用 `alloc_window_buffer`、`window()`，通过 `device=r` 进行 per-rank 分发
+- 每个进程运行一次——不在 NPU 上执行
+- 派发的是逐设备的 `@pl.function(type=pl.FunctionType.Orchestration)` 包装函数
+  （而非直接派发 `InCore` kernel）——见下方 Per-Rank 分发
+
+### InCore Kernel
+
+InCore 函数在 NPU 设备上运行：
+
+- 声明为 `@pl.function(type=pl.FunctionType.InCore)`
+- 接收 window-bound 的 `DistributedTensor` 参数
+- 使用 `notify`/`wait` 进行跨 rank 同步，`remote_load`/`remote_store` 进行 RMA
+- 不调用 `alloc_window_buffer` 或 `world_size()`
+
+### Per-Rank 分发
+
+HOST 从不直接派发 `InCore` 函数。它通过设置 `device=r` 派发一个逐设备的
+`@pl.function(type=pl.FunctionType.Orchestration)` 包装函数；该包装函数再调用
+`InCore` kernel，且不带 `device=` 参数。每个 rank 通过 `CommContext` 看到
+自己的对称 window buffer 视图。
+
+### Window Buffer 生命周期
+
+`alloc_window_buffer(size)` 创建 per-rank buffer。`window(buf, shape, dtype)`
+创建类型化视图。Buffer 在 host 编排器调用期间存活。
+
+### 控制平面 vs 执行平面
+
+```text
+HOST 编排器 (@pl.function(level=HOST, role=Orchestrator))
+  ├── alloc_window_buffer(...)        ← 控制平面：声明布局
+  ├── window(buf, shape, dtype)       ← 控制平面：创建类型化视图
+  └── for r in ranks:                 ← 分发循环
+        self.chip_orch(..., device=r) ← 桥接到逐设备包装函数
+
+编排包装函数 (@pl.function(type=Orchestration))
+  └── self.reduce_step(...)          ← 调用 InCore kernel，不带 device=
+
+InCore kernel (@pl.function(type=InCore))
+  ├── notify / wait                  ← 执行平面：跨 rank 同步
+  ├── remote_load                    ← 执行平面：读取对端数据
+  └── store                          ← 执行平面：写入本地输出
+```
+
+## 逐行解读
+
+| 代码 | 说明 |
+| ---- | ---- |
+| `NR = pl.dynamic("NR")` | world size 在构建时未知。`pl.dynamic` 将维度推迟到运行时分发——host 从 `len(device_ids)` 绑定。 |
+| `pl.InOut[pld.DistributedTensor[...]]` | `data` 和 `signal` 是 window-bound：每个 rank 共享相同的地址空间布局。`InOut` 表示 kernel 既读又写。 |
+| `pld.get_comm_ctx(data)` | 将 window-bound tensor 提升为通信域句柄。每个 rank 获得自己的 `ctx`，从中读取 `rank()` 和 `nranks()`。 |
+| `pld.system.notify(..., op=AtomicAdd)` | 每个 rank 原子地加 1 到每个对端的 signal slot。`AtomicAdd` 在此正确，因为 N 个 rank 写入同一个 slot（全局屏障）。1:1 握手请用 `Set`。 |
+| `pld.system.wait(..., cmp=Ge, expected=1)` | 阻塞直到本地 signal slot 达到至少 1——表示所有对端的 notify 均已到达。 |
+| `pld.tile.remote_load(...)` | 读取对端 `DistributedTensor` 的远程分片到本地 tile。这是 `pl.tile.load` 的 tile 级别跨 rank 版本。 |
+| `pl.add(acc, peer_tile)` | 本地加法循环累加所有对端贡献。循环结束后 `acc` 持有 `sum(inputs[*])`。 |
+| `chip_orch`（`@pl.function(type=Orchestration)`） | HOST 通过 `device=r` 派发这个逐设备包装函数，而不是直接派发 `InCore` kernel；它再以不带 `device=` 的方式调用 `reduce_step`。 |
+| `inputs[r]` / `outputs[r]` | 下标索引会去掉最前面的 rank 维度，得到 `reduce_step` 声明的二维 `[1, SIZE]` 形状——若改用带显式 shape 的 `pl.slice`，会保留该维度，导致形状不匹配。 |
+
+## 相关链接
+
+- [01-collectives](01-collectives.md) — 内置集合通信及其语义
+- [02-primitives](02-primitives.md) — 集合通信的底层基础
+- [03-execution](03-execution.md) — DistributedWorker 生命周期和生产模式
+- [04-debugging](04-debugging.md) — 常见故障模式和诊断标志

@@ -130,6 +130,9 @@ PR #1177，在 `SIMPLER_DFX` 下默认开启）；用 simpler 的 `strace_timing
 
 ### 性能基准（`benchmark`）
 
+完整的基准测试指南见 [performance/00-methodology.md](performance/00-methodology.md)——
+涵盖程序化 `benchmark()` API、L3 分布式计时、bus-bandwidth 公式以及常见注意事项。
+
 对于 register-once + 多轮（rounds）模式，`pypto.runtime.benchmark` 封装了循环
 与聚合：它注册 *compiled* 一次并发起 `rounds` 次廉价 launch（不再每轮重付
 register/load），读取每次 launch 的 `[STRACE]` 标记并返回 `BenchmarkStats`：
@@ -203,6 +206,60 @@ dispatch 的量。当某 rank 每轮恰好只有 1 次 dispatch 时，求和即�
 确定，则 `stats.fallback_flattened` 被置位，per-rank / `union` 视图为空。
 
 ### 分布式（L3+）程序
+
+完整的分布式编程模型——从 `alloc_window_buffer` 到 `allreduce`、`barrier`、
+`broadcast` 等集合通信——见 [分布式编程](distributed/00-model.md)。下面展示
+InCore kernel（执行平面）的 mesh allreduce Hello World 示例；完整的可运行程序
+还需包含 host 编排器、`ir.compile` 及分布式 worker 设置，详见上述指南：
+
+```python
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+NR = pl.dynamic("NR")
+
+@pl.program
+class HelloAllReduce:
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[1, 256], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[1, 256], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 256], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        my_rank = pld.rank(ctx)
+        nranks = pld.nranks(ctx)
+
+        # 1. Stage-in：将本地输入复制到本 rank 的 window 分片。
+        data = pl.store(pl.load(inp, [0, 0], [1, 256]), [0, 0], data)
+
+        # 2. Barrier：通知每个对端，然后等待每个对端。
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                pld.system.notify(signal, peer=peer, offsets=[my_rank, 0],
+                                  value=1, op=pld.NotifyOp.AtomicAdd)
+        for src in pl.range(nranks):
+            if src != my_rank:
+                pld.system.wait(signal, offsets=[src, 0],
+                                expected=1, cmp=pld.WaitCmp.Ge)
+
+        # 3. 计算：加载自身分片，remote-load 每个对端，累加。
+        acc = pl.load(data, [0, 0], [1, 256])
+        for peer in pl.range(nranks):
+            if peer != my_rank:
+                peer_tile = pld.tile.remote_load(
+                    data, peer=peer, offsets=[0, 0], shape=[1, 256])
+                acc = pl.add(acc, peer_tile)
+
+        # 4. Stage-out：将累加器写入本地输出。
+        out = pl.store(acc, [0, 0], out)
+        return out
+```
+
+指南包含**逐行解读、ring allreduce 权衡、notify/wait 握手模式以及调试表格**。
+完整章节见 [distributed/index.md](distributed/index.md)。
 
 `ir.compile` 对 L3+ 分布式程序返回的 `DistributedCompiledProgram` 与 `CompiledProgram`
 一样接受 `DeviceTensor` 入参：用 worker 常驻 buffer 替代 `torch.Tensor`，runtime 即对该

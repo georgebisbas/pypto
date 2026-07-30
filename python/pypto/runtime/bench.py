@@ -303,6 +303,23 @@ _METRIC_ATTR = {"device": "device_wall_us", "host": "host_wall_us", "effective":
 class BenchmarkStats:
     """Aggregated per-launch timing from :func:`benchmark`.
 
+    .. rubric:: Quick-reference
+
+    ============================== =========================================================
+    Accessor                       Description
+    ============================== =========================================================
+    ``stats.device_us_median``     Median device wall (µs).
+    ``stats.device_us_min``        Minimum device wall (µs).
+    ``stats.device_us_max``        Maximum device wall (µs).
+    ``stats.device_us_mean``       Arithmetic mean device wall (µs).
+    ``stats.device_us_stdev``      Std-dev of device wall (µs).
+    ``stats.all_zero_device``      True if every sample is 0 (e.g. sim builds).
+    ``stats.samples``              Alias for ``device_wall_us`` (the raw list).
+    ``stats.per_round("device")``  List[float]: device wall per round.
+    ``stats.per_rank("device")``   Dict[int, List[float]]: per-rank breakdown (L3).
+    ``stats.print_tree()``         Render per-dispatch span tree to stdout.
+    ============================== =========================================================
+
     The min / median / mean / max / stdev helpers operate on
     ``device_wall_us`` — the on-NPU metric. ``host_wall_us`` samples are kept
     for context, but they include per-launch arg coercion + H2D and so are not

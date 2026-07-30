@@ -712,6 +712,19 @@ def spmd(
     ``range(n)``. Loop start is fixed at 0 and step at 1; each block gets an
     index ``i`` in ``[0, core_num)``.
 
+    .. rubric:: Three usage forms at a glance
+
+    ==============================  ===================================================
+    Form                             Description
+    ==============================  ===================================================
+    ``with pl.spmd(n):``             Dispatch or inline block (no captured TaskId).
+    ``for i in pl.spmd(n):``         Loop-style; ``i`` = per-block index, body
+                                    is auto-outlined to InCore.
+    ``with pl.spmd(n) as tid:``      Same body shapes as form 1, plus captured
+                                    producer TaskId in ``tid``.  Optionally pass
+                                    ``deps=[...]`` after ``n``.
+    ==============================  ===================================================
+
     Usage forms:
 
     1. ``with pl.spmd(n):`` — body is either a *dispatch* body calling a

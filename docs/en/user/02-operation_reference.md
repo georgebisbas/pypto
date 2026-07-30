@@ -277,3 +277,26 @@ scratch tile to materialize numeric results on A2/A3.
 | `create_tensor` | `(shape: Sequence[IntLike], dtype: DataType, layout: TensorLayout = None, init_value: int \| float \| None = None) -> Tensor` | Create tensor (promoted from `pl.tensor`; `init_value` AICPU-pre-fills the buffer — `0` zeroes any dtype, non-zero needs an int / 32-bit-or-wider float dtype) |
 | `max` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | Max of two **scalars** (not a tile reduction — use `pl.tile.row_max` / `pl.tile.col_max`) |
 | `min` | `(lhs: Scalar \| int \| Expr, rhs: Scalar \| int \| Expr) -> Scalar` | Min of two **scalars** (not a tile reduction — use `pl.tile.row_min` / `pl.tile.col_min`) |
+
+## Distributed / Collective Operations (`pld.*`)
+
+Distributed and collective ops are in the `pld` namespace (`import pypto.language.distributed as pld`).
+Full reference at [distributed/index.md](distributed/index.md);
+tutorial at [distributed/00-model.md](distributed/00-model.md).
+
+### Capability Matrix
+
+| Operation | API | Modes | ReduceOp | Atomic | Supported dtypes | Notes |
+| --------- | --- | ----- | -------- | ------ | ---------------- | ----- |
+| AllReduce | `pld.tensor.allreduce` | `mesh` (InCore + HOST), `ring` (InCore only) | `Sum`, `Max`, `Min`, `Prod` | — | FP16, FP32 — a hard compile-time check (`allreduce.cpp`), both InCore and HOST | Mesh: O(N) remote traffic. Ring: O(N/P) traffic, 2(P-1) steps; currently InCore-only. |
+| AllGather | `pld.tensor.allgather` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Push-based. Input and target must be different buffers. |
+| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum` only | — | FP32 only (HOST builtin); any GM dtype (InCore) | Every rank stages all NR chunks before the call. |
+| Broadcast | `pld.tensor.broadcast` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Root stages data before the call. |
+| All-to-All | `pld.tensor.all_to_all` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Personalized exchange. Input and target must be different buffers. |
+| Barrier | `pld.tensor.barrier` | — | — | — | — | Signal is INT32, single-shot per call. |
+| Put | `pld.tensor.put` | — | — | `None_` / `Add` | All GM dtypes | `dst` must be window-bound. Supports chunked + pipelined staging. |
+| Get | `pld.tensor.get` | — | — | — | All GM dtypes | `src` must be window-bound. Supports chunked + pipelined staging. |
+| Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | Side-effect-only signal deposit. |
+| Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | Side-effect-only signal block. |
+| Remote Load | `pld.tile.remote_load` | — | — | — | Any (tile) | Tile-level cross-rank load. |
+| Remote Store | `pld.tile.remote_store` | — | — | — | Any (tile) | Tile-level cross-rank store. |
