@@ -947,9 +947,7 @@ def test_notify_casts_loop_induction_value_to_i32():
             peer: pl.Scalar[pl.INT32],
         ):
             for step in pl.range(4):
-                pld.system.notify(
-                    signal, peer=peer, offsets=[0, 0], value=step + 1, op=pld.NotifyOp.Set
-                )
+                pld.system.notify(signal, peer=peer, offsets=[0, 0], value=step + 1, op=pld.NotifyOp.Set)
 
     mlir = _generate_mlir(P)
     tnotify_line = next(line for line in mlir.splitlines() if "pto.comm.tnotify(" in line)
