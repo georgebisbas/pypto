@@ -1859,7 +1859,7 @@ class ASTParser:
         )
         if self._func_level != ir.Level.HOST or in_device_scope:
             raise ParserSyntaxError(
-                "pld.system.alloc_window_buffer() can only be called in HOST orchestration "
+                "pld.tensor.alloc_window_buffer() can only be called in HOST orchestration "
                 "context (not inside InCore / SPMD scopes); "
                 f"current function level: {self._func_level}",
                 span=span,
