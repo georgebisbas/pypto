@@ -265,6 +265,14 @@ namespace cache_line_t {{
     constexpr int SINGLE_CACHE_LINE = 0;
     constexpr int CACHELINE_OUT     = 0;
 }}
+// Self-referential macros: considered "defined" by the preprocessor so
+// #ifndef guards in cpu_stub.hpp skip re-definition when transitively
+// included later (e.g. via pto_comm_inst.hpp from ptoas output).  The
+// preprocessor stalls self-referential expansion immediately, so
+// cache_line_t::ENTIRE_DATA_CACHE stays a valid qualified identifier.
+#define ENTIRE_DATA_CACHE ENTIRE_DATA_CACHE
+#define SINGLE_CACHE_LINE SINGLE_CACHE_LINE
+#define CACHELINE_OUT CACHELINE_OUT
 typedef int mem_dsb_t;
 #define DSB_DDR 0
 

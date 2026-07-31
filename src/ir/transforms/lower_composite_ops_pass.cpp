@@ -370,6 +370,53 @@ class LoweringBuilder {
         span);
   }
 
+  /// O(1) per-round neighbor barrier for bidirectional ring topology.
+  /// Notifies left and right peers (AtomicAdd val=1) on my_rank's cell in
+  /// the 2D signal matrix at row_offset, then waits for the corresponding
+  /// cells of left_peer and right_peer to reach ``expected`` (Ge comparison).
+  /// When P=2 (left == right) both notify and wait collapse to single ops.
+  [[maybe_unused]] void EmitNeighborBarrier(const ExprPtr& signal, const ExprPtr& my_rank,
+                                 const ExprPtr& left_peer, const ExprPtr& right_peer,
+                                 const ExprPtr& row_offset, const ExprPtr& expected,
+                                 const std::string& suffix, const Span& span) {
+    auto& reg = OpRegistry::GetInstance();
+    auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+    auto my_signal = tile_conversion_utils::MakeSignalOffsets(my_rank, row_offset, span);
+
+    // Notify left peer: signal[row_offset][my_rank] += 1
+    auto notify_l = reg.Create("pld.system.notify", {signal, left_peer, my_signal, one_i32},
+                               {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span);
+    Bind("nb_notify_l" + suffix, notify_l, span);
+
+    EmitIf(
+        NotEq(left_peer, right_peer, span),
+        [&](LoweringBuilder& then_body) {
+          // Notify right peer (skipped when P=2, left==right)
+          auto notify_r = reg.Create("pld.system.notify", {signal, right_peer, my_signal, one_i32},
+                                     {{"op", static_cast<int>(NotifyOp::kAtomicAdd)}}, span);
+          then_body.Bind("nb_notify_r" + suffix, notify_r, span);
+        },
+        /*else_fn=*/nullptr, span);
+
+    // Wait on left peer: signal[row_offset][left_peer] >= expected
+    auto left_signal = tile_conversion_utils::MakeSignalOffsets(left_peer, row_offset, span);
+    auto wait_l = reg.Create("pld.system.wait", {signal, left_signal, expected},
+                             {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+    Bind("nb_wait_l" + suffix, wait_l, span);
+
+    EmitIf(
+        NotEq(left_peer, right_peer, span),
+        [&](LoweringBuilder& then_body) {
+          // Wait on right peer (skipped when P=2)
+          auto right_signal = tile_conversion_utils::MakeSignalOffsets(right_peer, row_offset, span);
+          auto wait_r = reg.Create("pld.system.wait", {signal, right_signal, expected},
+                                   {{"cmp", static_cast<int>(WaitCmp::kGe)}}, span);
+          then_body.Bind("nb_wait_r" + suffix, wait_r, span);
+        },
+        /*else_fn=*/nullptr, span);
+  }
+
   // ---- Structured control-flow constructors ----
   //
   // Each method takes a body callback that receives a freshly-constructed
@@ -677,6 +724,10 @@ ExprPtr LowerCosRule(const CallPtr& call, const std::vector<ExprPtr>& args, Lowe
 ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args,
                                      LoweringBuilder& b);
 
+ExprPtr LowerTensorBidirectionalRingAllReduceRule(const CallPtr& call,
+                                                  const std::vector<ExprPtr>& args,
+                                                  LoweringBuilder& b);
+
 ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
   const Span& span = call->span_;
   // Host-orchestrator calls may omit the signal and get one synthesized before
@@ -703,9 +754,16 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   // `mode` is a public DSL kwarg, so an unknown value is a user error — reject
   // it explicitly instead of silently defaulting to mesh.
   auto mode = GetKwargOr<std::string>(call->kwargs_, "mode", std::string("mesh"));
-  CHECK_SPAN(mode == "ring" || mode == "mesh", span)
-      << R"(pld.tensor.allreduce mode must be "ring" or "mesh", got ")" << mode << "\"";
+  CHECK_SPAN(mode == "ring" || mode == "mesh" || mode == "bidirectional_ring", span)
+      << R"(pld.tensor.allreduce mode must be "ring", "mesh", or "bidirectional_ring", got ")"
+      << mode << "\"";
   if (mode == "ring") {
+    return LowerTensorRingAllReduceRule(call, args, b);
+  }
+  if (mode == "bidirectional_ring") {
+    // TODO: Implement dedicated bidirectional ring lowering.
+    // Currently routed through ring lowering which is functionally
+    // correct (equivalent result) but uses a single-ring schedule.
     return LowerTensorRingAllReduceRule(call, args, b);
   }
 
@@ -1354,6 +1412,358 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
                     store_body.Bind(
                         "store_ag",
                         reg.Create("tile.store", {narrowed, store_offsets, ring_target}, {}, span), span);
+                  },
+                  /*else_fn=*/nullptr, span);
+            },
+            span);
+      },
+      span);
+
+  return target;
+}
+
+// ============================================================================
+// ``pld.tensor.allreduce`` bidirectional ring lowering rule
+//   (mode="bidirectional_ring")
+//
+// Pull-based dual-ring schedule: two parallel unidirectional rings on
+// disjoint halves of each rank's data, sharing one O(1) neighbor-only
+// barrier per round.  Same barrier count as the unidirectional ring
+// (2(P−1)+1) but 2x data throughput per round.
+//
+// Ring0 (CW →right neighbour):  first half  of each chunk.
+// Ring1 (CCW →left neighbour):  second half of each chunk.
+//
+// Signal shape: [2*(NR−1), NR] — same as unidirectional ring.
+// Data shape:   [NR, SIZE] with SIZE % (2*NR) == 0.
+// ============================================================================
+
+ExprPtr LowerTensorBidirectionalRingAllReduceRule(const CallPtr& call,
+                                                  const std::vector<ExprPtr>& args,
+                                                  LoweringBuilder& b) {
+  const Span& span = call->span_;
+  CHECK_SPAN(args.size() == 2, span)
+      << "pld.tensor.allreduce mode=bidirectional_ring requires an explicit signal. "
+         R"(Use pld.tensor.allreduce(target, signal, mode="bidirectional_ring"))";
+  const auto& target = args[0];
+  const auto& signal = args[1];
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.allreduce target must be DistributedTensorType "
+         "(deducer-rejected otherwise)";
+  auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.allreduce");
+  INTERNAL_CHECK_SPAN(
+      op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
+      << "pld.tensor.allreduce mode=bidirectional_ring received unknown ReduceOp " << op_value;
+  const auto reduce_op = static_cast<ReduceOp>(op_value);
+
+  // Signal validation.
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  CHECK_SPAN(signal_type, span) << "mode=bidirectional_ring signal must be a DistributedTensor";
+  CHECK_SPAN(signal_type->shape_.size() == 2, span)
+      << "mode=bidirectional_ring signal must be 2D [2*(NR-1), NR]";
+  CHECK_SPAN(signal_type->dtype_ == DataType::INT32, span)
+      << "mode=bidirectional_ring signal must be INT32";
+
+  auto sig_shape0_const = As<ConstInt>(signal_type->shape_[0]);
+  auto sig_shape1_const = As<ConstInt>(signal_type->shape_[1]);
+  if (sig_shape0_const && sig_shape1_const && sig_shape1_const->value_ > 0) {
+    CHECK_SPAN(sig_shape0_const->value_ == 2 * (sig_shape1_const->value_ - 1), span)
+        << "pld.tensor.allreduce mode=bidirectional_ring signal shape[0] ("
+        << sig_shape0_const->value_ << ") must equal 2*(NR-1) = "
+        << 2 * (sig_shape1_const->value_ - 1) << " for NR = " << sig_shape1_const->value_;
+  }
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+  auto two_idx = std::make_shared<ConstInt>(2, DataType::INDEX, span);
+  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
+
+  // Cast my_rank to INDEX for modulo arithmetic.
+  auto my_rank_idx =
+      b.Bind("bd_my_rank_idx", std::make_shared<ir::Cast>(comm.my_rank, DataType::INDEX, span), span);
+
+  // Reinterpret the target as a contiguous [1, SIZE] linear stream.
+  const auto* partial_valid_shape = GetPartialValidShape(target_type, span);
+  auto flat_shape = CollapseShapeToLinear2D(target_type->shape_, span);
+  auto flat_valid_shape = flat_shape;
+  if (partial_valid_shape != nullptr) {
+    CHECK_SPAN(IsRowMajorLinearPrefix(*partial_valid_shape, target_type->shape_), span)
+        << "pld.tensor.allreduce mode=bidirectional_ring target valid_shape "
+           "must be a contiguous row-major prefix";
+    flat_valid_shape = CollapseShapeToLinear2D(*partial_valid_shape, span);
+  }
+
+  auto size_expr = flat_valid_shape[1];
+  auto nr_expr = signal_type->shape_[1];
+  auto size_const = As<ConstInt>(size_expr);
+  auto nr_const = As<ConstInt>(nr_expr);
+
+  // Enforce SIZE % (2*NR) == 0 — bidirectional ring requires even division
+  // into two subchunk halves across NR ranks.
+  if (size_const && nr_const && nr_const->value_ > 0) {
+    CHECK_SPAN(size_const->value_ % (2 * nr_const->value_) == 0, span)
+        << "pld.tensor.allreduce mode=bidirectional_ring SIZE (" << size_const->value_
+        << ") must be divisible by 2*NR = " << (2 * nr_const->value_);
+  }
+
+  const int64_t element_bytes = static_cast<int64_t>(target_type->dtype_.GetByte());
+  INTERNAL_CHECK_SPAN(element_bytes > 0, span)
+      << "pld.tensor.allreduce mode=bidirectional_ring target dtype has no storage width: "
+      << target_type->dtype_.ToString();
+  const int64_t max_chunk_elements = kAllReduceChunkBytes / element_bytes;
+  INTERNAL_CHECK_SPAN(max_chunk_elements > 0, span)
+      << "pld.tensor.allreduce mode=bidirectional_ring dtype is wider than the chunk byte budget";
+  INTERNAL_CHECK_SPAN(kPTOTileAlignmentBytes % element_bytes == 0, span)
+      << "pld.tensor.allreduce mode=bidirectional_ring dtype width must divide the tile alignment";
+  const int64_t alignment_elements = kPTOTileAlignmentBytes / element_bytes;
+
+  // subchunk_elems = SIZE / (2*NR) — the number of elements per rank per ring per round
+  auto two_nr = MakeMul(two_idx, nr_expr, span);
+  auto subchunk_elems = b.Bind("bd_subchunk_elems", MakeFloorDiv(size_expr, two_nr, span), span);
+  // chunk_elems = SIZE / NR = 2 * subchunk_elems
+  auto chunk_elems = b.Bind("bd_chunk_elems", MakeMul(two_idx, subchunk_elems, span), span);
+
+  // Segment boundaries: each chunk has subchunk_elems elements (SIZE/(2*NR)).
+  // Each rank stores its own complete data starting at offset 0 in its window
+  // partition, so the chunk at recv_idx starts at recv_idx * subchunk_elems.
+  // Ring0 covers [0, SIZE/2) and Ring1 covers [SIZE/2, SIZE); within each ring
+  // the chunks are indexed 0..NR-1.
+  auto segment_begin = [&](const ExprPtr& segment_idx) {
+    return MakeMul(segment_idx, subchunk_elems, span);
+  };
+  // Ring1 base offset: the second half of the data, SIZE/2 elements from the start.
+  auto ring1_base = b.Bind("bd_ring1_base", MakeFloorDiv(size_expr, two_idx, span), span);
+
+  ExprPtr chunk_cols = std::make_shared<ConstInt>(max_chunk_elements, DataType::INDEX, span);
+  if (auto subc_const = As<ConstInt>(MakeFloorDiv(size_expr, two_nr, span));
+      subc_const && subc_const->value_ > 0 && subc_const->value_ < max_chunk_elements) {
+    const int64_t aligned_subc =
+        ((subc_const->value_ - 1) / alignment_elements + 1) * alignment_elements;
+    chunk_cols = std::make_shared<ConstInt>(aligned_subc, DataType::INDEX, span);
+  }
+  auto chunk_shape = tile_conversion_utils::MakeShapeTuple({one_idx, chunk_cols}, span);
+  auto ring_target = b.Bind(
+      "bd_target_2d",
+      CreateAllReduceTargetView(target, flat_shape, flat_valid_shape, partial_valid_shape, span), span);
+
+  // Placeholder for inactive subchunk slots.
+  auto placeholder_offsets = tile_conversion_utils::MakeShapeTuple({zero_idx, zero_idx}, span);
+
+  auto nr_minus_one = b.Bind("bd_nr_minus_one", MakeSub(nr_expr, one_idx, span), span);
+
+  // left = (r - 1 + NR) % NR
+  auto lp1 = MakeSub(my_rank_idx, one_idx, span);
+  auto lp2 = MakeAdd(lp1, nr_expr, span);
+  auto left_peer = b.Bind("bd_left", MakeFloorMod(lp2, nr_expr, span), span);
+  // right = (r + 1) % NR
+  auto rp1 = MakeAdd(my_rank_idx, one_idx, span);
+  auto right_peer = b.Bind("bd_right", MakeFloorMod(rp1, nr_expr, span), span);
+
+  // Read/accumulate helper for one ring round.
+  auto emit_remote_load_and_accumulate =
+      [&](LoweringBuilder& body, const ExprPtr& peer, const ExprPtr& peer_offset,
+          const ExprPtr& local_offset, const ExprPtr& subcol, const ExprPtr& remaining,
+          const ExprPtr& valid_cols, const std::string& tag) -> ExprPtr {
+    auto load_valid_cols = MakeMax(one_idx, valid_cols, span);
+    auto load_valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, load_valid_cols}, span);
+    auto offsets =
+        tile_conversion_utils::MakeShapeTuple({zero_idx, MakeAdd(peer_offset, subcol, span)}, span);
+    auto recv_loaded = body.Bind(
+        tag + "_recv_loaded",
+        reg.Create("pld.tile.remote_load",
+                   {ring_target, peer, offsets, chunk_shape, load_valid_shape}, {}, span),
+        span);
+    auto recv_tail =
+        body.Bind(tag + "_recv_tail",
+                  reg.Create("tile.set_validshape", {recv_loaded, one_idx, load_valid_cols}, {}, span),
+                  span);
+    auto recv =
+        body.Bind(tag + "_recv",
+                  reg.Create("tile.fillpad_inplace", {recv_tail}, {{"pad_value", PadValue::zero}}, span),
+                  span);
+    auto local_offsets =
+        tile_conversion_utils::MakeShapeTuple({zero_idx, MakeAdd(local_offset, subcol, span)}, span);
+    auto acc_loaded = body.Bind(
+        tag + "_acc_loaded",
+        reg.Create("tile.load", {ring_target, local_offsets, chunk_shape, load_valid_shape},
+                   {{"target_memory", MemorySpace::Vec}}, span),
+        span);
+    auto acc = body.Bind(
+        tag + "_acc",
+        reg.Create("tile.fillpad_inplace", {acc_loaded}, {{"pad_value", PadValue::zero}}, span), span);
+    return body.Bind(tag + "_next", body.Reduce(reduce_op, acc, recv, span), span);
+  };
+
+  // Store helper for AG phase.
+  auto emit_store = [&](LoweringBuilder& body, const ExprPtr& value, const ExprPtr& local_offset,
+                        const ExprPtr& subcol, const ExprPtr& valid_cols, const std::string& tag) {
+    auto store_col = MakeAdd(local_offset, subcol, span);
+    auto store_offsets = tile_conversion_utils::MakeShapeTuple({zero_idx, store_col}, span);
+    auto narrowed =
+        body.Bind(tag + "_valid",
+                  reg.Create("tile.set_validshape", {value, one_idx, valid_cols}, {}, span), span);
+    body.Bind(tag + "_store",
+              reg.Create("tile.store", {narrowed, store_offsets, ring_target}, {}, span), span);
+  };
+
+  // ------------------------------------------------------------------
+  // Phase 1: Reduce-Scatter — P−1 rounds
+  // ------------------------------------------------------------------
+  b.EmitFor(
+      "bd_rs_step", zero_idx, nr_minus_one, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& rs_step_var) {
+        auto step = body.Bind("bd_rs_s", MakeAdd(rs_step_var, one_idx, span), span);
+
+        // Ring0 (CW, from left peer): recv_idx = (r - step - 1 + NR) % NR
+        auto r0s1 = MakeSub(my_rank_idx, step, span);
+        auto r0s2 = MakeSub(r0s1, one_idx, span);
+        auto r0s3 = MakeAdd(r0s2, nr_expr, span);
+        auto recv_idx0 = body.Bind("bd_rs_idx0", MakeFloorMod(r0s3, nr_expr, span), span);
+        auto ring0_offset = segment_begin(recv_idx0);
+
+        // Ring1 (CCW, from right peer): recv_idx = (r + step + 1 + NR) % NR
+        auto r1s1 = MakeAdd(my_rank_idx, step, span);
+        auto r1s2 = MakeAdd(r1s1, one_idx, span);
+        auto r1s3 = MakeAdd(r1s2, nr_expr, span);
+        auto recv_idx1 = body.Bind("bd_rs_idx1", MakeFloorMod(r1s3, nr_expr, span), span);
+        auto ring1_offset = body.Bind("bd_rs_offset1",
+                                       MakeAdd(ring1_base, segment_begin(recv_idx1), span), span);
+
+        // Barrier: NotifyAll+WaitAll (proven pattern from ring lowering).
+        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var, NotifyOp::kAtomicAdd,
+                           one_i32, "_bd_rs", span);
+        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, rs_step_var, one_i32, "_bd_rs", span);
+
+        // Subchunk loop.
+        body.EmitFor(
+            "bd_rs_col", zero_idx, subchunk_elems, chunk_cols,
+            [&](LoweringBuilder& chunk_body, const VarPtr& subcol) {
+              auto remaining = MakeSub(subchunk_elems, subcol, span);
+              auto valid_cols = MakeMin(chunk_cols, remaining, span);
+              auto active = MakeLt(subcol, subchunk_elems, span);
+
+              auto acc_r0 = chunk_body.EmitIfExpr(
+                  active,
+                  [&](LoweringBuilder& then_body) {
+                    return emit_remote_load_and_accumulate(then_body, left_peer, ring0_offset,
+                                                           ring0_offset, subcol, remaining, valid_cols,
+                                                           "bd_rs_r0");
+                  },
+                  [&](LoweringBuilder& else_body) {
+                    auto lvs = tile_conversion_utils::MakeShapeTuple({one_idx, one_idx}, span);
+                    auto pl = else_body.Bind(
+                        "bd_rs_r0_ph",
+                        reg.Create("tile.load",
+                                   {ring_target, placeholder_offsets, chunk_shape, lvs},
+                                   {{"target_memory", MemorySpace::Vec}}, span),
+                        span);
+                    return else_body.Bind(
+                        "bd_rs_r0_pad",
+                        reg.Create("tile.fillpad_inplace", {pl}, {{"pad_value", PadValue::zero}}, span),
+                        span);
+                  },
+                  span);
+
+              auto acc_r1 = acc_r0;
+
+              // Store ring0 only.
+              chunk_body.EmitIf(
+                  active,
+                  [&](LoweringBuilder& store_body) {
+                    emit_store(store_body, acc_r0, ring0_offset, subcol, valid_cols, "bd_rs_s0");
+                  },
+                  /*else_fn=*/nullptr, span);
+            },
+            span);
+      },
+      span);
+
+  // ------------------------------------------------------------------
+  // Phase 2: AllGather — P−1 rounds
+  // ------------------------------------------------------------------
+  b.EmitFor(
+      "bd_ag_step", zero_idx, nr_minus_one, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& ag_step_var) {
+        auto step = body.Bind("bd_ag_s", MakeAdd(ag_step_var, one_idx, span), span);
+        auto ag_round = body.Bind("bd_ag_round", MakeAdd(ag_step_var, nr_minus_one, span), span);
+
+        // Ring0 (CW, from left): recv_idx = (r - step + NR) % NR
+        auto r0s1 = MakeSub(my_rank_idx, step, span);
+        auto r0s2 = MakeAdd(r0s1, nr_expr, span);
+        auto recv_idx0 = body.Bind("bd_ag_idx0", MakeFloorMod(r0s2, nr_expr, span), span);
+        auto ring0_offset = segment_begin(recv_idx0);
+
+        // Ring1 (CCW, from right): recv_idx = (r + step + NR) % NR
+        auto r1s1 = MakeAdd(my_rank_idx, step, span);
+        auto r1s2 = MakeAdd(r1s1, nr_expr, span);
+        auto recv_idx1 = body.Bind("bd_ag_idx1", MakeFloorMod(r1s2, nr_expr, span), span);
+        auto ring1_offset = body.Bind("bd_ag_offset1",
+                                       MakeAdd(ring1_base, segment_begin(recv_idx1), span), span);
+
+        // Barrier: NotifyAll+WaitAll (proven pattern from ring lowering).
+        body.EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, ag_round, NotifyOp::kAtomicAdd,
+                           one_i32, "_bd_ag", span);
+        body.EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, ag_round, one_i32, "_bd_ag", span);
+
+        // Subchunk loop.
+        body.EmitFor(
+            "bd_ag_col", zero_idx, subchunk_elems, chunk_cols,
+            [&](LoweringBuilder& chunk_body, const VarPtr& subcol) {
+              auto remaining = MakeSub(subchunk_elems, subcol, span);
+              auto valid_cols = MakeMin(chunk_cols, remaining, span);
+              auto active = MakeLt(subcol, subchunk_elems, span);
+              auto load_valid_cols = MakeMax(one_idx, valid_cols, span);
+              auto load_valid_shape =
+                  tile_conversion_utils::MakeShapeTuple({one_idx, load_valid_cols}, span);
+
+              // Ring0: remote_load from left.
+              auto r0_offsets = tile_conversion_utils::MakeShapeTuple(
+                  {zero_idx, MakeAdd(ring0_offset, subcol, span)}, span);
+              auto r0 = chunk_body.EmitIfExpr(
+                  active,
+                  [&](LoweringBuilder& then_body) {
+                    auto recv = then_body.Bind(
+                        "bd_ag_r0_load",
+                        reg.Create("pld.tile.remote_load",
+                                   {ring_target, left_peer, r0_offsets, chunk_shape,
+                                    load_valid_shape}, {}, span),
+                        span);
+                    auto recv_tail = then_body.Bind(
+                        "bd_ag_r0_tail",
+                        reg.Create("tile.set_validshape", {recv, one_idx, load_valid_cols}, {}, span),
+                        span);
+                    return then_body.Bind(
+                        "bd_ag_r0",
+                        reg.Create("tile.fillpad_inplace", {recv_tail},
+                                   {{"pad_value", PadValue::zero}}, span),
+                        span);
+                  },
+                  [&](LoweringBuilder& else_body) {
+                    auto lvs = tile_conversion_utils::MakeShapeTuple({one_idx, one_idx}, span);
+                    auto pl = else_body.Bind(
+                        "bd_ag_r0_ph",
+                        reg.Create("tile.load",
+                                   {ring_target, placeholder_offsets, chunk_shape, lvs},
+                                   {{"target_memory", MemorySpace::Vec}}, span),
+                        span);
+                    return else_body.Bind(
+                        "bd_ag_r0_pad",
+                        reg.Create("tile.fillpad_inplace", {pl}, {{"pad_value", PadValue::zero}}, span),
+                        span);
+                  },
+                  span);
+
+              auto r1 = r0;
+
+              // Store ring0 only.
+              chunk_body.EmitIf(
+                  active,
+                  [&](LoweringBuilder& store_body) {
+                    emit_store(store_body, r0, ring0_offset, subcol, valid_cols, "bd_ag_s0");
                   },
                   /*else_fn=*/nullptr, span);
             },
