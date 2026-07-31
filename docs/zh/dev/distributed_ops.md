@@ -93,6 +93,52 @@ enum class ReduceOp : int { kSum = 0, kMax = 1, kMin = 2, kProd = 3 };  // pld.t
 存根）,并以 `pld.NotifyOp` / `pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp` 暴露给 DSL。
 deducer 会校验打包的 `int` 落在枚举范围内,使 codegen 无需二次保护即可转回。
 
+## 屏障-信号协议
+
+每个 `pld.tensor.*` 集合通信算子（`allreduce`、`barrier`、`broadcast`、
+`reduce_scatter`、`allgather`、`all_to_all`）都使用同一个**自清理信用屏障**
+（self-clearing credit barrier）进行同步，该屏障由 `pld.system.notify` /
+`pld.system.wait` 构建：
+
+```text
+Body:      barrier(1); barrier(2); ...; barrier(N)   # g 在本次调用内计数
+                                                      # （仅本次调用）
+  barrier(g):
+    for peer != my_rank: notify(signal, peer, <my cell>, 1, op=AtomicAdd)
+    for src  != my_rank: wait  (signal, <src cell>, g,   cmp=Ge)
+
+Epilogue:  for src != my_rank:
+               notify(signal, my_rank, <src cell>, -N, op=AtomicAdd)
+```
+
+`AtomicAdd` 把每个 cell 变成一个信用计数器：每次 notify 是生产者的 `+1`，尾声
+（epilogue）是唯一消费者的 `-N`。由于加法与减法是原子的且可交换，一旦所有 rank
+都完成本次调用的尾声，signal 可证明地恢复为全零 —— **signal 不携带任何超出
+单次调用生命周期的状态**，因此每次调用的 generation `g` 都从 1 重新开始，无需
+跨调用记账。慢 rank 在完成当前调用的过程中最多会让快 rank 自己的下次调用
+信用膨胀 1（有界 skew），因此计数器不会溢出，快 rank 也永远不会观察到虚假
+通过。
+
+`Ge`（而非 `Eq`）是关键负载：快 peer 可能在慢 rank 轮询前就把 cell 推到期望值
+之上，因此相等等待会永久阻塞。同理，`Set` 绝对不能与 `AtomicAdd` 混用在同一个
+cell 上 —— set 可能会覆盖已经被推高的计数器。
+
+`N`（尾声要减去的信用总数）可以是**运行时常量** —— `pld.system.notify` 的
+`value` 只需要 `ScalarType` —— 因此 mesh allreduce 的每块信用计数不需要在编译期
+已知。
+
+**约束：**
+
+| 约束 | 原因 |
+| ---- | ---- |
+| 同一个 signal 不能在 mesh（`[NR, 1]`）和 ring（`[2*(NR-1), NR]`）allreduce 之间共享 | mesh 寻址 `[rank, 0]`；ring 寻址 `[row, rank]` —— 形状不匹配，在降级时检查 |
+| 调用在中途被中止（错误/超时）会留下 signal 为非零 | 信用泄漏；在下一次 dispatch 之前通过 host 端重置（`reset_persistent_windows`）恢复 |
+
+由于协议是调用局部的，且 signal 在每次调用开始时始终为零，集合通信在 `for` /
+`while` / `if` 内都是合法的 —— 每次调用都是封闭循环，因此相同的编译期
+`expected` 值在每次迭代中复用。唯一的剩余要求是 rank 均匀执行（任何屏障的固有
+要求）：rank 分叉的控制流会死锁，由 `TWAIT` 的自旋计数断言暴露。
+
 ## 算子参考
 
 ### `pld.tile.remote_load`（TLOAD）
@@ -286,10 +332,11 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
 相同的类型。`mode` 关键字选择降级算法：
 
 - **`"mesh"`（默认）** — 全对全直接交换，O(P) 个 HCCL 窗口。信号 shape
-  `[NR, 1]`（每 rank 一个槽位）。`AtomicAdd 1` / `wait ≥1` ready 屏障之后进入
-  chunk 循环；每个 chunk 执行 `remote_load+accumulate`，再
-  `AtomicAdd 1` 并等待对应的单调 chunk 计数，最后才 store-back，从而避免
-  写后读 (WAR) 竞态。
+  `[NR, 1]`（每 rank 一个槽位）。ready 屏障（generation 1）之后进入 chunk
+  循环；每个 chunk 执行 `remote_load+accumulate`，再对本调用局部的
+  generation 做屏障，最后才 store-back，从而避免写后读 (WAR) 竞态。自清理
+  尾声随后把本次调用的总信用数减回每个 cell（参见
+  [屏障-信号协议](#屏障-信号协议)），因此调用完成后 signal 恢复为全零。
 - **`"ring"`** — NCCL 风格的分块 reduce-scatter + allgather 调度，
   O(1) 个 HCCL 窗口。信号 shape `[2 * (NR − 1), NR]`（每轮 ring 一行，
   每 rank 一个槽位）。packed ND 目标会被视为逻辑 `[1, SIZE]` 线性流；
@@ -301,18 +348,21 @@ chunk，Pass 会保留该元数据，并沿用单矩形路径只归约这个矩�
   MTE 安全地址开始，同时不改变用户可见的 packed 布局。很短的输入仍允许空
   segment。每个 segment 再按最大 16 KiB 的物理 subchunk 处理；FP16 尾块只把
   remote load 的物理读取范围向上对齐到 32 字节，并在归约或写回前恢复逻辑
-  `valid_shape`。每个 subchunk 在 store-back 前都使用该轮 signal 行上的 ready
-  和 read-complete 单调屏障，从而避免写后读 (WAR) 竞态，同时保持 signal shape
-  不变。
+  `valid_shape`。每个 subchunk 在 store-back 前都使用本调用局部的 ready
+  和 read-complete generation 做屏障，从而避免写后读 (WAR) 竞态。自清理
+  尾声随后把本次调用的总信用数从 signal 的每一行中减去。
 
-host-orchestrator 用户代码可以在 `for` 和 `while` 循环外省略 `signal`；
+host-orchestrator 用户代码可以省略 `signal`，包括在 `for` / `while`
+循环内；
 [`SynthesizeAllReduceSignals`](passes/38-synthesize_allreduce_signals.md) 阶段会为该 call 插入 private INT32 signal window，
 语义 shape 为 `[world_size, 1]`（仅 mesh 模式 — `mode="ring"` 必须显式传入
 signal）。该阶段会先插入 standalone `world_size = pld.world_size()` binding，
-再用该变量构造 buffer size 和 window shape。循环内的所有调用都会被拒绝，因为当前 signal 协议只能
-单次使用。显式 `signal` 仍然是 InCore
-lowering 和内部测试使用的形态。通信域物化会把该 signal buffer 保留在与 `src`
-相同的 comm-domain 中，即使它没有传给用户自定义 chip kernel。mesh、ring 和
+再用该变量构造 buffer size 和 window shape。自清理协议（参见
+[屏障-信号协议](#屏障-信号协议)）使每次调用都是无状态循环，
+因此 `for` / `while` 循环内的调用与其他集合通信一样受支持。显式 `signal`
+仍然是 InCore lowering 和内部测试使用的形态。通信域物化会把该 signal buffer
+保留在与 `src` 相同的 comm-domain 中，即使它没有传给用户自定义
+chip kernel。mesh、ring 和
 host builtin 路径均支持 FP16、FP32，以及任意正元素数量下的
 `ReduceOp.Sum`、`Max`、`Min` 和 `Prod`。InCore lowering 使用受 UB 上限约束的
 分块，host builtin 使用 256 元素分块。InCore mesh 和 ring 只把 FP16 remote

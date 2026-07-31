@@ -65,11 +65,10 @@ alloc / window / allreduce 链路。
 以下情况会抛出 `pypto::ValueError`：
 
 - allreduce 位置参数数量不是 `target` 或 `target, signal`；
-- allreduce 出现在 `for` 或 `while` 循环中；
 - allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value。
 
-循环内 allreduce 会被拒绝，因为当前 signal 协议是 single-use；编译器不能在
-动态多次调用之间复用同一个 signal buffer。
+自清理信用屏障协议（见 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议)）使 signal 在每次调用后自动归零，因此 allreduce
+在 `for` / `while` 循环内是合法的 —— 每次调用都是独立封闭的，不会从上次迭代泄漏状态。
 
 ## Pass 属性
 

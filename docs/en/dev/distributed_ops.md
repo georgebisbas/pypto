@@ -102,6 +102,58 @@ bindings → `.pyi` stub) and surfaced to the DSL as `pld.NotifyOp` /
 `pld.WaitCmp` / `pld.AtomicType` / `pld.ReduceOp`. The deducer validates the packed `int`
 against the enum range so codegen can cast back without a second guard.
 
+## Barrier-signal protocol
+
+Every `pld.tensor.*` collective (`allreduce`, `barrier`, `broadcast`,
+`reduce_scatter`, `allgather`, `all_to_all`, `all_to_all_v`) synchronises through one shared,
+**self-clearing credit barrier** built from `pld.system.notify` /
+`pld.system.wait`:
+
+```text
+Body:      barrier(1); barrier(2); ...; barrier(N)   # g counted within this
+                                                      # call only
+  barrier(g):
+    for peer != my_rank: notify(signal, peer, <my cell>, 1, op=AtomicAdd)
+    for src  != my_rank: wait  (signal, <src cell>, g,   cmp=Ge)
+
+Epilogue:  for src != my_rank:
+               notify(signal, my_rank, <src cell>, -N, op=AtomicAdd)
+```
+
+`AtomicAdd` turns each cell into a credit counter: every notify is a
+producer's `+1`, and the epilogue is the sole consumer's `-N`. Because adds
+and subtracts are atomic and commutative, the signal is provably all-zero
+again once every rank has finished its epilogue for a call — **the signal
+carries no state that outlives one call**, so every call's generation `g`
+restarts at 1 and no cross-call bookkeeping is required. A slow rank can
+inflate a fast rank's own next-call credit by at most 1 while it finishes the
+current call (bounded skew), so the counter never overflows and a fast rank
+can never observe a spurious pass.
+
+`Ge` (not `Eq`) is load-bearing: a fast peer can advance a cell past the value
+the waiting rank is looking for before that rank ever polls it, so an
+equality wait would never unblock. For the same reason `Set` must never be
+mixed with `AtomicAdd` on the same cells — a set could clobber an already
+advanced counter.
+
+`N` (the credit total the epilogue subtracts) may be a **runtime scalar** —
+`pld.system.notify`'s `value` only requires `ScalarType` — so a mesh
+allreduce's per-chunk credit count does not need to be known at compile time.
+
+**Constraints:**
+
+| Constraint | Why |
+| ---------- | --- |
+| One signal must not be shared between mesh (`[NR, 1]`) and ring (`[2*(NR-1), NR]`) allreduce | Mesh addresses `[rank, 0]`; ring addresses `[row, rank]` — a shape mismatch, checked at lowering time |
+| A call aborted mid-flight (error / timeout) leaves the signal non-zero | Credits leak; recover via a host-side reset (`reset_persistent_windows`) before the next dispatch |
+
+Because the protocol is call-local and the signal always starts a call at
+all-zero, collectives are legal inside `for` / `while` / `if` — each call is a
+closed cycle, so the same compile-time `expected` values are reused every
+iteration. The only remaining requirement is rank-uniform execution (inherent
+to any barrier): rank-divergent control flow deadlocks, surfaced by `TWAIT`'s
+spin-count assert.
+
 ## Op reference
 
 ### `pld.tile.remote_load` (TLOAD)
@@ -329,10 +381,13 @@ parameter; a type-metadata-only symbol is rejected during PTO codegen. A fully
 dynamic physical target dimension is bound from that tensor parameter.
 
 - **`"mesh"` (default)** — direct all-to-all exchange with O(P) HCCL windows.
-  Signal shape `[NR, 1]` (one cell per rank). An `AtomicAdd 1` / `wait ≥1` ready
-  barrier precedes the chunk loop. Each chunk performs
-  `remote_load+accumulate`, then `AtomicAdd 1` / wait for its monotonic chunk
-  counter before store-back, preventing write-after-read races.
+  Signal shape `[NR, 1]` (one cell per rank). A ready barrier (generation 1)
+  precedes the chunk loop. Each chunk performs `remote_load+accumulate`, then
+  a barrier on its own call-local generation before store-back, preventing
+  write-after-read races. A self-clearing epilogue then subtracts the call's
+  total credit count back out of every cell (see
+  [Barrier-signal protocol](#barrier-signal-protocol)), so the signal is
+  all-zero again once the call completes.
 - **`"ring"`** — NCCL-style chunked reduce-scatter + allgather schedule with
   O(1) HCCL windows.  Signal shape `[2 * (NR − 1), NR]` (one row per ring
   round, one cell per rank). A packed ND target is viewed as one logical
@@ -347,17 +402,20 @@ dynamic physical target dimension is bound from that tensor parameter.
   inputs. Each segment is processed in at most 16-KiB physical subchunks; an
   FP16 ragged remote tail rounds only its physical read span to 32 bytes and
   restores the logical `valid_shape` before reduction or store. Every
-  subchunk uses ready and read-complete barriers on the round's monotonic
-  signal row before store-back, preventing write-after-read races while
-  keeping the signal shape unchanged.
+  subchunk uses ready and read-complete barriers on its own call-local
+  generation before store-back, preventing write-after-read races. A
+  self-clearing epilogue subtracts the call's total credit count back out of
+  every row of the signal afterward.
 
 Host-orchestrator user code may omit `signal` outside `for` and `while` loops;
 the [`SynthesizeAllReduceSignals`](passes/38-synthesize_allreduce_signals.md)
 pass inserts a private INT32 signal window with semantic shape `[world_size, 1]`
 for that call (mesh mode only — `mode="ring"` requires an explicit signal). The
 pass binds `world_size = pld.world_size()` as a standalone statement and uses
-that variable in the synthesized buffer size and window shape. All calls in
-loops are rejected because the current signal protocol is single-use. Explicit
+that variable in the synthesized buffer size and window shape. The
+self-clearing protocol (see [Barrier-signal protocol](#barrier-signal-protocol))
+makes every call a stateless cycle, so calls inside `for` / `while` loops are
+supported like any other collective. Explicit
 `signal` remains the internal form used by InCore lowering and by tests that
 intentionally construct the internal protocol. Comm-domain materialisation then
 keeps the signal buffer in the same domain as `src`, even when it is not passed

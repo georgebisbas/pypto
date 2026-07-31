@@ -168,28 +168,11 @@ class AllReduceSignalSynthesizer : public IRMutator {
     return SeqStmts::Flatten(std::move(prelude), op->span_);
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    ++repeating_scope_depth_;
-    auto result = IRMutator::VisitStmt_(op);
-    --repeating_scope_depth_;
-    return result;
-  }
-
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    ++repeating_scope_depth_;
-    auto result = IRMutator::VisitStmt_(op);
-    --repeating_scope_depth_;
-    return result;
-  }
-
  private:
   void CheckAllReduceCall(const CallPtr& call) const {
     CHECK_SPAN(call->args_.size() == 1 || call->args_.size() == 2, call->span_)
         << "pld.tensor.allreduce expects target[, signal], got " << call->args_.size()
         << " positional arguments";
-    CHECK_SPAN(repeating_scope_depth_ == 0, call->span_)
-        << "pld.tensor.allreduce is not supported inside a for/while loop. "
-           "The signal protocol is single-use and cannot reuse a signal across dynamic invocations.";
   }
 
   struct SignalNames {
@@ -258,7 +241,6 @@ class AllReduceSignalSynthesizer : public IRMutator {
 
   std::set<std::string>* used_names_;
   int64_t* next_id_;
-  int repeating_scope_depth_ = 0;
   bool modified_ = false;
 };
 

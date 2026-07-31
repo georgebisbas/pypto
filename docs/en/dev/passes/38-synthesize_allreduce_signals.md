@@ -73,12 +73,15 @@ The pass raises `pypto::ValueError` when:
 
 - an allreduce call has a positional argument count other than `target` or
   `target, signal`,
-- an allreduce appears inside a `for` or `while` loop,
 - an allreduce appears as a nested expression instead of a direct assignment,
   expression statement, or return value.
 
-Loop allreduce is rejected because the current signal protocol is single-use;
-the compiler must not reuse one signal buffer across dynamic invocations.
+An allreduce inside a `for` / `while` loop is legal: the self-clearing
+credit-barrier protocol (see
+[`LowerCompositeOps`](12-lower_composite_ops.md#barrier-signal-protocol))
+makes every call a stateless cycle that always restarts at generation 1, so a
+signal synthesized (or explicitly passed) before the loop is safely reused on
+every dynamic iteration — no per-call compile-time state to go stale.
 
 ## Pass Properties
 

@@ -893,7 +893,13 @@ def test_explicit_allreduce_eval_stmt_keeps_user_signal():
     assert _as_var(allreduces[0].args[1]).name_hint == "signal"
 
 
-def test_implicit_allreduce_in_loop_is_rejected():
+def test_implicit_allreduce_in_loop_now_succeeds():
+    """A dynamic trip count used to have no compile-time generation to wait for,
+    so this was rejected. The self-clearing credit-barrier protocol (each call
+    restarts at all-zero) removes that restriction — see
+    ``synthesize_allreduce_signals_pass.cpp::CheckAllReduceCall``.
+    """
+
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -910,11 +916,12 @@ def test_implicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    assert len(_get_comm_domain_scopes(host)) >= 1
 
 
-def test_implicit_allreduce_in_while_loop_is_rejected():
+def test_implicit_allreduce_in_while_loop_now_succeeds():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -931,11 +938,12 @@ def test_implicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    assert len(_get_comm_domain_scopes(host)) >= 1
 
 
-def test_explicit_allreduce_in_loop_is_rejected():
+def test_explicit_allreduce_in_loop_now_succeeds():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -954,11 +962,12 @@ def test_explicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    assert len(_get_comm_domain_scopes(host)) >= 1
 
 
-def test_explicit_allreduce_in_while_loop_is_rejected():
+def test_explicit_allreduce_in_while_loop_now_succeeds():
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -977,8 +986,9 @@ def test_explicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    assert len(_get_comm_domain_scopes(host)) >= 1
 
 
 def test_nested_explicit_allreduce_expression_is_rejected():

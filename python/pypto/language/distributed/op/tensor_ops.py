@@ -567,11 +567,15 @@ def allreduce(
     (b) the NCCL-style 2(P-1)-step
     chunked reduce-scatter + allgather ring schedule for ``mode="ring"``.
     In both modes the kernel sees only the lowered primitives.
-    Host-orchestrator code can omit ``signal``
-    outside ``for`` and ``while`` loops; the compiler synthesizes a private
-    INT32 signal window of shape ``[pld.world_size(), 1]`` for that call
-    (mesh mode only — ring mode on the HOST rail is delivered by a
-    subsequent host builtin).
+    Host-orchestrator code can omit ``signal``, including inside ``for`` /
+    ``while`` loops; the compiler synthesizes a private INT32 signal window
+    of shape ``[pld.world_size(), 1]`` for that call (mesh mode only — ring
+    mode on the HOST rail is delivered by a subsequent host builtin).
+
+    Mesh signal shape is ``[NR, 1]``; ring signal shape is
+    ``[2 * (NR − 1), NR]`` (one row per ring round). A signal is reusable
+    across back-to-back calls (see the barrier protocol below), but the two
+    shapes must not share one buffer.
 
     Mesh signal shape is ``[NR, 1]``. The InCore ring schedule uses
     ``[2 * (NR − 1), NR]`` (one row per ring round). The host builtin
@@ -595,12 +599,23 @@ def allreduce(
     ``docs/en/dev/passes/12-lower_composite_ops.md`` for the mesh partial-valid /
     symbolic-extent target constraints (unchanged by this PR).
 
-    **Mesh barrier protocol:** ``AtomicAdd(1) → WaitGe(1)`` is the ready wave.
-    Every reduced chunk then performs ``AtomicAdd(1)`` and waits for the
-    corresponding monotonic counter value before storing that chunk. By the
-    time a fully-valid call returns every non-self row sits at
-    ``1 + chunk_count``; the partial-valid rectangle path ends at ``2``.
-    The skipped self row remains zero.
+    **Barrier protocol (self-clearing credit barrier):** every call's
+    barriers count a call-local generation ``g`` starting at 1 —
+    ``AtomicAdd(1) → WaitGe(g)`` — and a trailing epilogue subtracts the
+    call's total credit ``N`` back out of every non-self cell with a single
+    ``AtomicAdd(-N)``. Adds and subtracts commute, so the signal is provably
+    all-zero again once every rank finishes its epilogue: **the next call on
+    the same signal also starts at generation 1**, with no cross-call state
+    to go stale. ``N`` may be a runtime scalar, so a mesh allreduce's
+    per-chunk credit count does not need to be a compile-time constant.
+
+    In mesh mode, the ready barrier is generation 1; every reduced chunk then
+    barriers on the next generation before storing that chunk (``1 +
+    chunk_count`` credits total for a fully-valid call; the partial-valid
+    rectangle path issues exactly 2). In ring mode, every subchunk of every
+    round barriers on its own call-local ready + read-complete generation
+    pair; the epilogue subtracts ``2 * chunk_count`` (uniform across rounds)
+    from every row of the ``[2*(NR-1), NR]`` signal.
 
     Ring mode first views a packed ND target as one linear stream, then
     traverses each segment in physical subchunks of at most 16 KiB. FP32 uses
@@ -609,11 +624,11 @@ def allreduce(
     ``valid_shape`` before reduction and store. This also covers ``SIZE < NR``
     without changing the packed public layout or dropping elements.
 
-    **Ring barrier protocol:** each ring round owns one row of the
-    ``[2*(NR-1), NR]`` signal. Every subchunk advances that row twice:
-    a ready barrier before remote reads and a read-complete barrier before
-    store-back. The monotonic expected values are ``2*chunk_id+1`` and
-    ``2*chunk_id+2``. The skipped self column remains zero.
+    A signal buffer is safely reusable across back-to-back allreduce calls —
+    including inside ``for`` / ``while`` / ``if`` — since every call is a
+    stateless cycle starting from all-zero. A call aborted mid-flight (error
+    or timeout) leaves credits on the signal; recover with a host-side reset
+    (``reset_persistent_windows``) before the next dispatch.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
@@ -621,9 +636,9 @@ def allreduce(
             :class:`pl.Tensor` and unsupported dtypes.
         signal: Optional window-bound INT32 :class:`pld.DistributedTensor`.
             In InCore code this remains required. In host-orchestrator code,
-            omitting it outside ``for`` and ``while`` loops lets the compiler
-            synthesize a private signal of shape ``[pld.world_size(), 1]``.
-            Allreduce calls in those loops are rejected for both signatures.
+            omitting it — including inside ``for`` / ``while`` loops — lets
+            the compiler synthesize a private signal of shape
+            ``[pld.world_size(), 1]``.
         op: :class:`pld.ReduceOp` selecting element-wise ``Sum``, ``Max``,
             ``Min``, or ``Prod`` (keyword-only). Defaults to
             :attr:`pld.ReduceOp.Sum`.
@@ -677,17 +692,14 @@ def barrier(
 
         sig = pld.tensor.barrier(sig)
 
-    **Signal shape:** host builtins require rank-1 ``[world_size]``. InCore
-    composites take rank-2 ``[nranks, 1]`` -- the rank count may be dynamic.
-
-    **Signal buffer is single-shot per call.**  The lowering uses
-    ``Set(1)`` + ``Ge(1)`` — cells go from 0 to 1.  Do not reuse the
-    same signal buffer for back-to-back barriers without reallocation.
+    **Reusable across calls** — see :func:`allreduce` for the shared
+    self-clearing credit-barrier protocol. Each call is a stateless cycle
+    that restarts at generation 1, so ``sig`` may be reused for back-to-back
+    barriers, including inside ``for`` / ``while`` / ``if``.
 
     Args:
         signal: Window-bound INT32 :class:`pld.DistributedTensor` whose
-            shape provides one cell per rank.  Must be freshly allocated
-            for this call.
+            shape provides one cell per rank.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``signal``.
@@ -726,7 +738,8 @@ def broadcast(
             data.  Root must stage its data before the call; non-root slots
             are ignored on input.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for the
-            cross-rank barrier.  Single-shot per call.
+            cross-rank barrier.  Reusable across calls — see
+            :func:`allreduce` for the shared barrier protocol.
         root: Root rank index (int, keyword-only).  Must be non-negative.
 
     Returns:
@@ -769,7 +782,9 @@ def allgather(
         target: :class:`pld.DistributedTensor` ``[NR, SIZE]`` result window.
             After the call, ``target[src, :]`` holds the chunk from rank
             ``src``.
-        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier tensor.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier
+            tensor. Reusable across calls — see :func:`allreduce` for the
+            shared barrier protocol.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).
@@ -805,7 +820,9 @@ def reduce_scatter(
         target: Window-bound :class:`pld.DistributedTensor` of shape
             [NR, SIZE].  Each rank stages all NR chunks, one per row.
         signal: Window-bound INT32 :class:`pld.DistributedTensor` for
-            the cross-rank barrier.  Single-shot per call.
+            the cross-rank barrier. Reusable across calls (2 credits per
+            call — ready + post-reduce) — see :func:`allreduce` for the
+            shared barrier protocol.
         op: :class:`pld.ReduceOp` (keyword-only).  ``Sum`` only in
             first version; ``Max`` / ``Min`` / ``Prod`` reserved.
 
@@ -850,9 +867,9 @@ def all_to_all(
         target: :class:`pld.DistributedTensor` [NR, SIZE] window that receives
             the result in-place.  After the call,
             ``target[src, :]`` holds the chunk received from rank ``src``.
-        signal: Window-bound INT32 :class:`pld.DistributedTensor` barrier
-            tensor.  Rank-1 ``[world_size]`` or rank-2 ``[world_size, 1]``
-            for host builtins; rank-2 ``[nranks, 1]`` for InCore composites.
+        signal: :class:`pld.DistributedTensor` [NR, 1] INT32 barrier.
+            Reusable across calls — see :func:`allreduce` for the shared
+            barrier protocol.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` (window-as-result).
