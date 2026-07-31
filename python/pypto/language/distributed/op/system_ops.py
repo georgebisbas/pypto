@@ -37,6 +37,7 @@ from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
 from pypto.language.typing import IntLike, Scalar
+from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
@@ -121,7 +122,7 @@ def nranks(ctx: CommCtx) -> Scalar:
 
 
 def notify(
-    target: DistributedTensor,
+    target: Tensor,
     peer: IntLike,
     offsets: Sequence[IntLike],
     value: IntLike,
@@ -158,7 +159,7 @@ def notify(
 
 
 def wait(
-    signal: DistributedTensor,
+    signal: Tensor,
     offsets: Sequence[IntLike],
     expected: IntLike,
     *,
