@@ -53,32 +53,29 @@ The lowest-level synchronisation primitive. Each rank writes to a peer's
 signal cell, then blocks until its own cell has been written.
 
 ```python
-@pl.program
-class SignalHandshake:
-    @pl.function(type=pl.FunctionType.InCore)
-    def handshake_step(
-        self,
-        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-        signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
-        peer: pl.Scalar[pl.INT32],
-        tag: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, 1], pl.INT32]:
-        # 1. Write our tag into the peer's signal cell.
-        pld.system.notify(
-            signal, peer=peer, offsets=[0, 0],
-            value=tag, op=pld.NotifyOp.Set,
-        )
+@pl.jit.incore
+def handshake_step(
+    out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+    peer: pl.Scalar[pl.INT32],
+    tag: pl.Scalar[pl.INT32],
+) -> pl.Tensor[[1, 1], pl.INT32]:
+    # 1. Write our tag into the peer's signal cell.
+    pld.system.notify(
+        signal, peer=peer, offsets=[0, 0],
+        value=tag, op=pld.NotifyOp.Set,
+    )
 
-        # 2. Wait until our own cell has been written.
-        pld.system.wait(
-            signal=signal, offsets=[0, 0],
-            expected=1, cmp=pld.WaitCmp.Ge,
-        )
+    # 2. Wait until our own cell has been written.
+    pld.system.wait(
+        signal=signal, offsets=[0, 0],
+        expected=1, cmp=pld.WaitCmp.Ge,
+    )
 
-        # 3. Read the received tag back out.
-        received = pl.load(signal, [0, 0], [1, 1])
-        out = pl.store(received, [0, 0], out)
-        return out
+    # 3. Read the received tag back out.
+    received = pl.load(signal, [0, 0], [1, 1])
+    out = pl.store(received, [0, 0], out)
+    return out
 ```
 
 > The `wait` uses `Ge` with `expected=1`, which means the peer's `tag`

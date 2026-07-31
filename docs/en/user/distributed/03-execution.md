@@ -89,10 +89,11 @@ with compiled.prepare() as rt:
 ```python
 import torch
 from pypto.ir.distributed_compiled_program import DistributedConfig
-from pypto import ir
+from pypto.runtime import RunConfig
 
 dc = DistributedConfig(device_ids=[0, 1, 2, 3])
-compiled = ir.compile(HelloAllReduce, platform="a2a3", distributed_config=dc)
+cfg = RunConfig(platform="a2a3", distributed_config=dc)
+compiled = orchestrator.compile(config=cfg)   # reads shapes from orchestrator's own annotations
 
 inputs = torch.randn(4, 1, 256)
 outputs = torch.zeros_like(inputs)

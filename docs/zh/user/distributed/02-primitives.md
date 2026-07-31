@@ -45,27 +45,24 @@
 最底层的同步原语。每个 rank 写入对端信号槽，然后阻塞直到自己的槽被写入。
 
 ```python
-@pl.program
-class SignalHandshake:
-    @pl.function(type=pl.FunctionType.InCore)
-    def handshake_step(
-        self,
-        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-        signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
-        peer: pl.Scalar[pl.INT32],
-        tag: pl.Scalar[pl.INT32],
-    ) -> pl.Tensor[[1, 1], pl.INT32]:
-        pld.system.notify(
-            signal, peer=peer, offsets=[0, 0],
-            value=tag, op=pld.NotifyOp.Set,
-        )
-        pld.system.wait(
-            signal=signal, offsets=[0, 0],
-            expected=1, cmp=pld.WaitCmp.Ge,
-        )
-        received = pl.load(signal, [0, 0], [1, 1])
-        out = pl.store(received, [0, 0], out)
-        return out
+@pl.jit.incore
+def handshake_step(
+    out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+    peer: pl.Scalar[pl.INT32],
+    tag: pl.Scalar[pl.INT32],
+) -> pl.Tensor[[1, 1], pl.INT32]:
+    pld.system.notify(
+        signal, peer=peer, offsets=[0, 0],
+        value=tag, op=pld.NotifyOp.Set,
+    )
+    pld.system.wait(
+        signal=signal, offsets=[0, 0],
+        expected=1, cmp=pld.WaitCmp.Ge,
+    )
+    received = pl.load(signal, [0, 0], [1, 1])
+    out = pl.store(received, [0, 0], out)
+    return out
 ```
 
 > `wait` 使用 `Ge` 且 `expected=1`，对端的 `tag` **必须 >= 1**。传入 `tag=0`

@@ -15,93 +15,88 @@ import pypto.language.distributed as pld
 NR = pl.dynamic("NR")
 SIZE = 256
 
-@pl.program
-class HelloAllReduce:
-    @pl.function(type=pl.FunctionType.InCore)
-    def reduce_step(
-        self,
-        inp: pl.Tensor[[1, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-        ctx = pld.get_comm_ctx(data)
-        my_rank = pld.rank(ctx)
-        nranks = pld.nranks(ctx)
+@pl.jit.incore
+def reduce_step(
+    inp: pl.Tensor[[1, SIZE], pl.FP32],
+    out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+) -> pl.Tensor[[1, SIZE], pl.FP32]:
+    ctx = pld.get_comm_ctx(data)
+    my_rank = pld.rank(ctx)
+    nranks = pld.nranks(ctx)
 
-        # 1. Stage-in: copy local input into this rank's window slice.
-        local = pl.load(inp, [0, 0], [1, SIZE])
-        data = pl.store(local, [0, 0], data)
+    # 1. Stage-in: copy local input into this rank's window slice.
+    local = pl.load(inp, [0, 0], [1, SIZE])
+    data = pl.store(local, [0, 0], data)
 
-        # 2. Barrier: notify every peer, then wait on every peer.
-        for peer in pl.range(nranks):
-            if peer != my_rank:
-                pld.system.notify(
-                    signal, peer=peer, offsets=[my_rank, 0],
-                    value=1, op=pld.NotifyOp.AtomicAdd,
-                )
-        for src in pl.range(nranks):
-            if src != my_rank:
-                pld.system.wait(
-                    signal, offsets=[src, 0],
-                    expected=1, cmp=pld.WaitCmp.Ge,
-                )
+    # 2. Barrier: notify every peer, then wait on every peer.
+    for peer in pl.range(nranks):
+        if peer != my_rank:
+            pld.system.notify(
+                signal, peer=peer, offsets=[my_rank, 0],
+                value=1, op=pld.NotifyOp.AtomicAdd,
+            )
+    for src in pl.range(nranks):
+        if src != my_rank:
+            pld.system.wait(
+                signal, offsets=[src, 0],
+                expected=1, cmp=pld.WaitCmp.Ge,
+            )
 
-        # 3. Compute: accumulate every peer's slice.
-        acc = pl.load(data, [0, 0], [1, SIZE])
-        for peer in pl.range(nranks):
-            if peer != my_rank:
-                peer_tile = pld.tile.remote_load(
-                    data, peer=peer, offsets=[0, 0], shape=[1, SIZE]
-                )
-                acc = pl.add(acc, peer_tile)
+    # 3. Compute: accumulate every peer's slice.
+    acc = pl.load(data, [0, 0], [1, SIZE])
+    for peer in pl.range(nranks):
+        if peer != my_rank:
+            peer_tile = pld.tile.remote_load(
+                data, peer=peer, offsets=[0, 0], shape=[1, SIZE]
+            )
+            acc = pl.add(acc, peer_tile)
 
-        # 4. Stage-out: store the accumulator to local output.
-        return pl.store(acc, [0, 0], out)
+    # 4. Stage-out: store the accumulator to local output.
+    return pl.store(acc, [0, 0], out)
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def chip_orch(
-        self,
-        inp: pl.Tensor[[1, SIZE], pl.FP32],
-        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-        data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-        signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-        # Per-device orchestration wrapper — HOST dispatches this, not the
-        # InCore kernel directly.
-        return self.reduce_step(inp, out, data, signal)
+@pl.jit
+def chip_orch(
+    inp: pl.Tensor[[1, SIZE], pl.FP32],
+    out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+    signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+) -> pl.Tensor[[1, SIZE], pl.FP32]:
+    # Per-device orchestration wrapper — HOST dispatches this, not the
+    # InCore kernel directly.
+    return reduce_step(inp, out, data, signal)
 
-    @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-    def orchestrator(
-        self,
-        inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
-        outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
-    ) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
-        data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
-        signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+@pl.jit.host
+def orchestrator(
+    inputs: pl.Tensor[[NR, 1, SIZE], pl.FP32],
+    outputs: pl.Out[pl.Tensor[[NR, 1, SIZE], pl.FP32]],
+) -> pl.Tensor[[NR, 1, SIZE], pl.FP32]:
+    data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+    signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
 
-        for r in pl.range(pld.world_size()):
-            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
-            signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
-            self.chip_orch(inputs[r], outputs[r], data, signal, device=r)
-        return outputs
+    for r in pl.range(pld.world_size()):
+        data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+        signal = pld.window(signal_buf, [pld.world_size(), 1], dtype=pl.INT32)
+        chip_orch(inputs[r], outputs[r], data, signal, device=r)
+    return outputs
 ```
 
 ### Running It
 
-Save the class above and the driver below into the same file (`script.py`):
+Save the functions above and the driver below into the same file (`script.py`):
 
 ```python
 import torch
-from pypto import ir
+from pypto.runtime import RunConfig
 from pypto.ir.distributed_compiled_program import DistributedConfig
 
 dc = DistributedConfig(device_ids=[0, 1])
-compiled = ir.compile(HelloAllReduce, platform="a2a3", distributed_config=dc)
+cfg = RunConfig(platform="a2a3", distributed_config=dc)
 
 inputs = torch.randn(2, 1, SIZE)
 outputs = torch.zeros_like(inputs)
-compiled(inputs, outputs)   # blocks until both ranks finish
+orchestrator(inputs, outputs, config=cfg)   # blocks until both ranks finish
 ```
 
 This is the "one-shot" dispatch pattern. See [03-execution](03-execution.md)
@@ -142,18 +137,17 @@ full API is at [01-collectives](01-collectives.md).
 The HOST function allocates window buffers, dispatches kernels, and manages
 the control plane:
 
-- Declared with `@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)`
-  or `@pl.jit.host`
+- Declared with `@pl.jit.host`
 - Calls `alloc_window_buffer`, `window()`, and per-rank dispatch via `device=r`
 - Runs once per process — not on the NPU
-- Dispatches a per-device `@pl.function(type=pl.FunctionType.Orchestration)`
-  wrapper (not the `InCore` kernel directly) — see Per-Rank Dispatch below
+- Dispatches a per-device `@pl.jit` wrapper (not the `InCore` kernel directly)
+  — see Per-Rank Dispatch below
 
 ### InCore Kernel
 
 The InCore function runs on the NPU device:
 
-- Declared with `@pl.function(type=pl.FunctionType.InCore)`
+- Declared with `@pl.jit.incore`
 - Receives window-bound `DistributedTensor` arguments
 - Uses `notify`/`wait` for cross-rank sync, `remote_load`/`remote_store` for RMA
 - Never calls `alloc_window_buffer` or `world_size()`
@@ -161,8 +155,8 @@ The InCore function runs on the NPU device:
 ### Per-Rank Dispatch
 
 HOST never dispatches an `InCore` function directly. It dispatches a per-device
-`@pl.function(type=pl.FunctionType.Orchestration)` wrapper by setting `device=r`
-in the function call; that wrapper then calls the `InCore` kernel with no
+`@pl.jit` wrapper by setting `device=r` in the function call; that wrapper then
+calls the `InCore` kernel with no
 `device=` argument. Each rank sees its own view of the symmetric window
 buffers through `CommContext`.
 
@@ -177,19 +171,19 @@ across dispatches.
 ### Control Plane vs Execution Plane
 
 ```text
-HOST orchestrator (@pl.function(level=HOST, role=Orchestrator))
-  ├── alloc_window_buffer(...)        ← control plane: declare layout
-  ├── window(buf, shape, dtype)       ← control plane: create typed view
-  └── for r in ranks:                 ← dispatch loop
-        self.chip_orch(..., device=r) ← bridges to the per-device wrapper
+HOST orchestrator (@pl.jit.host)
+  ├── alloc_window_buffer(...)   ← control plane: declare layout
+  ├── window(buf, shape, dtype)  ← control plane: create typed view
+  └── for r in ranks:            ← dispatch loop
+        chip_orch(..., device=r) ← bridges to the per-device wrapper
 
-Orchestration wrapper (@pl.function(type=Orchestration))
-  └── self.reduce_step(...)          ← calls the InCore kernel, no device=
+Orchestration wrapper (@pl.jit)
+  └── reduce_step(...)           ← calls the InCore kernel, no device=
 
-InCore kernel (@pl.function(type=InCore))
-  ├── notify / wait                  ← execution plane: cross-rank sync
-  ├── remote_load                    ← execution plane: read peer data
-  └── store                          ← execution plane: write local output
+InCore kernel (@pl.jit.incore)
+  ├── notify / wait               ← execution plane: cross-rank sync
+  ├── remote_load                 ← execution plane: read peer data
+  └── store                       ← execution plane: write local output
 ```
 
 ## Line-by-Line Walkthrough
@@ -203,7 +197,7 @@ InCore kernel (@pl.function(type=InCore))
 | `pld.system.wait(..., cmp=Ge, expected=1)` | Blocks until the local signal slot reaches at least 1 — meaning all peer notifies have landed. |
 | `pld.tile.remote_load(...)` | Reads a **remote** slice of a `DistributedTensor` into a local tile. This is the tile-level cross-rank equivalent of `pl.tile.load`. |
 | `pl.add(acc, peer_tile)` | The local add loop sums all peer contributions. After the loop, `acc` holds `sum(inputs[*])`. |
-| `chip_orch` (`@pl.function(type=Orchestration)`) | HOST dispatches this per-device wrapper via `device=r`, not the `InCore` kernel directly. It then calls `reduce_step` with no `device=` argument. |
+| `chip_orch` (`@pl.jit`) | HOST dispatches this per-device wrapper via `device=r`, not the `InCore` kernel directly. It then calls `reduce_step` with no `device=` argument. |
 | `inputs[r]` / `outputs[r]` | Indexing drops the leading rank dimension, giving `reduce_step` the rank-2 `[1, SIZE]` shape it declares — `pl.slice` with an explicit shape would keep the dimension and produce a rank mismatch. |
 
 ## See Also

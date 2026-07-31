@@ -170,7 +170,7 @@ runs and whether you need `mode="ring"`:
 
 | Aspect | InCore Hand-Rolled | InCore Composite | HOST Builtin |
 | ------ | ------------------ | ---------------- | ------------ |
-| **Where** | `@pl.function(type=InCore)` | `@pl.function(type=InCore)` | `@pl.function(level=HOST, role=Orchestrator)` |
+| **Where** | `@pl.jit.incore` | `@pl.jit.incore` | `@pl.jit.host` |
 | **How** | Manual `notify`/`wait` + `remote_load` loops | `pld.tensor.allreduce(data, sig, ...)` called directly | `pld.tensor.allreduce(data, [sig,] ...)` called directly |
 | **Lowering** | You write the primitives | `LowerCompositeOps` | `LowerHostTensorCollectives` |
 | **Modes** | Whatever you implement | `mesh` and `ring` | `mesh` only |

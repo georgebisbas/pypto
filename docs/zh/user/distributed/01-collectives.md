@@ -164,7 +164,7 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 
 | 方面 | InCore 手写 | InCore 组合调用 | Host 级别内置 |
 | ---- | ----------- | --------------- | ------------- |
-| **位置** | `@pl.function(type=InCore)` | `@pl.function(type=InCore)` | `@pl.function(level=HOST, role=Orchestrator)` |
+| **位置** | `@pl.jit.incore` | `@pl.jit.incore` | `@pl.jit.host` |
 | **实现** | 手写 `notify`/`wait` + `remote_load` 循环 | 直接调用 `pld.tensor.allreduce(data, sig, ...)` | 直接调用 `pld.tensor.allreduce(data, [sig,] ...)` |
 | **Lowering** | 自行实现原语 | `LowerCompositeOps` | `LowerHostTensorCollectives` |
 | **支持的模式** | 取决于自己的实现 | `mesh` 和 `ring` | 仅 `mesh` |
