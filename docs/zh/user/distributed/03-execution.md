@@ -10,19 +10,21 @@ fork chip 进程、组装 kernel——分摊到可复用的 `DistributedWorker` 
 分发可执行多次。
 
 ```python
-from pypto.runtime import DistributedWorker
-
-with DistributedWorker(compiled) as rt:
+with compiled.prepare() as rt:
     rt(host_x, host_out)
     # ... 更多分发 ...
 # rt.close() 在退出时自动执行——释放 buffer 并关闭 worker。
 ```
 
+`compiled.prepare()` 返回一个 `DistributedWorker`（也可以通过
+`DistributedWorker(compiled)` 直接构造，可从 `pypto.runtime` 导入，但
+`prepare()` 是文档约定的入口）。
+
 ### 方法
 
 | 方法 | 描述 |
 | ---- | ---- |
-| `compiled.prepare(config=None, callbacks=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | 创建 worker、fork 芯片进程，返回 `DistributedWorker`。作为上下文管理器使用。 |
 | `rt(x, y, z)` | 单次分发——转换参数，调用 host_orch。 |
 | `rt.run(compiled, x, y, z)` | 多程序分发——选择目标程序。 |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | 分配 worker 常驻的 `DeviceTensor`。`init` 从 host 拷贝（一次性 H2D）。 |
@@ -32,6 +34,19 @@ with DistributedWorker(compiled) as rt:
 | `rt.copy_stacked_from(stacked, host_out)` | 把每个分片 D2H 读回 `host_out`（共享内存，须在 `prepare()` 前分配）。 |
 | `rt.release_inherited_host_tensor_refs()` | fork 后释放运行时在父进程中持有的 host 引用。 |
 | `rt.close()` | 释放 buffer，关闭芯片 worker。作为上下文管理器时自动调用。 |
+
+### 值得了解的 `prepare()` 参数
+
+- **`config`**——可选的 `RunConfig`，仅用于按给定的 ring sizing 预热
+  runtime arena 缓存，使首次派发跳过约 800ms 的冷构建。它**不会被保留**：
+  每次派发仍需自己传入 `config=`。预热只有在*首次*派发的 sizing 与预热
+  时使用的一致时才有收益——见 `docs/en/dev/05-runtime-ring-sizing.md` 中
+  arena 预热一节。
+- **`persistent=True`**——在 worker 整个生命周期内保留 CommDomain
+  window，而不是每次派发都分配/释放。与 **`reset_persistent_windows`**
+  搭配使用，后者决定保留的 window 是否在两次请求之间清零（正确性与
+  开销的权衡）。见 `docs/en/dev/06-persistent-l3.md`。
+- **`extra_compiled`**——见下方"在同一个 worker 上运行多个程序"。
 
 ## DeviceTensor
 
@@ -83,11 +98,16 @@ compiled(inputs, outputs)   # 阻塞直到所有 rank 完成
 
 ### 持久 Worker（重复派发）
 
+在多次派发之间复用同一个 worker 对象——这是任何 `DistributedWorker` 的
+默认生命周期。（不要与上文的 `persistent=True` CommDomain-window 保留
+标志混淆——那是一个可选项，用于跳过每次派发的 window 分配/释放；本节
+展示的分摊 fork/通信引导开销，无论 `persistent=` 取值如何都会发生。）
+
 ```python
 host_x = torch.zeros((4, 1, 256), dtype=torch.float32).share_memory_()
 host_out = torch.zeros_like(host_x).share_memory_()
 
-with DistributedWorker(compiled) as rt:
+with compiled.prepare() as rt:
     for step in steps:
         host_x.copy_(next_input(step))
         rt(host_x, host_out)
@@ -119,14 +139,8 @@ worker 复用其芯片进程和通信设置——没有 fork 开销。`compiled_
 
 ## CLI 启动
 
-分布式程序的启动方式与单设备程序完全一样——直接 `python script.py`。
-`DistributedConfig(device_ids=[...])` 决定 rank 数量和使用的设备；运行时
-会从这一个 Python 进程中为每个设备 fork 出一个 worker 进程，因此不需要
-调用单独的多进程启动器。
-
-```bash
-python script.py
-```
+分布式程序的启动方式与单设备程序完全一样——见 [00-model](00-model.md)
+中的"启动命令"一节：直接 `python script.py`，不需要单独的多进程启动器。
 
 ## 环境变量
 

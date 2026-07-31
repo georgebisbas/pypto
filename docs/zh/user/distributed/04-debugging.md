@@ -23,9 +23,15 @@ rank 上。
 > **`alloc_window_buffer` 传入 rank 数量而非字节数：** `size` 参数以**字节**
 > 为单位。使用 shape+dtype 重载。
 >
-> **`device_ids` 与 `device=` 不匹配：** `DistributedConfig.device_ids` 必须
-> 与编排器中 per-rank 分发使用的 device ID 一致。例如 `device_ids=[0, 1]`
-> 却用 `device=r`（`r` 遍历 `range(4)`）派发，会导致未定义行为。
+> **分发循环的执行次数与 `device_ids` 不匹配：** `device_ids` 是物理卡 ID
+>（例如来自 `--device 4,5`），不要求从 0 开始或连续。`device=r` 则是一个
+> *逻辑* rank 索引，始终按 `[0, world)` 校验，其中
+> `world = len(device_ids)`；运行时按 `rank r -> device_ids[r]` 映射。真正
+> 重要的不变量是分发循环的执行次数等于 `len(device_ids)`——写成
+> `for r in pl.range(pld.world_size())` 时会自动满足。不匹配的例子：
+> `device_ids=[0, 1, 2, 3]`（4 张卡）但分发循环只覆盖 `range(2)`，会让
+> 2 张卡未被派发，导致未定义行为（`MaterializeCommDomainScopes` 要求
+> `device=r` 循环的范围必须是 `[0, N)`）。
 
 ## 诊断标志
 

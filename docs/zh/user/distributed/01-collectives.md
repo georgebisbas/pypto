@@ -4,6 +4,10 @@
 每个 rank 必须以相同形状的 signal tensor 调用同一集合通信，否则程序会挂起
 或静默数据损坏。
 
+> **说明：** 以下代码块均为示意性片段——每段仅展示该集合通信相关的原语调用，
+> 省略了 `my_rank`/`nranks` 推导、buffer 分配、输入数据搬入等设置代码，并非
+> 可直接运行的程序。可运行版本见下方"可运行示例"一节。
+
 ## AllReduce
 
 每个 rank 提交其本地数据；每个 rank 接收规约结果（`op=` 选择 `Sum`、`Max`、
@@ -30,7 +34,11 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 - 2(P-1) 步：reduce-scatter + allgather
 - 每步 O(N/P) 远程流量——每个 rank 读取一个邻居
 - Signal 形状：`[2 × (NR − 1), NR]`
-- 要求编译时已知 NR——使用工厂函数模式
+- 要求编译时已知 NR——使用工厂函数模式：外层 Python 函数接收 `nr`/`size`，
+  推导出 `total_rounds = 2 * (nr - 1)`，并在自己的函数体内定义
+  `@pl.program` 类，使 `[total_rounds, nr]` 成为编译期常量（参见下方
+  "可运行示例"一节中的
+  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`）
 - 最适合大消息（>16 KiB）和高带宽
 
 | 方面 | Mesh | Ring |
@@ -168,6 +176,21 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 其余五种集合通信（`barrier`、`broadcast`、`allgather`、`reduce_scatter`、
 `all_to_all`）始终需要调用方显式分配并传入 signal。当需要 `mode="ring"`
 时改用 InCore 组合调用，因为 Host 内置路径只 lowering `mesh`。
+
+## 可运行示例
+
+上面每种集合通信在 `tests/st/distributed/` 下都有可运行的对应测试
+（以下路径均相对该目录）：
+
+| 集合通信 | InCore 手写 | InCore 组合调用 | HOST 内置 |
+| -------- | ----------- | --------------- | --------- |
+| allreduce | `collectives/test_l3_allreduce.py` | `collectives/test_l3_tensor_allreduce_intrinsic.py` | `test_l3_host_tensor_allreduce.py` |
+| allreduce（ring） | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | 无（仅 mesh） |
+| barrier | — | `collectives/test_l3_tensor_barrier_intrinsic.py` | `test_l3_host_tensor_barrier.py` |
+| broadcast | `collectives/test_l3_broadcast.py` | `collectives/test_l3_tensor_broadcast_intrinsic.py` | `test_l3_host_tensor_broadcast.py` |
+| allgather | `collectives/test_l3_allgather.py` | `collectives/test_l3_tensor_allgather_intrinsic.py` | `test_l3_host_tensor_allgather.py` |
+| reduce_scatter | `collectives/test_l3_reduce_scatter.py` | `collectives/test_l3_tensor_reduce_scatter_intrinsic.py` | `test_l3_host_tensor_reduce_scatter.py` |
+| all_to_all | `collectives/test_l3_all_to_all.py` | `collectives/test_l3_tensor_all_to_all_intrinsic.py` | `test_l3_host_tensor_all_to_all.py` |
 
 ## 相关链接
 

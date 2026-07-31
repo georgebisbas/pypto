@@ -3,6 +3,10 @@
 大多数用户应直接调用 `pld.tensor.*` 集合通信——只有在构建自定义协议时
 才需要这些更底层的原语。
 
+> **说明：** 下面 notify/wait、put/get 以及 remote-load/store 的代码块均为
+> 示意性片段——省略了 `nranks`/`my_rank` 推导和 buffer 设置，并非可直接
+> 运行的程序。可运行版本见下方"可运行示例"一节。
+
 ## 类型与枚举
 
 | 名称 | 取值 | 描述 |
@@ -75,6 +79,10 @@ class SignalHandshake:
 | N-to-1 屏障（多个写者一个槽） | `AtomicAdd` | `Ge` | 每个写者原子累加，等待总量 |
 | 多轮协议 | `AtomicAdd` | `Ge` | 计数跨轮推进 |
 
+**2 个 rank 的预期输出：** rank 0 写入 tag=2，等待来自 rank 1 的 tag 1：
+`outputs[0] == 1`。rank 1 写入 tag=1，等待来自 rank 0 的 tag 2：
+`outputs[1] == 2`。结果：`outputs == [[1], [2]]`。
+
 > **Buffer 重用安全：** Signal 使用单调计数器且不会自重置。不要在背靠背集合通信中
 > 重用同一 signal buffer。每次调用分配新 buffer。
 
@@ -82,14 +90,19 @@ class SignalHandshake:
 
 | 名称 | 签名 | 描述 |
 | ---- | ---- | ---- |
-| `remote_load` | `(target, peer, offsets, shape, valid_shape=None) -> Tile` | 加载对端区域到本地 tile。 |
+| `remote_load` | `(target, peer, offsets, shape, valid_shape=None) -> Tile` | 加载对端区域到本地 tile。`shape` 定义 tile 维度。`valid_shape` 可在物理 tile 保持固定大小的同时，让参差不齐的尾部只读取真实数据。Offsets 必须与对端写入时使用的一致——偏移 1 个元素就会导致静默数据损坏。 |
 | `remote_store` | `(src_tile, target, peer, offsets) -> Call` | 写入本地 tile 到对端。 |
 
-## Put 和 Get
+## Put 和 Get (`pld.tensor.*`)
 
-单边批量传输。
+单边批量传输——rank A 写入或读取 rank B 的 window，rank B 无需参与传输
+（除了 signal 屏障）。
 
 ### Put（写入对端）
+
+| 名称 | 签名 | 变更 | 描述 |
+| ---- | ---- | ---- | ---- |
+| `put` | `(dst: DT, peer: IntLike, src: DT \| Tensor, dst_offsets=None, src_offsets=None, shape=None, *, atomic=AtomicType.None_, chunk_rows=0, chunk_cols=0, pipeline=False) -> Call` | `dst: InOut`，`src: In` | 将本地 `src` 写入对端 rank 的 `dst`。`dst` **必须**为 window-bound；`src` 可以是普通 `Tensor`。未指定 offsets/shape 时，写入完整的本地分片。`atomic=Add` 时累加而非覆盖。 |
 
 ```python
 # dst 必须为 window-bound
@@ -97,6 +110,10 @@ pld.tensor.put(dst, peer=1, src=local_chunk, atomic=pld.AtomicType.Add)
 ```
 
 ### Get（从对端读取）
+
+| 名称 | 签名 | 变更 | 描述 |
+| ---- | ---- | ---- | ---- |
+| `get` | `(dst: DT \| Tensor, peer: IntLike, src: DT, dst_offsets=None, src_offsets=None, shape=None, *, chunk_rows=0, chunk_cols=0, pipeline=False) -> Call` | `dst: Out`，`src: In` | 读取对端 rank 的 `src` 到本地 `dst`。`src` **必须**为 window-bound；`dst` 可以是普通 `Tensor`。 |
 
 ```python
 # src 必须为 window-bound
@@ -139,6 +156,14 @@ for src in pl.range(nranks):
         )
 ```
 
+使用 `offsets=[my_rank, 0]` 时，每个 rank 拥有专属的一行——每个对端
+window 中的 `[r, 0]` 格子只有一个写者，即 rank `r` 自己，因此这里用
+`Set` 效果完全相同。之所以展示 `AtomicAdd`，是因为本文档中每个 barrier
+使用的都是同一个 notify 调用；真正需要 `AtomicAdd` 的"多写者、一个槽位"
+场景是*共享格子*的 barrier（见上表）——只有在需要区分*哪些*对端已经到达，
+而不仅仅是*是否*所有对端都已到达时，才像这里一样给每个 rank 分配不同的
+offset。
+
 ### 远程累加
 
 ```python
@@ -158,13 +183,24 @@ for peer in pl.range(nranks):
 | `pld.world_size()` | `pld.system.world_size()` |
 | `pld.rank(ctx)` | `pld.system.rank(ctx)` |
 | `pld.nranks(ctx)` | `pld.system.nranks(ctx)` |
+| `pld.get_comm_ctx(dt)` | `pld.system.get_comm_ctx(dt)` |
 | `pld.alloc_window_buffer(...)` | `pld.tensor.alloc_window_buffer(...)` |
 | `pld.window(...)` | `pld.tensor.window(...)` |
 | `pld.remote_load(...)` | `pld.tile.remote_load(...)` |
 | `pld.remote_store(...)` | `pld.tile.remote_store(...)` |
 
-**无短格式：** `pld.notify(...)`、`pld.wait(...)`、`pld.allreduce(...)` 等——
-这些需要完整的 3 段命名空间。
+**无短格式：** `pld.notify(...)`、`pld.wait(...)`、`pld.put(...)`、
+`pld.get(...)`、`pld.allreduce(...)` 等——这些需要完整的 3 段命名空间。
+
+## 可运行示例
+
+| 原语 | 测试 |
+| ---- | ---- |
+| notify / wait | `test_l3_notify_wait.py` |
+| put / get | `test_l3_put.py` / `test_l3_get.py` |
+| remote_store | `test_l3_remote_store.py` |
+
+（路径均相对于 `tests/st/distributed/`）
 
 ## 相关链接
 

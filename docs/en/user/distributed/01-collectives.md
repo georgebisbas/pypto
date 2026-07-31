@@ -5,6 +5,12 @@ All collectives are **synchronous** across ranks — every rank must call the sa
 collective with identically shaped signal tensors, or the program hangs or
 silently corrupts data.
 
+> **Note:** the code blocks below are illustrative sketches — each shows
+> only the primitive calls relevant to that collective and omits setup
+> (`my_rank`/`nranks` derivation, buffer allocation, input staging). They
+> are not meant to run as-is. For runnable versions, see [Runnable
+> Examples](#runnable-examples) below.
+
 ## AllReduce
 
 Every rank contributes its local data; every rank receives the reduced
@@ -31,7 +37,12 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 - 2(P-1) steps: reduce-scatter + allgather
 - O(N/P) remote traffic per step — each rank reads one neighbour
 - Signal shape: `[2 × (NR − 1), NR]`
-- Requires compile-time-known NR — use a factory function pattern
+- Requires compile-time-known NR — use a factory function pattern: an
+  outer Python function takes `nr`/`size`, derives `total_rounds =
+  2 * (nr - 1)`, and defines the `@pl.program` class inside its own body
+  so `[total_rounds, nr]` becomes a compile-time constant (see
+  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` in [Runnable
+  Examples](#runnable-examples))
 - Best for large messages (>16 KiB) and high bandwidth
 
 | Aspect | Mesh | Ring |
@@ -173,6 +184,21 @@ other five collectives (`barrier`, `broadcast`, `allgather`,
 `reduce_scatter`, `all_to_all`) always take an explicit, caller-allocated
 signal. Reach for the InCore composite specifically when you need
 `mode="ring"`, since the HOST builtin path only lowers `mesh`.
+
+## Runnable Examples
+
+Every collective above has a runnable counterpart under
+`tests/st/distributed/` (paths below are relative to that directory):
+
+| Collective | InCore hand-rolled | InCore composite | HOST builtin |
+| ---------- | ------------------ | ---------------- | ------------ |
+| allreduce | `collectives/test_l3_allreduce.py` | `collectives/test_l3_tensor_allreduce_intrinsic.py` | `test_l3_host_tensor_allreduce.py` |
+| allreduce (ring) | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | n/a (mesh only) |
+| barrier | — | `collectives/test_l3_tensor_barrier_intrinsic.py` | `test_l3_host_tensor_barrier.py` |
+| broadcast | `collectives/test_l3_broadcast.py` | `collectives/test_l3_tensor_broadcast_intrinsic.py` | `test_l3_host_tensor_broadcast.py` |
+| allgather | `collectives/test_l3_allgather.py` | `collectives/test_l3_tensor_allgather_intrinsic.py` | `test_l3_host_tensor_allgather.py` |
+| reduce_scatter | `collectives/test_l3_reduce_scatter.py` | `collectives/test_l3_tensor_reduce_scatter_intrinsic.py` | `test_l3_host_tensor_reduce_scatter.py` |
+| all_to_all | `collectives/test_l3_all_to_all.py` | `collectives/test_l3_tensor_all_to_all_intrinsic.py` | `test_l3_host_tensor_all_to_all.py` |
 
 ## See Also
 

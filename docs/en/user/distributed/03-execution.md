@@ -10,19 +10,21 @@ Obtained via `compiled.prepare()`. Setup (fork, comm bootstrap, kernel assembly)
 happens once; dispatch happens many times.
 
 ```python
-from pypto.runtime import DistributedWorker
-
-with DistributedWorker(compiled) as rt:
+with compiled.prepare() as rt:
     rt(host_x, host_out)
     # ... more dispatches ...
 # rt.close() runs on exit — releases buffers and shuts down workers.
 ```
 
+`compiled.prepare()` returns a `DistributedWorker` (also constructible
+directly via `DistributedWorker(compiled)`, importable from
+`pypto.runtime`, but `prepare()` is the documented entry point).
+
 ### Methods
 
 | Method | Description |
 | ------ | ----------- |
-| `compiled.prepare(config=None, callbacks=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
+| `compiled.prepare(config=None, *, extra_compiled=(), persistent=False, reset_persistent_windows=None, callbacks=None, sub_worker_overrides=None)` | Create worker, fork chip processes, return `DistributedWorker`. Use as context manager. |
 | `rt(x, y, z)` | Single dispatch — coerces args, calls host_orch. |
 | `rt.run(compiled, x, y, z)` | Multi-program dispatch — selects the target program. |
 | `rt.alloc_tensor(shape, dtype, *, init=None)` | Allocate a worker-resident `DeviceTensor`. `init` copies from host (one-time H2D). |
@@ -32,6 +34,21 @@ with DistributedWorker(compiled) as rt:
 | `rt.copy_stacked_from(stacked, host_out)` | D2H read-back of every shard into `host_out` (shared-memory, allocated before `prepare()`). |
 | `rt.release_inherited_host_tensor_refs()` | Drop runtime-held host references in the parent process after fork. |
 | `rt.close()` | Release buffers, shut down chip workers. Called automatically as context manager. |
+
+### `prepare()` Parameters Worth Knowing
+
+- **`config`** — an optional `RunConfig` used *only* to pre-warm the
+  runtime arena cache for a given ring sizing, so the first dispatch
+  skips its ~800 ms cold build. It is **not retained**: every dispatch
+  still needs its own `config=`. The prewarm only pays off when the
+  *first* dispatch's sizing matches the pre-warmed one — see
+  `docs/en/dev/05-runtime-ring-sizing.md` § arena prewarm.
+- **`persistent=True`** — retains CommDomain windows for the worker's
+  entire lifetime instead of allocating/releasing them on every dispatch.
+  Pairs with **`reset_persistent_windows`**, which controls whether
+  retained windows are zeroed between requests (a correctness-vs-overhead
+  trade-off). See `docs/en/dev/06-persistent-l3.md`.
+- **`extra_compiled`** — see "Several Programs on One Worker" below.
 
 ## DeviceTensor
 
@@ -84,11 +101,17 @@ compiled(inputs, outputs)   # blocks until all ranks finish
 
 ### Persistent Worker (Repeated Dispatch)
 
+Reusing the same worker object across many dispatches — the default
+lifecycle for any `DistributedWorker`. (Not to be confused with the
+`persistent=True` CommDomain-window-retention flag above — that's an
+opt-in that skips per-dispatch window alloc/release; amortizing the
+fork/comm-bootstrap cost shown here happens regardless of `persistent=`.)
+
 ```python
 host_x = torch.zeros((4, 1, 256), dtype=torch.float32).share_memory_()
 host_out = torch.zeros_like(host_x).share_memory_()
 
-with DistributedWorker(compiled) as rt:
+with compiled.prepare() as rt:
     for step in steps:
         host_x.copy_(next_input(step))
         rt(host_x, host_out)
@@ -122,14 +145,9 @@ program explicitly through `rt.run(...)`, including the primary one.
 
 ## CLI Launch
 
-A distributed program launches the same way as a single-device one — plain
-`python script.py`. `DistributedConfig(device_ids=[...])` picks the rank
-count and devices; the runtime forks one worker process per device from this
-one Python process, so there is no separate multi-process launcher to invoke.
-
-```bash
-python script.py
-```
+Launching a distributed program is identical to launching a single-device
+one — see [00-model § Launch Command](00-model.md#launch-command): plain
+`python script.py`, no separate multi-process launcher.
 
 ## Environment Variables
 

@@ -26,10 +26,17 @@ one rank while the cause is on another.
 > `alloc_window_buffer(NR)` allocates `NR` bytes, not `NR * sizeof(element)`.
 > Use the shape+dtype overload: `alloc_window_buffer([NR, SIZE], dtype=pl.FP32)`.
 >
-> **`device_ids` disagreeing with `device=`:** `DistributedConfig.device_ids`
-> must match the device IDs used in the orchestrator's per-rank dispatch. A
-> mismatch — e.g. `device_ids=[0, 1]` but dispatching with `device=r` where
-> `r` iterates over `range(4)` — causes undefined behaviour.
+> **Dispatch loop trip count disagreeing with `device_ids`:** `device_ids`
+> are physical card IDs (e.g. from `--device 4,5`) — they need not start at
+> 0 or be contiguous. `device=r` is a *logical* rank index, always
+> validated against `[0, world)` where `world = len(device_ids)`; the
+> runtime maps `rank r -> device_ids[r]`. What must hold is that the
+> dispatch loop's trip count equals `len(device_ids)` — automatic when you
+> write `for r in pl.range(pld.world_size())`. A mismatch — e.g.
+> `device_ids=[0, 1, 2, 3]` (4 cards) but a dispatch loop that only covers
+> `range(2)` — leaves 2 cards un-dispatched and causes undefined behaviour
+> (`MaterializeCommDomainScopes` requires the `device=r` loop range to be
+> `[0, N)`).
 
 ## Diagnostic Flags
 

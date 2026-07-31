@@ -3,6 +3,11 @@
 Most users call `pld.tensor.*` collectives directly — reach for these
 lower-level primitives only when building a custom protocol.
 
+> **Note:** the notify/wait, put/get, and remote-load/store code blocks
+> below are illustrative sketches — they omit `nranks`/`my_rank`
+> derivation and buffer setup and are not meant to run as-is. For
+> runnable versions, see [Runnable Examples](#runnable-examples) below.
+
 ## Types and Enums
 
 | Name | Values | Description |
@@ -107,7 +112,7 @@ collectives; most users call `pld.tensor.*` collectives instead.
 | `remote_load` | `(target: DT, peer: IntLike, offsets: Sequence[IntLike], shape: Sequence[IntLike], valid_shape=None) -> Tile` | Load a region of peer rank's `DT` into a local tile. `shape` defines the tile dimensions. `valid_shape` keeps the physical tile fixed-size while a ragged tail reads only real data. Offsets must match what the peer stored — a 1-element misalignment causes silent corruption. |
 | `remote_store` | `(src_tile: Tile, target: DT, peer: IntLike, offsets: Sequence[IntLike]) -> Call` | Write a local tile into peer rank's `DT`. Side-effect-only. |
 
-## Put and Get
+## Put and Get (`pld.tensor.*`)
 
 One-sided bulk transfer — rank A writes to or reads from rank B's window
 without rank B participating in the transfer (beyond the signal barrier).
@@ -205,6 +210,16 @@ and shape must match what the peer stored — a mismatch reads garbage.
 **No short form:** `pld.notify(...)`, `pld.wait(...)`, `pld.put(...)`,
 `pld.get(...)`, `pld.allreduce(...)`, and all other collective ops — these
 require the full 3-segment namespace.
+
+## Runnable Examples
+
+| Primitive | Test |
+| --------- | ---- |
+| notify / wait | `test_l3_notify_wait.py` |
+| put / get | `test_l3_put.py` / `test_l3_get.py` |
+| remote_store | `test_l3_remote_store.py` |
+
+(paths relative to `tests/st/distributed/`)
 
 ## See Also
 

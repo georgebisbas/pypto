@@ -85,6 +85,26 @@ class HelloAllReduce:
         return outputs
 ```
 
+### 运行程序
+
+将上面的类和下面的驱动代码保存到同一个文件（`script.py`）中：
+
+```python
+import torch
+from pypto import ir
+from pypto.ir.distributed_compiled_program import DistributedConfig
+
+dc = DistributedConfig(device_ids=[0, 1])
+compiled = ir.compile(HelloAllReduce, platform="a2a3", distributed_config=dc)
+
+inputs = torch.randn(2, 1, SIZE)
+outputs = torch.zeros_like(inputs)
+compiled(inputs, outputs)   # 阻塞直到两个 rank 都完成
+```
+
+这是"one-shot"派发模式。`DistributedWorker`、持久 worker 和多程序派发见
+[03-execution](03-execution.md)。
+
 ### 预期输出
 
 每个 rank `r` 的 `outputs[r] == sum(inputs[*])`。2 个 rank 输入分别为
@@ -96,9 +116,8 @@ class HelloAllReduce:
 python script.py
 ```
 
-不涉及任何多进程启动器。`DistributedConfig(device_ids=[...])` 告诉编译后的
-程序使用哪些设备；运行时会从这一个 Python 进程中为每个设备 fork 出一个
-worker 进程。
+不涉及任何多进程启动器——运行时会从这一个 Python 进程中为每个设备（按
+`device_ids`）fork 出一个 worker 进程。
 
 ## PyPTO 中的分布式编程是什么？
 
@@ -142,7 +161,9 @@ HOST 从不直接派发 `InCore` 函数。它通过设置 `device=r` 派发一�
 ### Window Buffer 生命周期
 
 `alloc_window_buffer(size)` 创建 per-rank buffer。`window(buf, shape, dtype)`
-创建类型化视图。Buffer 在 host 编排器调用期间存活。
+创建类型化视图。Buffer 在 host 编排器调用期间存活；**默认情况下**编排器
+调用之间没有持久化的 IPC——如需跨多次派发保留 window，见
+[03-execution](03-execution.md) 中的 `persistent=True` 选项。
 
 ### 控制平面 vs 执行平面
 
@@ -169,7 +190,7 @@ InCore kernel (@pl.function(type=InCore))
 | `NR = pl.dynamic("NR")` | world size 在构建时未知。`pl.dynamic` 将维度推迟到运行时分发——host 从 `len(device_ids)` 绑定。 |
 | `pl.InOut[pld.DistributedTensor[...]]` | `data` 和 `signal` 是 window-bound：每个 rank 共享相同的地址空间布局。`InOut` 表示 kernel 既读又写。 |
 | `pld.get_comm_ctx(data)` | 将 window-bound tensor 提升为通信域句柄。每个 rank 获得自己的 `ctx`，从中读取 `rank()` 和 `nranks()`。 |
-| `pld.system.notify(..., op=AtomicAdd)` | 每个 rank 原子地加 1 到每个对端的 signal slot。`AtomicAdd` 在此正确，因为 N 个 rank 写入同一个 slot（全局屏障）。1:1 握手请用 `Set`。 |
+| `pld.system.notify(..., op=AtomicAdd)` | 每个 rank 原子地加 1 到每个对端的 signal slot。使用 `offsets=[my_rank, 0]` 时，每个格子只有一个写者，因此这里用 `Set` 效果完全相同——展示 `AtomicAdd` 是因为本文档中每个 barrier 用的都是同一个 notify 调用。`AtomicAdd` 仅在*共享*格子的 barrier（多个 rank 写入同一个 slot）中才是必需的；区别见 02-primitives.md 中的"隔离的 Barrier"一节。 |
 | `pld.system.wait(..., cmp=Ge, expected=1)` | 阻塞直到本地 signal slot 达到至少 1——表示所有对端的 notify 均已到达。 |
 | `pld.tile.remote_load(...)` | 读取对端 `DistributedTensor` 的远程分片到本地 tile。这是 `pl.tile.load` 的 tile 级别跨 rank 版本。 |
 | `pl.add(acc, peer_tile)` | 本地加法循环累加所有对端贡献。循环结束后 `acc` 持有 `sum(inputs[*])`。 |

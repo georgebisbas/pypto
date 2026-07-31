@@ -87,6 +87,26 @@ class HelloAllReduce:
         return outputs
 ```
 
+### Running It
+
+Save the class above and the driver below into the same file (`script.py`):
+
+```python
+import torch
+from pypto import ir
+from pypto.ir.distributed_compiled_program import DistributedConfig
+
+dc = DistributedConfig(device_ids=[0, 1])
+compiled = ir.compile(HelloAllReduce, platform="a2a3", distributed_config=dc)
+
+inputs = torch.randn(2, 1, SIZE)
+outputs = torch.zeros_like(inputs)
+compiled(inputs, outputs)   # blocks until both ranks finish
+```
+
+This is the "one-shot" dispatch pattern. See [03-execution](03-execution.md)
+for `DistributedWorker`, persistent workers, and multi-program dispatch.
+
 ### Expected Output
 
 `outputs[r] == sum(inputs[*])` for every rank `r`. For 2 ranks with inputs
@@ -98,9 +118,8 @@ class HelloAllReduce:
 python script.py
 ```
 
-No multi-process launcher is involved. `DistributedConfig(device_ids=[...])`
-tells the compiled program which devices to use; the runtime forks one worker
-process per device from this single Python process.
+No multi-process launcher is involved — the runtime forks one worker
+process per device (per `device_ids`) from this single Python process.
 
 ## What Is Distributed Programming in PyPTO?
 
@@ -151,7 +170,9 @@ buffers through `CommContext`.
 
 `alloc_window_buffer(size)` creates per-rank buffers. `window(buf, shape, dtype)`
 creates typed views. Buffers live for the duration of the host orchestrator call;
-there is no persistent IPC between orchestrator invocations.
+there is no persistent IPC between orchestrator invocations **by default** —
+see [03-execution](03-execution.md) § `persistent=True` to retain windows
+across dispatches.
 
 ### Control Plane vs Execution Plane
 
@@ -178,7 +199,7 @@ InCore kernel (@pl.function(type=InCore))
 | `NR = pl.dynamic("NR")` | The world size is not known at build time. `pl.dynamic` defers the dimension to runtime dispatch — the host binds it from `len(device_ids)`. |
 | `pl.InOut[pld.DistributedTensor[...]]` | `data` and `signal` are window-bound: every rank shares the same address space layout. `InOut` means the kernel both reads and writes them. |
 | `pld.get_comm_ctx(data)` | Lifts the window-bound tensor into a comm-domain handle. Every rank gets its own `ctx`, from which `rank()` and `nranks()` read per-rank values. |
-| `pld.system.notify(..., op=AtomicAdd)` | Each rank atomically adds 1 to every peer's signal slot. `AtomicAdd` is correct here because N ranks write the same slot (it's a global barrier). For a 1:1 handshake, use `Set` instead. |
+| `pld.system.notify(..., op=AtomicAdd)` | Each rank atomically adds 1 to every peer's signal slot. With `offsets=[my_rank, 0]`, each cell has exactly one writer, so `Set` would work identically here — `AtomicAdd` is shown because it's the same notify call every barrier in this doc uses. It's only required for a *shared*-cell barrier where multiple ranks write the same slot; see [02-primitives](02-primitives.md) § "The Barrier in Isolation" for the distinction. |
 | `pld.system.wait(..., cmp=Ge, expected=1)` | Blocks until the local signal slot reaches at least 1 — meaning all peer notifies have landed. |
 | `pld.tile.remote_load(...)` | Reads a **remote** slice of a `DistributedTensor` into a local tile. This is the tile-level cross-rank equivalent of `pl.tile.load`. |
 | `pl.add(acc, peer_tile)` | The local add loop sums all peer contributions. After the loop, `acc` holds `sum(inputs[*])`. |
