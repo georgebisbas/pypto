@@ -37,7 +37,6 @@ from collections.abc import Sequence
 
 from pypto.ir.op.distributed import system_ops as _ir_system
 from pypto.language.typing import IntLike, Scalar
-from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
@@ -122,7 +121,7 @@ def nranks(ctx: CommCtx) -> Scalar:
 
 
 def notify(
-    target: Tensor,
+    target: DistributedTensor,
     peer: IntLike,
     offsets: Sequence[IntLike],
     value: IntLike,
@@ -142,12 +141,9 @@ def notify(
 
     .. note::
 
-       The first parameter is named ``target`` for legacy reasons (inherited
-       from early signal protocol drafts).  The companion :func:`wait` names
-       the same logical operand ``signal``.  Both refer to the signal
-       :class:`DistributedTensor` — pass the first operand positionally; the
-       remaining operands may be positional or keyword:
-       ``notify(signal, peer=..., ...)``.
+       ``notify`` names this operand ``target``; the companion ``wait`` names
+       the same logical operand ``signal``. Both refer to the same
+       window-bound signal tensor.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` signal matrix. The
@@ -162,7 +158,7 @@ def notify(
 
 
 def wait(
-    signal: Tensor,
+    signal: DistributedTensor,
     offsets: Sequence[IntLike],
     expected: IntLike,
     *,

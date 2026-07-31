@@ -549,7 +549,10 @@ def allreduce(
     for each allreduce call. All allreduce calls in ``for`` and ``while``
     loops are rejected because the current signal protocol cannot provide a
     fresh signal for every dynamic iteration. A self-resetting variant is
-    blocked on a runtime fix — PTOAS issue #797.
+    blocked on a runtime fix — tracked in #2156 (that issue's affected areas
+    currently list allgather / reduce_scatter / all_to_all / all_to_all_v;
+    allreduce is not listed there yet but hits the identical signal-lifetime
+    constraint, using ``AtomicAdd(1)``/``WaitGe(1)``).
 
     .. seealso::
 
@@ -576,6 +579,10 @@ def allreduce(
     covers the target. The final chunk uses ``valid_shape`` so arbitrary element
     counts do not read or store past the end.
 
+    See ``docs/en/dev/distributed_ops.md`` and
+    ``docs/en/dev/passes/12-lower_composite_ops.md`` for the mesh partial-valid /
+    symbolic-extent target constraints (unchanged by this PR).
+
     **Mesh barrier protocol:** ``AtomicAdd(1) → WaitGe(1)`` is the ready wave.
     Every reduced chunk then performs ``AtomicAdd(1)`` and waits for the
     corresponding monotonic counter value before storing that chunk. By the
@@ -601,7 +608,10 @@ def allreduce(
     for each allreduce call. All allreduce calls in ``for`` and ``while``
     loops are rejected because the current signal protocol cannot provide a
     fresh signal for every dynamic iteration. A self-resetting variant is
-    blocked on a runtime fix — PTOAS issue #797.
+    blocked on a runtime fix — tracked in #2156 (that issue's affected areas
+    currently list allgather / reduce_scatter / all_to_all / all_to_all_v;
+    allreduce is not listed there yet but hits the identical signal-lifetime
+    constraint, using ``AtomicAdd(1)``/``WaitGe(1)``).
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
@@ -734,14 +744,14 @@ def allgather(
 ) -> DistributedTensor:
     """All-gather: gather data from all ranks (push-based).
 
-    Unified 3-arg form: ``pld.tensor.allgather(input, target, signal)``.
-    ``input`` is this rank's single ``[1, SIZE]`` chunk; every rank pushes it
+    Unified 3-arg form: ``pld.tensor.allgather(local_data, target, signal)``.
+    ``local_data`` is this rank's single ``[1, SIZE]`` chunk; every rank pushes it
     into every peer's ``target`` row ``my_rank`` via TPUT, then synchronises
     with a notify/wait barrier.  Returns ``target`` in-place (window-as-result
     — same idiom as ``all_to_all`` / ``reduce_scatter`` / ``broadcast``).
 
-    ``input`` must be a DIFFERENT buffer from ``target`` — never pass the same
-    window for both.  On the HOST path ``input`` is a ``[1, SIZE]`` staging
+    ``local_data`` must be a DIFFERENT buffer from ``target`` — never pass the same
+    window for both.  On the HOST path ``local_data`` is a ``[1, SIZE]`` staging
     window populated by an earlier publish step; on the InCore path it is a
     plain :class:`pl.Tensor` ``[1, SIZE]`` — both are accepted.  HOST vs InCore
     is a function-context property resolved by the lowering passes.

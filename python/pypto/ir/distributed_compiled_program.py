@@ -58,13 +58,17 @@ if TYPE_CHECKING:
 class DistributedConfig:
     """Configuration for L3 distributed execution.
 
-    Fields:
+    Attributes:
         device_ids: List of NPU device indices to use. Defaults to ``[0]``
             (single-card). Pass ``[0, 1, 2, 3]`` for a 4-card ring. Must be
             a non-empty list of distinct ints.
-        num_sub_workers: Number of sub-workers per chip process. ``0`` (default)
-            means one sub-worker per chip process. Increase for multi-slice or
-            internal pipelining scenarios.
+        num_sub_workers: Number of sub-workers to request per chip process.
+            ``0`` (default) does not force a specific count — the runtime
+            instead uses ``max(num_sub_workers, len(sub_worker_fns))``, i.e.
+            exactly as many sub-workers as the program's declared sub-worker
+            functions. Set this explicitly only when requesting more
+            sub-workers than are declared, e.g. for multi-slice or internal
+            pipelining scenarios.
         runtime: Simpler runtime flavour. ``"tensormap_and_ringbuffer"`` (default)
             enables the tensor-map helpers and the ring-buffer DMA driver.
         aicpu_thread_num: Number of aiCPU threads allocated to the simpler

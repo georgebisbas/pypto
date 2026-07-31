@@ -1845,11 +1845,27 @@ class ASTParser:
         Parser-only concerns (everything else delegates to the DSL wrapper /
         IR builder / C++ deducer via :func:`invoke_dsl`):
 
+        - HOST-only, like ``world_size`` (see ``_validate_pld_op_call``): the
+          window buffer is a host-orchestration resource, not lowerable inside
+          InCore / SPMD scopes.
         - LHS must be a single ``ast.Name``.
         - That name must be globally unique within the ``@pl.program``.
         - User can't pass ``name=`` (it's parser-injected from the LHS).
         """
         span = self.span_tracker.get_span(value)
+
+        in_device_scope = any(
+            self._is_inside_scope(kind) for kind in (ir.ScopeKind.InCore, ir.ScopeKind.Spmd)
+        )
+        if self._func_level != ir.Level.HOST or in_device_scope:
+            raise ParserSyntaxError(
+                "pld.system.alloc_window_buffer() can only be called in HOST orchestration "
+                "context (not inside InCore / SPMD scopes); "
+                f"current function level: {self._func_level}",
+                span=span,
+                hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
+                "on the enclosing function and call outside any nested device-side scope",
+            )
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(
