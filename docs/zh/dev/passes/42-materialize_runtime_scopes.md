@@ -123,3 +123,5 @@ round-trip / 模式 / 嵌套 / opt-out 规则）。完整 orchestration codegen 
 | Required | `SplitIncoreOrch`、`CallDirectionsResolved` |
 | Produced | `RuntimeScopesMaterialized` |
 | Invalidated | — |
+
+`RuntimeScopesMaterialized` 由已注册的属性验证器强制执行（见 [IR 验证器](99-verifier.md)）；编排 codegen 是 codegen 入口消费者。

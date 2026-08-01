@@ -347,6 +347,19 @@ PropertyVerifierPtr CreateUnrollResolvedPropertyVerifier();
 PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating RuntimeScopesMaterialized property verifier
+ *
+ * Verifies that every ``FunctionType::Orchestration`` function has
+ * ``attrs_["auto_scope"] == false``, the marker stamped by
+ * ``MaterializeRuntimeScopes`` once explicit ``RuntimeScopeStmt`` nodes are in
+ * place. Orchestration codegen emits ``PTO2_SCOPE()`` only from those nodes;
+ * skipping the pass leaves ``auto_scope=True`` and would silently omit scopes.
+ *
+ * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier
+ */
+PropertyVerifierPtr CreateRuntimeScopesMaterializedPropertyVerifier();
+
+/**
  * @brief Factory function for creating CallDirectionsResolved property verifier
  *
  * Verifies that every non-builtin ``Call`` in the program carries a fully

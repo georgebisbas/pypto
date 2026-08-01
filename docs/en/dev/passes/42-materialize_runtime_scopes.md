@@ -134,3 +134,5 @@ preservation, AUTO-in-default rejection) and
 | Required | `SplitIncoreOrch`, `CallDirectionsResolved` |
 | Produced | `RuntimeScopesMaterialized` |
 | Invalidated | — |
+
+`RuntimeScopesMaterialized` is enforced by a registered property verifier (see [IR Verifier](99-verifier.md)); orchestration codegen is a codegen-entry consumer.
