@@ -74,9 +74,8 @@ void VerifyCodegenTargetFunctionMatchesProgram(const ProgramPtr& program, const 
       break;
     }
   }
-  INTERNAL_CHECK(program_func != nullptr)
-      << "Internal error: GenerateOrchestration preconditions — function '" << func->name_
-      << "' is not present in the supplied program";
+  CHECK_SPAN(program_func != nullptr, func->span_)
+      << "Orchestration function '" << func->name_ << "' is not present in the supplied program";
 
   if (program_func.get() != func.get()) {
     std::vector<Diagnostic> diagnostics;

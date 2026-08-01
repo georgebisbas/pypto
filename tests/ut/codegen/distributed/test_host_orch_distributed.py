@@ -788,6 +788,7 @@ def test_backend_materializes_builtin_next_level_files(tmp_path):
     program = passes.materialize_comm_domain_scopes()(Prog)
     program = passes.lower_host_tensor_collectives()(program)
     program = passes.materialize_dist_tensor_ctx()(program)
+    program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
     files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
 
     base = "next_levels/builtin.tensor.allreduce__sum__fp32"
@@ -1050,6 +1051,7 @@ def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, sig
     program = passes.materialize_comm_domain_scopes()(program_cls)
     program = passes.lower_host_tensor_collectives()(program)
     program = passes.materialize_dist_tensor_ctx()(program)
+    program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
     files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
 
     entry = variant.replace(".", "_")
