@@ -61,6 +61,14 @@ def _ensure_arg_directions(program):
     return passes.derive_call_directions()(program)
 
 
+def _orch_func_from_program(program):
+    """Return the Orchestration function instance currently stored in program."""
+    for func in program.functions.values():
+        if func.func_type == ir.FunctionType.Orchestration:
+            return func
+    raise ValueError("No orchestration function found in program")
+
+
 def _finalize_for_codegen(program):
     """Run the two codegen-entry passes on a hand-built program.
 

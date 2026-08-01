@@ -17,6 +17,7 @@ from _orchestration_codegen_common import (
     SELF_ALIAS_RE,
     _finalize_for_codegen,
     _generate_orch_code,
+    _orch_func_from_program,
 )
 from pypto import backend, codegen
 from pypto.backend import BackendType
@@ -50,6 +51,7 @@ class TestTaskIsValidCodegen:
             ib.return_stmt(b)
         orch_func = orch_f.get_result()
         program = _finalize_for_codegen(ir.Program([orch_func], "test_task_is_valid", ir.Span.unknown()))
+        orch_func = _orch_func_from_program(program)
 
         code = codegen.generate_orchestration(program, orch_func).code
         assert "bool b = tid.is_valid();" in code, code
@@ -105,6 +107,7 @@ class TestTupleLineagePointerKeying:
 
         orch_func = orch_f.get_result()
         program = _finalize_for_codegen(ir.Program([orch_func], "test_tuple_pointer_keying", span))
+        orch_func = _orch_func_from_program(program)
         code = codegen.generate_orchestration(program, orch_func).code
 
         # No declared name may appear twice (the conflicting-declaration bug).
@@ -140,6 +143,7 @@ class TestUnregisteredOpError:
         orch_func = orch_f.get_result()
 
         program = _finalize_for_codegen(ir.Program([orch_func], "test_prog", ir.Span.unknown()))
+        orch_func = _orch_func_from_program(program)
 
         with pytest.raises(RuntimeError, match="Misplaced tensor op.*tensor.full"):
             codegen.generate_orchestration(program, orch_func)
@@ -159,6 +163,7 @@ class TestUnregisteredOpError:
         program = _finalize_for_codegen(
             ir.Program([orch_func], "ReinterpretViewOrchestration", ir.Span.unknown())
         )
+        orch_func = _orch_func_from_program(program)
 
         with pytest.raises(ValueError, match="not supported in Orchestration functions.*InCore"):
             codegen.generate_orchestration(program, orch_func)
@@ -855,6 +860,7 @@ class TestTupleReturnNameHintCollision:
             span,
         )
         program = _finalize_for_codegen(program)
+        orch = _orch_func_from_program(program)
 
         code = codegen.generate_orchestration(program, orch).code
 

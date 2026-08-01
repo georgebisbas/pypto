@@ -71,6 +71,14 @@ def test_runtime_scopes_materialized_codegen_precondition_rejects_unmaterialized
         codegen.generate_orchestration(program, _orch_func(program))
 
 
+def test_runtime_scopes_materialized_rejects_stale_function_handle():
+    program = passes.derive_call_directions()(passes.convert_to_ssa()(_OrchWithSubmit))
+    stale_func = _orch_func(program)
+    program = passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
+    with pytest.raises(pypto.Error, match=r"stale function handle|stale handle"):
+        codegen.generate_orchestration(program, stale_func)
+
+
 def test_runtime_scopes_materialized_registry_accepts_materialized_orchestration():
     program = _program_with_materialized_scopes()
     props = passes.IRPropertySet()
