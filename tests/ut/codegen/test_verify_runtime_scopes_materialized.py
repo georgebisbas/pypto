@@ -20,6 +20,8 @@ from pypto.backend import BackendType
 def _setup_backend():
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
+    yield
+    backend.reset_for_testing()
 
 
 @pl.program
@@ -76,6 +78,11 @@ def test_runtime_scopes_materialized_registry_accepts_materialized_orchestration
     passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 
+def test_runtime_scopes_materialized_in_get_verified_properties():
+    props = passes.get_verified_properties()
+    assert props.contains(passes.IRProperty.RuntimeScopesMaterialized)
+
+
 @pl.program
 class _UserOptOutScopes:
     @pl.function(type=pl.FunctionType.InCore)
@@ -101,3 +108,7 @@ def test_runtime_scopes_materialized_user_opt_out_without_pass():
     props = passes.IRPropertySet()
     props.insert(passes.IRProperty.RuntimeScopesMaterialized)
     passes.PropertyVerifierRegistry.verify_or_throw(props, program)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

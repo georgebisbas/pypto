@@ -71,8 +71,19 @@ def _finalize_for_codegen(program):
     codegen preconditions and both are no-ops when the program already went
     through the pass pipeline. Must run after DeriveCallDirections (a declared
     requirement of both passes).
+
+    Runs under an empty ``PassContext`` so the global roundtrip instrument does
+    not print/parse hand-built IR that is not meant to round-trip mid-pipeline.
     """
-    return passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
+    with passes.PassContext([]):
+        return passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
+
+
+def _finalize_handbuilt_for_codegen(program):
+    """Derive call directions then run codegen-entry passes on partial IR."""
+    with passes.PassContext([]):
+        program = _ensure_arg_directions(program)
+        return passes.classify_iter_arg_carry()(passes.materialize_runtime_scopes()(program))
 
 
 def _generate_orch_code(program) -> str:

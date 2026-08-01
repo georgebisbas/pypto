@@ -350,10 +350,12 @@ PropertyVerifierPtr CreateIterArgCarryClassifiedPropertyVerifier();
  * @brief Factory function for creating RuntimeScopesMaterialized property verifier
  *
  * Verifies that every ``FunctionType::Orchestration`` function has
- * ``attrs_["auto_scope"] == false``, the marker stamped by
- * ``MaterializeRuntimeScopes`` once explicit ``RuntimeScopeStmt`` nodes are in
- * place. Orchestration codegen emits ``PTO2_SCOPE()`` only from those nodes;
- * skipping the pass leaves ``auto_scope=True`` and would silently omit scopes.
+ * ``attrs_["auto_scope"] == false``. That marker is set when
+ * ``MaterializeRuntimeScopes`` inserts explicit ``RuntimeScopeStmt`` nodes, or
+ * when the user declares ``@pl.function(auto_scope=False)`` (the pass is a
+ * no-op and codegen still accepts the function). Orchestration codegen emits
+ * ``PTO2_SCOPE()`` only from those nodes; skipping the pass leaves
+ * ``auto_scope=True`` and would silently omit scopes.
  *
  * @return Shared pointer to RuntimeScopesMaterialized PropertyVerifier
  */
