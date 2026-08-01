@@ -79,6 +79,31 @@ def test_runtime_scopes_materialized_rejects_stale_function_handle():
         codegen.generate_orchestration(program, stale_func)
 
 
+@pl.program
+class _OtherOrchProgram:
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        return x
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def other_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        y, _ = pl.submit(self.kernel, x)
+        return y
+
+
+def test_generate_orchestration_rejects_function_not_in_program():
+    """func must belong to the supplied program, not merely share a finalized shape."""
+    program = _program_with_materialized_scopes()
+    other_program = passes.classify_iter_arg_carry()(
+        passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(passes.convert_to_ssa()(_OtherOrchProgram))
+        )
+    )
+    foreign_func = _orch_func(other_program)
+    with pytest.raises(ValueError, match="not present in the supplied program"):
+        codegen.generate_orchestration(program, foreign_func)
+
+
 def test_runtime_scopes_materialized_registry_accepts_materialized_orchestration():
     program = _program_with_materialized_scopes()
     props = passes.IRPropertySet()
