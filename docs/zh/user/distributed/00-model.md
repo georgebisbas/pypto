@@ -2,6 +2,10 @@
 
 > **前置知识：** [快速入门](../00-getting_started.md) — 基本 PyPTO tensor/tile 模型。
 > 本指南使用 `pld` 命名空间（`import pypto.language.distributed as pld`）。
+>
+> **DSL 形式：** 本章使用 `@pl.jit`（普通 Python 函数）编写程序。
+> `@pl.program`/`@pl.function` 是等价的类形式，用于 `tests/st/distributed/` 下的
+> 旧测试——完整 `@pl.jit` 系列见[语言指南](../01-language_guide.md)。
 
 ## 快速开始：2-Rank AllReduce
 

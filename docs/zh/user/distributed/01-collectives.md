@@ -36,9 +36,10 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 - Signal 形状：`[2 × (NR − 1), NR]`
 - 要求编译时已知 NR——使用工厂函数模式：外层 Python 函数接收 `nr`/`size`，
   推导出 `total_rounds = 2 * (nr - 1)`，并在自己的函数体内定义
-  `@pl.program` 类，使 `[total_rounds, nr]` 成为编译期常量（参见下方
-  "可运行示例"一节中的
-  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`）
+  `@pl.jit` 函数，使 `[total_rounds, nr]` 成为编译期常量（specializer 会把
+  闭包常量折叠进生成的程序）。参见下方"可运行示例"一节中的
+  `collectives/test_l3_tensor_allreduce_ring_intrinsic.py`——该测试当前
+  使用等价的 `@pl.program` 类形式。
 - 最适合大消息（>16 KiB）和高带宽
 
 | 方面 | Mesh | Ring |

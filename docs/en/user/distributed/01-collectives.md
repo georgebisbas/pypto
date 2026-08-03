@@ -39,10 +39,12 @@ data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
 - Signal shape: `[2 × (NR − 1), NR]`
 - Requires compile-time-known NR — use a factory function pattern: an
   outer Python function takes `nr`/`size`, derives `total_rounds =
-  2 * (nr - 1)`, and defines the `@pl.program` class inside its own body
-  so `[total_rounds, nr]` becomes a compile-time constant (see
+  2 * (nr - 1)`, and defines the `@pl.jit` functions inside its own body
+  so `[total_rounds, nr]` becomes a compile-time constant (the specializer
+  folds the closure constants into the generated program). See
   `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` in [Runnable
-  Examples](#runnable-examples))
+  Examples](#runnable-examples) — that test currently uses the equivalent
+  `@pl.program` class form.
 - Best for large messages (>16 KiB) and high bandwidth
 
 | Aspect | Mesh | Ring |
