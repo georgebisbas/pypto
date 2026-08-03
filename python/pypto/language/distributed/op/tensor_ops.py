@@ -542,17 +542,13 @@ def allreduce(
     ``[world_size, 1]`` (the compiler-synthesized signal is rank-2). InCore
     composites take rank-2 ``[nranks, 1]`` for mesh -- the rank count may be
     dynamic -- and ``[2*(NR-1), NR]`` for ring, where ``NR`` must be a
-    compile-time constant. Both are single-shot per call.
+    compile-time constant.
 
-    **Do not reuse the same signal buffer for a back-to-back allreduce**
-    — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
-    for each allreduce call. All allreduce calls in ``for`` and ``while``
-    loops are rejected because the current signal protocol cannot provide a
-    fresh signal for every dynamic iteration. A self-resetting variant is
-    blocked on a runtime fix — tracked in #2156 (that issue's affected areas
-    currently list allgather / reduce_scatter / all_to_all / all_to_all_v;
-    allreduce is not listed there yet but hits the identical signal-lifetime
-    constraint, using ``AtomicAdd(1)``/``WaitGe(1)``).
+    **Signal reuse:** InCore composites use the self-clearing credit-barrier
+    protocol (see below), so their signal is reusable across back-to-back
+    calls — including inside ``for`` / ``while`` / ``if``. The HOST builtin
+    allreduce is not yet self-clearing, so a HOST allreduce (explicit or
+    synthesized signal) is still rejected inside ``for`` / ``while`` loops.
 
     .. seealso::
 
@@ -567,20 +563,16 @@ def allreduce(
     (b) the NCCL-style 2(P-1)-step
     chunked reduce-scatter + allgather ring schedule for ``mode="ring"``.
     In both modes the kernel sees only the lowered primitives.
-    Host-orchestrator code can omit ``signal``, including inside ``for`` /
-    ``while`` loops; the compiler synthesizes a private INT32 signal window
-    of shape ``[pld.world_size(), 1]`` for that call (mesh mode only — ring
-    mode on the HOST rail is delivered by a subsequent host builtin).
-
-    Mesh signal shape is ``[NR, 1]``; ring signal shape is
-    ``[2 * (NR − 1), NR]`` (one row per ring round). A signal is reusable
-    across back-to-back calls (see the barrier protocol below), but the two
-    shapes must not share one buffer.
+    Host-orchestrator code can omit ``signal`` outside ``for`` / ``while``
+    loops; the compiler synthesizes a private INT32 signal window of shape
+    ``[pld.world_size(), 1]`` for that call (mesh mode only — ring mode on the
+    HOST rail is delivered by a subsequent host builtin).
 
     Mesh signal shape is ``[NR, 1]``. The InCore ring schedule uses
-    ``[2 * (NR − 1), NR]`` (one row per ring round). The host builtin
-    ring schedule uses ``[2 * (NR − 1) + 1, NR]`` (one extra row for
-    the return barrier). Both are single-shot per call.
+    ``[2 * (NR − 1), NR]`` (one row per ring round). The host builtin ring
+    schedule uses ``[2 * (NR − 1) + 1, NR]`` (one extra row for the return
+    barrier). The mesh and ring shapes address cells differently, so one
+    buffer must not be shared between the two conventions.
 
     .. note::
 
@@ -624,21 +616,21 @@ def allreduce(
     ``valid_shape`` before reduction and store. This also covers ``SIZE < NR``
     without changing the packed public layout or dropping elements.
 
-    A signal buffer is safely reusable across back-to-back allreduce calls —
-    including inside ``for`` / ``while`` / ``if`` — since every call is a
-    stateless cycle starting from all-zero. A call aborted mid-flight (error
-    or timeout) leaves credits on the signal; recover with a host-side reset
-    (``reset_persistent_windows``) before the next dispatch.
+    For InCore composites, a signal buffer is safely reusable across
+    back-to-back allreduce calls — including inside ``for`` / ``while`` /
+    ``if`` — since every call is a stateless cycle starting from all-zero.
+    A call aborted mid-flight (error or timeout) leaves credits on the signal;
+    recover with a host-side reset (``reset_persistent_windows``) before the
+    next dispatch.
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
             FP16 or FP32 data. The C++ verifier refuses a plain
             :class:`pl.Tensor` and unsupported dtypes.
         signal: Optional window-bound INT32 :class:`pld.DistributedTensor`.
-            In InCore code this remains required. In host-orchestrator code,
-            omitting it — including inside ``for`` / ``while`` loops — lets
-            the compiler synthesize a private signal of shape
-            ``[pld.world_size(), 1]``.
+            In InCore code this remains required. In host-orchestrator code
+            outside ``for`` / ``while`` loops, omitting it lets the compiler
+            synthesize a private signal of shape ``[pld.world_size(), 1]``.
         op: :class:`pld.ReduceOp` selecting element-wise ``Sum``, ``Max``,
             ``Min``, or ``Prod`` (keyword-only). Defaults to
             :attr:`pld.ReduceOp.Sum`.
