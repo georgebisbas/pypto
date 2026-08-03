@@ -73,8 +73,8 @@ def handshake_step(
     )
 
     # 3. Read the received tag back out.
-    received = pl.load(signal, [0, 0], [1, 1])
-    out = pl.store(received, [0, 0], out)
+    received = pl.read(signal, [0, 0])
+    pl.write(out, [0, 0], received)
     return out
 ```
 
