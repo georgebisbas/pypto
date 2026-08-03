@@ -573,6 +573,18 @@ def allreduce(
     (mesh mode only — ring mode on the HOST rail is delivered by a
     subsequent host builtin).
 
+    Mesh signal shape is ``[NR, 1]``. The InCore ring schedule uses
+    ``[2 * (NR − 1), NR]`` (one row per ring round). The host builtin
+    ring schedule uses ``[2 * (NR − 1) + 1, NR]`` (one extra row for
+    the return barrier). Both are single-shot per call.
+
+    .. note::
+
+        The host-builtin ring schedule currently supports only
+        ``ReduceOp.Sum`` with ``dtype=FP32``.  ``ReduceOp.Max``,
+        ``ReduceOp.Min``, ``ReduceOp.Prod``, and ``FP16`` are not yet
+        available with ``mode="ring"``.
+
     Fully-valid packed mesh targets are viewed as one logical 1D stream and
     processed in chunks of at most 16 KiB. For statically known smaller targets,
     the physical chunk width shrinks to the smallest 32-byte-aligned width that
@@ -602,16 +614,6 @@ def allreduce(
     a ready barrier before remote reads and a read-complete barrier before
     store-back. The monotonic expected values are ``2*chunk_id+1`` and
     ``2*chunk_id+2``. The skipped self column remains zero.
-
-    **Do not reuse the same signal buffer for a back-to-back allreduce**
-    — allocate a fresh signal buffer (``alloc_window_buffer`` + ``window``)
-    for each allreduce call. All allreduce calls in ``for`` and ``while``
-    loops are rejected because the current signal protocol cannot provide a
-    fresh signal for every dynamic iteration. A self-resetting variant is
-    blocked on a runtime fix — tracked in #2156 (that issue's affected areas
-    currently list allgather / reduce_scatter / all_to_all / all_to_all_v;
-    allreduce is not listed there yet but hits the identical signal-lifetime
-    constraint, using ``AtomicAdd(1)``/``WaitGe(1)``).
 
     Args:
         target: Window-bound :class:`pld.DistributedTensor` holding per-rank
