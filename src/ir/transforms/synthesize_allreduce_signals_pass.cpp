@@ -70,10 +70,91 @@ class NameCollector : public IRVisitor {
   }
 };
 
+// One shared mesh signal per host_orch function. The binding is hoisted to the
+// top of the function body and reused by every implicit-signal allreduce call
+// (including calls inside for/while loops): the host builtin kernels self-clear
+// their barrier cells after each call, so a reused signal is
+// correct across back-to-back and loop-carried calls.
+struct SharedSignalBinding {
+  std::vector<StmtPtr> prefix;  ///< world_size / alloc_window_buffer / window assigns
+  VarPtr signal_var;
+};
+
+struct SignalNames {
+  std::string world_size_name;
+  std::string buf_name;
+  std::string signal_name;
+};
+
+[[nodiscard]] SignalNames FreshSignalNames(std::set<std::string>* used_names, int64_t* next_id) {
+  while (true) {
+    auto suffix = std::to_string((*next_id)++);
+    SignalNames names{"__allreduce_signal_world_size_" + suffix, "__allreduce_signal_buf_" + suffix,
+                      "__allreduce_signal_" + suffix};
+    if (used_names->count(names.world_size_name) != 0 || used_names->count(names.buf_name) != 0 ||
+        used_names->count(names.signal_name) != 0) {
+      continue;
+    }
+    used_names->insert(names.world_size_name);
+    used_names->insert(names.buf_name);
+    used_names->insert(names.signal_name);
+    return names;
+  }
+}
+
+[[nodiscard]] SharedSignalBinding MakeSharedSignalBinding(std::set<std::string>* used_names, int64_t* next_id,
+                                                          const Span& span) {
+  auto names = FreshSignalNames(used_names, next_id);
+
+  auto world_size_call = OpRegistry::GetInstance().Create("pld.system.world_size", {}, span);
+  auto world_size_var = std::make_shared<Var>(names.world_size_name, world_size_call->GetType(), span);
+  auto world_size_assign = std::make_shared<AssignStmt>(world_size_var, world_size_call, span);
+
+  auto four = std::make_shared<ConstInt>(4, DataType::INT64, span);
+  auto size_bytes = MakeMul(world_size_var, four, span);
+
+  std::vector<std::pair<std::string, std::any>> alloc_kwargs = {{"name", names.buf_name}};
+  auto alloc_call =
+      OpRegistry::GetInstance().Create("pld.tensor.alloc_window_buffer", {size_bytes}, alloc_kwargs, span);
+  auto buf_var = std::make_shared<Var>(names.buf_name, alloc_call->GetType(), span);
+  auto buf_assign = std::make_shared<AssignStmt>(buf_var, alloc_call, span);
+
+  auto one = std::make_shared<ConstInt>(1, DataType::INT64, span);
+  auto signal_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{world_size_var, one}, span);
+  std::vector<std::pair<std::string, std::any>> window_kwargs = {{"dtype", DataType::INT32}};
+  auto window_call =
+      OpRegistry::GetInstance().Create("pld.tensor.window", {buf_var, signal_shape}, window_kwargs, span);
+  auto signal_var = std::make_shared<Var>(names.signal_name, window_call->GetType(), span);
+  auto signal_assign = std::make_shared<AssignStmt>(signal_var, window_call, span);
+
+  return {{world_size_assign, buf_assign, signal_assign}, signal_var};
+}
+
+/// Pre-scan: does this host_orch function need the synthesizer at all?
+///
+/// The synthesizer runs on any function carrying a ``pld.tensor.allreduce``
+/// (it also lifts return-position calls and rejects nested calls for
+/// explicit-signal functions); only a 1-arg call additionally needs a shared
+/// signal binding.
+class AllReduceSignalNeedFinder : public IRVisitor {
+ public:
+  bool has_allreduce = false;  ///< any pld.tensor.allreduce call
+  bool needs_signal = false;   ///< 1-arg call → needs a shared signal binding
+
+ protected:
+  void VisitExpr_(const CallPtr& op) override {
+    if (IsTensorAllReduce(op)) {
+      has_allreduce = true;
+      if (op->args_.size() == 1) needs_signal = true;
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+};
+
 class AllReduceSignalSynthesizer : public IRMutator {
  public:
-  AllReduceSignalSynthesizer(std::set<std::string>* used_names, int64_t* next_id)
-      : used_names_(used_names), next_id_(next_id) {}
+  AllReduceSignalSynthesizer(std::set<std::string>* used_names, int64_t* next_id, const VarPtr& shared_signal)
+      : used_names_(used_names), next_id_(next_id), shared_signal_(shared_signal) {}
 
   [[nodiscard]] bool modified() const { return modified_; }
 
@@ -96,15 +177,12 @@ class AllReduceSignalSynthesizer : public IRMutator {
       return op;
     }
 
-    auto [prefix, signal] = MakeSignalBinding(call->span_);
     auto target = VisitExpr(call->args_[0]);
-    auto rewritten_call = MakeAllReduceCall(call, target, signal);
+    auto rewritten_call = MakeAllReduceCall(call, target, shared_signal_);
     auto result = MutableCopy(op);
     result->value_ = rewritten_call;
-
-    prefix.push_back(result);
     modified_ = true;
-    return SeqStmts::Flatten(std::move(prefix), op->span_);
+    return result;
   }
 
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
@@ -116,13 +194,10 @@ class AllReduceSignalSynthesizer : public IRMutator {
       return op;
     }
 
-    auto [prefix, signal] = MakeSignalBinding(call->span_);
     auto target = VisitExpr(call->args_[0]);
-    auto rewritten_call = MakeAllReduceCall(call, target, signal);
-    std::vector<StmtPtr> stmts = std::move(prefix);
-    stmts.push_back(std::make_shared<EvalStmt>(rewritten_call, op->span_, op->leading_comments_));
+    auto rewritten_call = MakeAllReduceCall(call, target, shared_signal_);
     modified_ = true;
-    return SeqStmts::Flatten(std::move(stmts), op->span_);
+    return std::make_shared<EvalStmt>(rewritten_call, op->span_, op->leading_comments_);
   }
 
   StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
@@ -143,15 +218,7 @@ class AllReduceSignalSynthesizer : public IRMutator {
 
       CheckAllReduceCall(call);
       auto target = VisitExpr(call->args_[0]);
-      ExprPtr signal;
-      if (call->args_.size() == 1) {
-        auto [prefix, synthesized_signal] = MakeSignalBinding(call->span_);
-        for (auto& stmt : prefix) prelude.push_back(std::move(stmt));
-        signal = synthesized_signal;
-      } else {
-        signal = VisitExpr(call->args_[1]);
-      }
-
+      auto signal = call->args_.size() == 1 ? shared_signal_ : VisitExpr(call->args_[1]);
       auto rewritten_call = MakeAllReduceCall(call, target, signal);
       auto result_var = std::make_shared<Var>(FreshGeneratedName("__allreduce_result_"),
                                               rewritten_call->GetType(), call->span_);
@@ -168,51 +235,11 @@ class AllReduceSignalSynthesizer : public IRMutator {
     return SeqStmts::Flatten(std::move(prelude), op->span_);
   }
 
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    ++repeating_scope_depth_;
-    auto result = IRMutator::VisitStmt_(op);
-    --repeating_scope_depth_;
-    return result;
-  }
-
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    ++repeating_scope_depth_;
-    auto result = IRMutator::VisitStmt_(op);
-    --repeating_scope_depth_;
-    return result;
-  }
-
  private:
   void CheckAllReduceCall(const CallPtr& call) const {
     CHECK_SPAN(call->args_.size() == 1 || call->args_.size() == 2, call->span_)
         << "pld.tensor.allreduce expects target[, signal], got " << call->args_.size()
         << " positional arguments";
-    CHECK_SPAN(repeating_scope_depth_ == 0, call->span_)
-        << "pld.tensor.allreduce is not supported inside a for/while loop. "
-           "The signal protocol is single-use and cannot reuse a signal across dynamic invocations.";
-  }
-
-  struct SignalNames {
-    std::string world_size_name;
-    std::string buf_name;
-    std::string signal_name;
-  };
-
-  [[nodiscard]] SignalNames FreshSignalNames() {
-    while (true) {
-      auto suffix = std::to_string((*next_id_)++);
-      auto world_size_name = "__allreduce_signal_world_size_" + suffix;
-      auto buf_name = "__allreduce_signal_buf_" + suffix;
-      auto signal_name = "__allreduce_signal_" + suffix;
-      if (used_names_->count(world_size_name) != 0 || used_names_->count(buf_name) != 0 ||
-          used_names_->count(signal_name) != 0) {
-        continue;
-      }
-      used_names_->insert(world_size_name);
-      used_names_->insert(buf_name);
-      used_names_->insert(signal_name);
-      return {world_size_name, buf_name, signal_name};
-    }
   }
 
   [[nodiscard]] std::string FreshGeneratedName(const std::string& prefix) {
@@ -224,33 +251,6 @@ class AllReduceSignalSynthesizer : public IRMutator {
     }
   }
 
-  [[nodiscard]] std::pair<std::vector<StmtPtr>, VarPtr> MakeSignalBinding(const Span& span) {
-    auto names = FreshSignalNames();
-
-    auto world_size_call = OpRegistry::GetInstance().Create("pld.system.world_size", {}, span);
-    auto world_size_var = std::make_shared<Var>(names.world_size_name, world_size_call->GetType(), span);
-    auto world_size_assign = std::make_shared<AssignStmt>(world_size_var, world_size_call, span);
-
-    auto four = std::make_shared<ConstInt>(4, DataType::INT64, span);
-    auto size_bytes = MakeMul(world_size_var, four, span);
-
-    std::vector<std::pair<std::string, std::any>> alloc_kwargs = {{"name", names.buf_name}};
-    auto alloc_call =
-        OpRegistry::GetInstance().Create("pld.tensor.alloc_window_buffer", {size_bytes}, alloc_kwargs, span);
-    auto buf_var = std::make_shared<Var>(names.buf_name, alloc_call->GetType(), span);
-    auto buf_assign = std::make_shared<AssignStmt>(buf_var, alloc_call, span);
-
-    auto one = std::make_shared<ConstInt>(1, DataType::INT64, span);
-    auto signal_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{world_size_var, one}, span);
-    std::vector<std::pair<std::string, std::any>> window_kwargs = {{"dtype", DataType::INT32}};
-    auto window_call =
-        OpRegistry::GetInstance().Create("pld.tensor.window", {buf_var, signal_shape}, window_kwargs, span);
-    auto signal_var = std::make_shared<Var>(names.signal_name, window_call->GetType(), span);
-    auto signal_assign = std::make_shared<AssignStmt>(signal_var, window_call, span);
-
-    return {{world_size_assign, buf_assign, signal_assign}, signal_var};
-  }
-
   [[nodiscard]] CallPtr MakeAllReduceCall(const CallPtr& call, const ExprPtr& target, const ExprPtr& signal) {
     return OpRegistry::GetInstance().Create("pld.tensor.allreduce", {target, signal}, call->kwargs_,
                                             call->span_);
@@ -258,7 +258,7 @@ class AllReduceSignalSynthesizer : public IRMutator {
 
   std::set<std::string>* used_names_;
   int64_t* next_id_;
-  int repeating_scope_depth_ = 0;
+  VarPtr shared_signal_;
   bool modified_ = false;
 };
 
@@ -280,8 +280,29 @@ Pass SynthesizeAllReduceSignals() {
         continue;
       }
 
-      AllReduceSignalSynthesizer synthesizer(&name_collector.names, &next_signal_id);
-      auto new_body = synthesizer.VisitStmt(func->body_);
+      // One shared mesh signal per function, hoisted before the body and reused by
+      // every implicit-signal call (incl. inside loops — self-clearing kernels make
+      // reuse safe). The synthesizer still runs for explicit-signal functions to
+      // lift return-position calls and reject nested calls.
+      AllReduceSignalNeedFinder finder;
+      finder.VisitStmt(func->body_);
+      if (!finder.has_allreduce) {
+        new_functions[gvar] = func;
+        continue;
+      }
+
+      VarPtr shared_signal;
+      StmtPtr body_to_visit = func->body_;
+      if (finder.needs_signal) {
+        auto binding = MakeSharedSignalBinding(&name_collector.names, &next_signal_id, func->span_);
+        std::vector<StmtPtr> body_stmts = std::move(binding.prefix);
+        body_stmts.push_back(func->body_);
+        body_to_visit = SeqStmts::Flatten(std::move(body_stmts), func->span_);
+        shared_signal = binding.signal_var;
+      }
+
+      AllReduceSignalSynthesizer synthesizer(&name_collector.names, &next_signal_id, shared_signal);
+      auto new_body = synthesizer.VisitStmt(body_to_visit);
       if (!synthesizer.modified()) {
         new_functions[gvar] = func;
         continue;
