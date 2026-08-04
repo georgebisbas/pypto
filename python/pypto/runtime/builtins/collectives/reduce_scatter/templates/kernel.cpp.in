@@ -150,5 +150,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
   }
 
+  // Self-clearing epilogue: each peer AtomicAdd(+1) into its own cell in my
+  // memory once per call (phase-1 ready + one per tile; read_done_expected
+  // starts at 2 and ends at num_tiles + 2), so subtracting (read_done_expected
+  // - 1) restores every cell to 0 and makes the signal reusable across calls
+  // (the InCore credit-barrier protocol).
+  const int32_t barrier_count = read_done_expected - 1;
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::TNOTIFY(self_sig, -barrier_count, pto::comm::NotifyOp::AtomicAdd);
+  }
   pipe_barrier(PIPE_ALL);
 }
