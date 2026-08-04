@@ -4,8 +4,8 @@
 
 `LowerHostTensorCollectives` 将 host orchestrator 中的
 `pld.tensor.allreduce`、`pld.tensor.barrier`、`pld.tensor.broadcast`、
-`pld.tensor.reduce_scatter`、`pld.tensor.allgather` 和
-`pld.tensor.all_to_all` 调用改写为编译器内部的
+`pld.tensor.reduce_scatter`、`pld.tensor.allgather`、
+`pld.tensor.all_to_all` 和 `pld.tensor.all_to_all_v` 调用改写为编译器内部的
 builtin chip dispatch。它在 [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md) 之后运行，
 因此 window 绑定的 data tensor 和用户显式传入或编译器合成的 signal tensor 已经带有
 `WindowBuffer` 反向引用，并属于推断出的通信域。
@@ -34,28 +34,39 @@ data = pld.tensor.broadcast(data, signal, root=0)
 data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
 data = pld.tensor.allgather(stage, data, signal)
 data = pld.tensor.all_to_all(stage, data, signal)
+data = pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)
 ```
 
 `pld.tensor.allreduce` 根据 `mode` kwarg 进行分发：默认 `mode="mesh"` 会 lower 到
 `builtin.tensor.allreduce`，而 `mode="ring"` 会 lower 到
 `builtin.tensor.allreduce_ring`。其他取值将作为用户错误被拒绝。
 
-对于 `allgather` / `all_to_all`，`stage`（TPUT 源）与 `data`（结果）
-必须是两个不同的 window。`allgather` 的 `stage` 只保存本 rank 的单个分片，
-形状为 `[1, SIZE]`；`all_to_all` 的 `stage` 每行携带一个按目的地划分的分片，
-形状为 `[NR, SIZE]`。两种情况下 `data` 都是 peer 推入的 `[NR, SIZE]` 结果窗口。
+对于 `allgather` / `all_to_all` / `all_to_all_v`，`stage`/`input`（TPUT 源）
+与 `data`/`target`（结果）必须是两个不同的 window。`allgather` 的 `stage`
+只保存本 rank 的单个分片，形状为 `[1, SIZE]`；`all_to_all` 的 `stage` 每行
+携带一个按目的地划分的分片，形状为 `[NR, SIZE]`；`all_to_all_v` 的 `input`
+每个目的地携带一个 `MAX_RECV` 行容量块，形状为 `[NR*MAX_RECV, SIZE]`。
+`all_to_all` / `all_to_all_v` 两种情况下 `data`/`target` 都是 peer 推入的
+结果窗口。`all_to_all_v` 还额外要求 `send_counts`（在这一层是窗口绑定的，
+仅本地使用）和 `recv_counts`（窗口绑定，通过 `pld.system.notify` 跨 rank
+发布）——五个窗口参数都必须位于同一个 `CommDomainScopeStmt` 中，并且必须
+两两互不相同（任意一对发生别名都是跨进程竞争，无论是 data 与 data、
+data 与 control，还是 control 与 control 之间）。
 
 本 pass 会为每个参与设备生成对应的 `builtin.tensor.*` 调用（如
 `builtin.tensor.allreduce`、`builtin.tensor.allreduce_ring`、
 `builtin.tensor.barrier`、`builtin.tensor.broadcast`、
 `builtin.tensor.reduce_scatter`、`builtin.tensor.allgather`、
-`builtin.tensor.all_to_all`）。若外层
+`builtin.tensor.all_to_all`、`builtin.tensor.all_to_all_v`）。若外层
 comm-domain scope 带有显式 device 列表，则生成 `SeqStmts`；否则生成顺序
 `for r in pld.system.world_size()` 循环。
 
 每个生成的 builtin call 携带来源 `pld.tensor.*` 调用中 collective 特定的
 参数和 kwarg 属性。窗口绑定的 INOUT tensor 原样传递；标量 kwarg 值
-（`op`、`root`、`dtype`）转发给 builtin。
+（`op`、`root`、`dtype`）转发给 builtin。`all_to_all_v` 的 `MAX_RECV` 不是
+lowering 时的属性：HOST 内核在入口把它推导为 `target.shape[0] / nranks`
+（运行时通信域大小），因此不再需要按 `MAX_RECV` 进行代码生成的 variant
+混入，块布局也始终与实际运行的设备数一致。
 
 若用户代码使用赋值形式，pass 会在生成的 builtin 调用之后追加
 `<result> = <original expr>`，保留 public API 的 rebind 语义。
@@ -77,6 +88,15 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `ReduceOp.Max`、`ReduceOp.Min`、`ReduceOp.Prod` 以及 `FP16` 在
 `mode="ring"` 下尚未支持。Ring allreduce 最多支持 16 个参与设备
 （`world_size <= 16`）。
+
+`all_to_all_v` 的单次使用 Set(1)/wait≥1 信号无法在 `host_orch` 的
+`for`/`while` 循环中复用——本 pass 之前紧邻运行的
+[`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md) 会提前
+拒绝这种情况（与 `LowerCompositeOps` 在 InCore 路径上强制的限制相同）。在显式
+静态 device 子集上，`all_to_all_v` 的 signal `shape[0]` 必须与子集大小
+**精确相等**（而非其他 collective 所要求的 `>=`），因为 `MAX_RECV` 是由
+`target.shape[0] / signal.shape[0]` 推导得出的，signal 过度分配会导致
+静默的错误降级。
 
 ## Pass 属性
 

@@ -30,7 +30,7 @@ N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）�
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按 `min(send_counts[dest], MAX_RECV)` 向每个目标推送对应行数，写入平面 2D 暂存窗口，同时通过 `pld.system.notify`（Set）把该钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方能跳过未写入的空洞；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式）。超出发送方计数的行不会传输，因此窗口中这些行保留原有内容。仅支持 InCore——没有 HOST 编排层的下降实现 | `DistributedTensorType`（与 target 相同） | composite InCore |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送完整的 MAX_RECV 行容量块，写入平面 2D 暂存窗口（传输大小是每个目标完整的容量块），同时通过 `pld.system.notify`（Set）把 `min(send_counts[dest], MAX_RECV)` 发布到对端 `recv_counts[my_rank, 0]`，使接收方能跳过超出其计数的行；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 
@@ -293,7 +293,7 @@ pld.tensor.all_to_all_v(
 ) -> DistributedTensorType(target)
 ```
 
-仅 InCore 的变长 all-to-all（MPI_Alltoallv）。平面 2D 布局：
+变长 all-to-all（MPI_Alltoallv）。平面 2D 布局：
 
 - `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
@@ -302,9 +302,31 @@ pld.tensor.all_to_all_v(
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 
 `MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
-`MAX_RECV`、按该行数 TPUT 到对端窗口，并把**钳制后**的计数通过
-`pld.system.notify`（Set）写入对端 `recv_counts[my_rank, 0]`。屏障之后接收方用
-`recv_counts[src, 0]` 跳过未写入的空洞。计数之外的行不传输（窗口尾部保留原有内容）。
+`MAX_RECV`，并把**钳制后**的计数通过 `pld.system.notify`（Set）写入对端
+`recv_counts[my_rank, 0]`。推送本身总是传输每个目标完整的 `MAX_RECV` 行容量
+块——与运行时计数无关——因此超出发送方实际计数的行也会经过链路传输；屏障之后
+接收方用 `recv_counts[src, 0]` 跳过这些行（MPI_Alltoallv 语义适用于逻辑结果，
+而非链路传输本身）。InCore 路径的传输是编译期定长的 `pld.tile.put`（PTOAS 要求
+静态 partition-view 维度）；HOST 路径的内核在入口根据运行时 rank 数推导
+`MAX_RECV`（`target.shape[0] / nranks`），因此始终与实际运行的设备数一致。
+
+**InCore composite**（`LowerCompositeOps`）：上述原语在芯片内核中被分解为
+`pld.tile.put` + `pld.system.notify`/`wait`。
+
+**HOST builtin**（`LowerHostTensorCollectives`）：同样的 5 参数调用，在
+`host_orch` 函数中发起时，会按设备下降为 `builtin.tensor.all_to_all_v`——
+一个内核内 TPUT 的 AIV builtin，遵循与 `builtin.tensor.all_to_all` 相同的模式。
+在这一层，`input` 与 `send_counts` 都必须是窗口绑定的 `DistributedTensor`（比
+composite 的 `AsTensorTypeLike` 更严格，这是 HOST 派发代码生成强制要求的——
+它只支持窗口绑定或 tile 参数）——五个操作数（`input`、`target`、`signal`、
+`send_counts`、`recv_counts`）必须两两解析到不同的窗口分配（任意一对发生别名
+都是跨进程竞争：data 与 data 之间是 TPUT 覆盖，data 与 control 之间是
+notify/count 写入与内核读取竞争，control 与 control 之间是 notify 与 count
+发布竞争）。内核在入口把 `MAX_RECV` 推导为 `target.shape[0] / nranks`（运行时
+通信域大小），因此块布局始终与实际运行的设备数一致——不再需要
+`signal.shape[0]` 与设备数**精确相等**的要求，也不再需要按 `MAX_RECV` 进行
+variant 混入。不支持在 `host_orch` 的 `for`/`while` 循环内调用（单次使用
+的信号协议）——与 `LowerCompositeOps` 在 InCore 路径上强制的限制相同。
 
 ### `pld.tensor.allreduce`
 
@@ -440,7 +462,8 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_allreduce_ring.py`（手写 ring RS+AG）、
   `test_l3_host_tensor_allreduce.py`、`test_l3_host_tensor_allreduce_ring.py`、
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
-  `test_l3_tensor_all_to_all_v_intrinsic.py`，以及
+  `test_l3_tensor_all_to_all_v_intrinsic.py`（InCore composite）、
+  `test_l3_host_tensor_all_to_all_v.py`（HOST builtin），以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`

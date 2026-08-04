@@ -735,10 +735,10 @@ def test_all_to_all_v_push_loop_is_bounded_by_runtime_send_counts():
     )
 
 
-def test_all_to_all_v_is_rejected_in_host_orchestrator():
-    """all_to_all_v is InCore-only: LowerHostTensorCollectives has no rule for
-    it, so deferring it from a HOST orchestrator would leave the composite op
-    unlowered all the way into codegen. It must be rejected up front."""
+def test_all_to_all_v_in_host_orchestrator_is_left_for_host_collective_lowering():
+    """Host-level all_to_all_v is lowered by LowerHostTensorCollectives (via its
+    builtin.tensor.all_to_all_v rule), not here — LowerCompositeOps must defer
+    it unchanged rather than reject it."""
     SIZE = _AAV_SIZE
     nr = _AAV_NRANKS
     total = _AAV_TOTAL
@@ -757,8 +757,12 @@ def test_all_to_all_v_is_rejected_in_host_orchestrator():
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)  # type: ignore[arg-type]
             return 0
 
-    with pytest.raises(ValueError, match="not supported in a HOST orchestration function"):
-        passes.lower_composite_ops()(HostAllToAllV)
+    After = passes.lower_composite_ops()(HostAllToAllV)
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.all_to_all_v" in op_names
+    assert "pld.system.notify" not in op_names
+    assert "pld.tile.put" not in op_names
 
 
 def test_allreduce_without_signal_is_rejected_outside_host_orchestrator():

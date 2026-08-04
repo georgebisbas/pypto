@@ -988,6 +988,138 @@ def test_explicit_allreduce_in_while_loop_is_rejected():
         _apply(P)
 
 
+def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
+    """signal and recv_counts (both device-descriptor-less) each register their
+    own CollectiveConsumer entry sharing all_to_all_v's target alloc, so both
+    inherit target's device coverage — send_counts does not (its coverage comes
+    from its own dispatch site, like symmetric all_to_all's `input`).
+
+    chip_orch deliberately does NOT take `signal`/`recv` as params (unlike the
+    lowering-rule tests) — if it did, the per-rank dispatch loop would give
+    them their own device descriptors directly, and this test would pass even
+    with the two new CollectiveConsumer entries removed. Matches
+    test_allreduce_signal_inherits_data_comm_domain's discipline of leaving
+    the signal-like arg out of the dispatch site so only the collective's own
+    inheritance mechanism can supply its coverage.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            data: pld.DistributedTensor[[8, 64], pl.FP32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, counts, device=r)
+            signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
+            return 0
+
+    result = _apply(P)
+    host = _get_func(result, "host_orch")
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(
+        scopes[0],
+        [],
+        [
+            _expected_slot("input_buf", _mul(8 * 64, 4)),
+            _expected_slot("data_buf", _mul(8 * 64, 4)),
+            _expected_slot("signal_buf", _mul(4, 4)),
+            _expected_slot("counts_buf", _mul(4, 4)),
+            _expected_slot("recv_buf", _mul(4, 4)),
+        ],
+    )
+
+
+def test_all_to_all_v_in_loop_is_rejected():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            data: pld.DistributedTensor[[8, 64], pl.FP32],
+            sig: pld.DistributedTensor[[4, 1], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            for _ in pl.range(2):
+                data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
+            return 0
+
+    with pytest.raises(ValueError, match="all_to_all_v is not supported inside a for/while loop"):
+        _apply(P)
+
+
+def test_all_to_all_v_in_while_loop_is_rejected():
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 64], pl.FP32],
+            data: pld.DistributedTensor[[8, 64], pl.FP32],
+            sig: pld.DistributedTensor[[4, 1], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            while True:
+                data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
+            return 0
+
+    with pytest.raises(ValueError, match="all_to_all_v is not supported inside a for/while loop"):
+        _apply(P)
+
+
 def test_nested_explicit_allreduce_expression_is_rejected():
     @pl.program
     class P:

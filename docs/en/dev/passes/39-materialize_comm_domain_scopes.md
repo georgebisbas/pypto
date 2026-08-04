@@ -64,7 +64,12 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    descriptor to its underlying allocation.
 
 4. **Merge descriptors.** Per allocation, fold every recorded descriptor:
-   any `kAll` ⇒ `kAll`; otherwise union the subsets.
+   any `kAll` ⇒ `kAll`; otherwise union the subsets. A host-level collective's
+   signal (and, for `pld.tensor.all_to_all_v`, its `recv_counts`) carries no
+   `device=` of its own, so it inherits device coverage from the collective's
+   paired data/target allocation instead — a call may register more than one
+   such pairing sharing the same data allocation (`all_to_all_v` registers two:
+   one for `signal`, one for `recv_counts`).
 
 5. **Materialise `WindowBuffer`s.** For each allocation construct
    `WindowBuffer(base = ptr_var, size = size_expr, load_from_host = false,
@@ -100,6 +105,10 @@ The pass raises `pypto::ValueError` (carrying the alloc's span) if:
   or a recognised `pl.range` induction var.
 - Two allocations within the same comm domain share a `name_hint_` (the
   parser already enforces global uniqueness; the pass re-asserts).
+- A `pld.tensor.all_to_all_v` call sits inside a `for`/`while` loop in a HOST
+  orchestrator — its Set(1)/wait≥1 signal is single-use and cannot be reused
+  across dynamic invocations (same restriction `LowerCompositeOps` enforces on
+  the InCore path).
 
 ## Output invariants
 

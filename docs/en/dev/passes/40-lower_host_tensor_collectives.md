@@ -4,8 +4,8 @@
 
 `LowerHostTensorCollectives` rewrites host-orchestrator calls to
 `pld.tensor.allreduce`, `pld.tensor.barrier`, `pld.tensor.broadcast`,
-`pld.tensor.reduce_scatter`, `pld.tensor.allgather`, and
-`pld.tensor.all_to_all` into compiler-internal
+`pld.tensor.reduce_scatter`, `pld.tensor.allgather`,
+`pld.tensor.all_to_all`, and `pld.tensor.all_to_all_v` into compiler-internal
 builtin chip dispatches. It runs
 after [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md), so
 each window-bound data tensor and explicit or synthesized signal tensor already has a
@@ -35,6 +35,7 @@ data = pld.tensor.broadcast(data, signal, root=0)
 data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
 data = pld.tensor.allgather(stage, data, signal)
 data = pld.tensor.all_to_all(stage, data, signal)
+data = pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)
 ```
 
 `pld.tensor.allreduce` dispatches on its `mode` kwarg: the default
@@ -42,25 +43,38 @@ data = pld.tensor.all_to_all(stage, data, signal)
 to `builtin.tensor.allreduce_ring`. Any other value is rejected as a user
 error.
 
-For `allgather` / `all_to_all`, `stage` (TPUT source) and `data` (result)
-must be two distinct windows. For `allgather` the `stage` window holds only
-this rank's single chunk and is `[1, SIZE]`; for `all_to_all` it carries one
-per-destination chunk per row and is `[NR, SIZE]`. In both cases `data` is the
-`[NR, SIZE]` result window peers push into.
+For `allgather` / `all_to_all` / `all_to_all_v`, `stage`/`input` (TPUT source)
+and `data`/`target` (result) must be two distinct windows. For `allgather` the
+`stage` window holds only this rank's single chunk and is `[1, SIZE]`; for
+`all_to_all` it carries one per-destination chunk per row and is
+`[NR, SIZE]`; for `all_to_all_v` it carries one `MAX_RECV`-row capacity block
+per destination and is `[NR*MAX_RECV, SIZE]`. In both `all_to_all` /
+`all_to_all_v` cases `data`/`target` is the peers'-push-in result window.
+`all_to_all_v` additionally requires `send_counts` (window-bound at this
+layer, LOCAL-only) and `recv_counts` (window-bound, published cross-rank via
+`pld.system.notify`) — all five window args must resolve into the same
+`CommDomainScopeStmt` and must be pairwise-distinct window allocations
+(aliasing any pair is a cross-process race, whether data-vs-data,
+data-vs-control, or control-vs-control).
 
 The pass emits the corresponding `builtin.tensor.*` dispatch per participating
 device (including `builtin.tensor.allreduce` /
 `builtin.tensor.allreduce_ring`, `builtin.tensor.barrier`,
 `builtin.tensor.broadcast`, `builtin.tensor.reduce_scatter`,
-`builtin.tensor.allgather`, and `builtin.tensor.all_to_all`). When the
-surrounding comm-domain scope has an explicit device list, the pass emits a
-`SeqStmts`; otherwise it emits a sequential `for r in
+`builtin.tensor.allgather`, `builtin.tensor.all_to_all`, and
+`builtin.tensor.all_to_all_v`). When the surrounding comm-domain scope has an
+explicit device list, the pass emits a `SeqStmts`; otherwise it emits a
+sequential `for r in
 pld.system.world_size()` loop.
 
 Each generated builtin call carries the collective-specific args and kwarg
 attributes from the source `pld.tensor.*` call.  Window-bound INOUT tensors
 are threaded through as-is; scalar kwarg values (`op`, `root`, `dtype`) are
-forwarded to the builtin.
+forwarded to the builtin. `all_to_all_v`'s `MAX_RECV` is not a lowering-time
+attribute: the HOST kernel derives it at entry as `target.shape[0] / nranks`
+(the runtime comm-domain size), so no per-`MAX_RECV` codegen variant mangling
+is needed and the block layout stays consistent with the devices actually
+running.
 
 Assignments preserve the user-facing rebind idiom by appending
 `<result> = <original expr>` after the generated builtin calls.
@@ -89,6 +103,15 @@ Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 `ReduceOp.Max`, `ReduceOp.Min`, `ReduceOp.Prod`, and `FP16` are not yet available
 with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
+
+`all_to_all_v`'s single-use Set(1)/wait≥1 signal cannot be reused across a
+`for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](39-materialize_comm_domain_scopes.md),
+which runs immediately before this pass, rejects that case up front (the same
+restriction `LowerCompositeOps` enforces on the InCore path). On an explicit
+static device subset, `all_to_all_v`'s signal `shape[0]` must exactly equal
+the subset size (not merely `>=`, as required for the other collectives),
+since `MAX_RECV` is derived as `target.shape[0] / signal.shape[0]` and an
+over-provisioned signal would silently mis-lower.
 
 ## Pass properties
 

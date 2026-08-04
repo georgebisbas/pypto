@@ -1980,20 +1980,24 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
 // ============================================================================
 // LowerTensorAllToAllVRule — pld.tensor.all_to_all_v (variable-size all-to-all)
 //
-// Variable-size all-to-all (MPI_Alltoallv pattern).  Each rank sends a
-// different, *runtime* number of rows to each peer: ``send_counts[dest]`` is
-// read from device data during the exchange and bounds that destination's push
-// loop, so only the rows that carry payload cross the interconnect.  The 5-arg
-// API signature (input, target, signal, send_counts, recv_counts) extends the
-// symmetric all_to_all's window-as-result pattern: the intrinsic returns
-// target, and the caller reads back from the window with tile.load.  During
-// the push phase each rank also publishes ``send_counts[dest]`` into peer
-// ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set) —
-// MPI_Alltoallv recvcounts — so after the barrier the receiver can skip the
-// unwritten holes at the tail of each source's MAX_RECV slot.  Notify writes
-// a scalar INT32 cell (same path as the barrier signal), so ``recv_counts``
-// stays ``[NR, 1]`` and no post-convert ``tensor.create`` scratch is needed
-// (ConvertTensorToTileOps already ran before this pass).
+// Variable-size all-to-all (MPI_Alltoallv pattern).  Each rank pushes a full
+// MAX_RECV-row capacity block to every peer via a single static-shape
+// pld.tile.put per destination; only ``min(send_counts[dest], MAX_RECV)`` of
+// those rows are logically valid.  ``send_counts[dest]`` is a *runtime*,
+// data-dependent count read from device data during the exchange, but it
+// does not change the transfer size (PTOAS requires static partition-view
+// dims for pto.comm.tput).  The 5-arg API signature (input, target, signal,
+// send_counts, recv_counts) extends the symmetric all_to_all's
+// window-as-result pattern: the intrinsic returns target, and the caller
+// reads back from the window with tile.load.  During the push phase each
+// rank also publishes the *clamped* ``min(send_counts[dest], MAX_RECV)``
+// into peer ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify``
+// (Set) — MPI_Alltoallv recvcounts — so after the barrier the receiver knows
+// how many of the physically-transferred rows at the tail of each source's
+// MAX_RECV slot are logically valid. Notify writes a scalar INT32 cell (same
+// path as the barrier signal), so ``recv_counts`` stays ``[NR, 1]`` and no
+// post-convert ``tensor.create`` scratch is needed (ConvertTensorToTileOps
+// already ran before this pass).
 //
 // 2-phase push-based decomposition:
 //
@@ -2011,15 +2015,17 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
 //     EmitBarrier() — AtomicAdd(+1) on every peer cell, then Wait(Ge 1)
 //     EmitEpilogueReset(-1) — subtracts the credit back to zero after the call
 //
-// MAX_RECV = target.shape[0] / NR (both must be compile-time constants) is the
-// per-peer *capacity*, not the transfer size: it fixes the flat row-index
-// arithmetic (dest*MAX_RECV+r) so a receiver can locate each sender's block
-// without knowing that sender's count.  Counts are clamped to MAX_RECV so an
-// out-of-range count cannot push past peer dest's capacity slice.  Rows beyond
-// a sender's count are never written, so those receive-window rows keep their
-// prior contents — the same guarantee MPI_Alltoallv gives for the untouched
-// tail of a receive buffer.  Valid rows for source src are therefore
-// recv_counts[src] (already clamped to MAX_RECV at publish time).
+// MAX_RECV = target.shape[0] / NR (both must be compile-time constants) is
+// both the per-peer *capacity* and the fixed transfer size: it fixes the flat
+// row-index arithmetic (dest*MAX_RECV+r) so a receiver can locate each
+// sender's block without knowing that sender's count, and it sizes every
+// pld.tile.put identically regardless of the runtime count.  Counts are
+// clamped to MAX_RECV so an out-of-range count cannot push past peer dest's
+// capacity slice.  Rows beyond a sender's actual count still physically cross
+// the wire, but are logically invalid — the receiver uses recv_counts[src]
+// (already clamped to MAX_RECV at publish time) to know how many leading rows
+// of source src's block to use, the same MPI_Alltoallv semantics applied to
+// the logical result rather than the wire transfer.
 // ============================================================================
 
 ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
@@ -2343,22 +2349,8 @@ class LowerCompositeOpsMutator : public IRMutator {
     return IsTensorCollective(call);
   }
 
-  // Collectives that only have an InCore lowering — i.e. no matching entry in
-  // LowerHostTensorCollectives' kRules table.  Deferring one of these from a
-  // HOST orchestrator would drop it between the two passes (this pass skips it,
-  // the host pass never recognises it) and leave the composite op unlowered all
-  // the way into codegen, so it is rejected up front instead.  Keep in sync
-  // with kRules in src/ir/transforms/lower_host_tensor_collectives_pass.cpp.
-  [[nodiscard]] static bool IsInCoreOnlyCollective(const CallPtr& call) {
-    return IsOp(call, "pld.tensor.all_to_all_v");
-  }
-
   [[nodiscard]] CompositeLoweringFn LookupRule(const CallPtr& call) const {
     if (skip_host_collectives_ && ShouldSkipHostCollective(call)) {
-      CHECK_SPAN(!IsInCoreOnlyCollective(call), call->span_)
-          << call->op_->name_
-          << " is not supported in a HOST orchestration function — it has no host-level "
-             "lowering. Call it from an InCore function instead.";
       return nullptr;
     }
     return call && call->op_ ? LookupCompositeRule(call->op_->name_) : nullptr;

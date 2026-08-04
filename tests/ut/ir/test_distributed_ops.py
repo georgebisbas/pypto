@@ -359,6 +359,29 @@ def test_builtin_tensor_allreduce_template_resource_exists():
     assert (template_root / "templates" / "kernel_config.py.in").is_file()
 
 
+def test_builtin_tensor_all_to_all_v_is_internal_only():
+    span = ir.Span.unknown()
+    inp = _make_distributed_tensor_var("inp", [8, 64], DataType.FP32, span)
+    target = _make_distributed_tensor_var("target", [8, 64], DataType.FP32, span)
+    signal = _make_distributed_tensor_var("signal", [4, 1], DataType.INT32, span)
+    counts = _make_distributed_tensor_var("counts", [4, 1], DataType.INT32, span)
+    recv = _make_distributed_tensor_var("recv", [4, 1], DataType.INT32, span)
+    with pytest.raises(ValueError, match="internal-only"):
+        ir.create_op_call(
+            "builtin.tensor.all_to_all_v",
+            [inp, target, signal, counts, recv],
+            {"dtype": DataType.FP32},
+            span,
+        )
+
+
+def test_builtin_tensor_all_to_all_v_template_resource_exists():
+    template_root = resources.files("pypto.runtime.builtins.collectives.all_to_all_v")
+    assert (template_root / "templates" / "entry.cpp.in").is_file()
+    assert (template_root / "templates" / "kernel.cpp.in").is_file()
+    assert (template_root / "templates" / "kernel_config.py.in").is_file()
+
+
 # ---------------------------------------------------------------------------
 # pld.tile.remote_load op
 # ---------------------------------------------------------------------------

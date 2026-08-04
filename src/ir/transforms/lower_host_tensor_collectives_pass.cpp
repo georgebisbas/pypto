@@ -10,6 +10,7 @@
  */
 
 #include <any>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -304,6 +305,56 @@ void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
          "cross-process data race under in-kernel TPUT)";
 }
 
+// pld.tensor.all_to_all_v's public deducer accepts a plain Tensor for `input`
+// and `send_counts` (AsTensorTypeLike) — legitimate on the InCore composite
+// path, where LowerCompositeOps consumes them directly. The HOST builtin path
+// requires both to be window-bound (EmitBuiltinWindowCollectiveDispatch has no
+// dispatch arm for a plain Tensor), so a plain-Tensor value reaching here is
+// user-reachable HOST-specific input, not a compiler invariant violation.
+// A user-declared pld.DistributedTensor parameter is equally user-reachable
+// (window_buffer_ == nullopt until pld.tensor.window binds it) and must be
+// rejected the same way — reject both with a CHECK_SPAN (not GetWindowBuffer's
+// INTERNAL_CHECK_SPAN) before any window-buffer lookup is attempted.
+void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const char* role) {
+  auto dist_type = As<DistributedTensorType>(expr->GetType());
+  CHECK_SPAN(dist_type != nullptr && dist_type->window_buffer_.has_value(), expr->span_)
+      << op_name << " " << role
+      << " must be a window-bound DistributedTensor (a view of an alloc_window_buffer) when "
+         "called from a HOST orchestrator; a plain Tensor or an unbound DistributedTensor "
+         "parameter is only supported on the InCore composite path";
+}
+
+// all_to_all_v's five operands (input, target, signal, send_counts,
+// recv_counts) are independently read/written across ranks inside one AIV
+// kernel; any pairwise aliasing among them is a real cross-process race, not
+// just a style nit:
+//   - data (input/target) aliasing a control window (signal/send_counts/
+//     recv_counts): peer notify/count writes can clobber data this rank is
+//     still reading, or a data TPUT can clobber a control value.
+//   - signal aliasing recv_counts: the barrier's per-peer notify(Set, 1) can
+//     overwrite a just-published count, or a wait can be satisfied early
+//     against a value the count-publish rewrote.
+//   - send_counts aliasing signal or recv_counts: the kernel's local
+//     send_counts[dest] read can race a peer's cross-rank notify write
+//     landing in the same memory.
+// All 10 pairs across the 5 operands must be checked, not just the 4 pairs
+// that data-vs-data / control-vs-control discipline alone would cover.
+void CheckAllToAllVDistinctWindows(const CallPtr& call, const char* op_name) {
+  static constexpr std::array<std::pair<int, const char*>, 5> kOperands = {
+      {{0, "input"}, {1, "target"}, {2, "signal"}, {3, "send_counts"}, {4, "recv_counts"}}};
+  std::array<WindowBufferPtr, 5> buffers;
+  for (size_t i = 0; i < kOperands.size(); ++i) {
+    buffers[i] = GetWindowBuffer(call->args_[kOperands[i].first], kOperands[i].second);
+  }
+  for (size_t i = 0; i < buffers.size(); ++i) {
+    for (size_t j = i + 1; j < buffers.size(); ++j) {
+      CHECK_SPAN(buffers[i].get() != buffers[j].get(), call->span_)
+          << op_name << " " << kOperands[i].second << " and " << kOperands[j].second
+          << " must be different window allocations";
+    }
+  }
+}
+
 [[nodiscard]] CallPtr MakeBuiltinAllGather(const CallPtr& call, const ExprPtr& device) {
   // Emit namesake builtin: in-kernel TPUT push (this rank's chunk from the
   // `input` staging window into every peer's `target` window) + barrier
@@ -332,6 +383,28 @@ void CheckDistinctInputTargetWindows(const CallPtr& call, const char* op_name) {
       {call->args_[0], call->args_[1], call->args_[2]},  // (input, target, signal)
       {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
       {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut});
+}
+
+[[nodiscard]] CallPtr MakeBuiltinAllToAllV(const CallPtr& call, const ExprPtr& device) {
+  // Emit namesake builtin: in-kernel TPUT push of the full per-destination
+  // MAX_RECV block (this rank's chunks from `input` into every peer's
+  // `target` window) + an inline cross-rank publish of the runtime-clamped
+  // send_counts[dest] into peer `recv_counts[my_rank, 0]` + one barrier
+  // (TNOTIFY / TWAIT), all in a single AIV kernel. All five operands (input,
+  // target, signal, send_counts, recv_counts) must be pairwise-distinct
+  // windows. All chips must run concurrently — the host orchestrator submits
+  // asynchronously.
+  CheckAllToAllVDistinctWindows(call, "pld.tensor.all_to_all_v");
+  auto target_type = As<DistributedTensorType>(call->args_[1]->GetType());
+  INTERNAL_CHECK_SPAN(target_type, call->span_)
+      << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
+
+  return MakeBuiltinCallWithAttrs(
+      "builtin.tensor.all_to_all_v", call,
+      {call->args_[0], call->args_[1], call->args_[2], call->args_[3], call->args_[4]},
+      {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
+      {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut, ArgDirection::Input,
+       ArgDirection::InOut});
 }
 
 struct HostCollectiveRule {
@@ -413,6 +486,23 @@ struct HostCollectiveRule {
           [](const CallPtr& call) { return call->args_[2]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
       },
+      {
+          "pld.tensor.all_to_all_v",
+          &MakeBuiltinAllToAllV,
+          [](const CallPtr& call) {
+            CheckHostWindowBoundArg(call->args_[0], "pld.tensor.all_to_all_v", "input");
+            CheckHostWindowBoundArg(call->args_[3], "pld.tensor.all_to_all_v", "send_counts");
+            return std::vector<WindowBufferPtr>{
+                GetWindowBuffer(call->args_[0], "all_to_all_v input"),
+                GetWindowBuffer(call->args_[1], "all_to_all_v target"),
+                GetWindowBuffer(call->args_[2], "all_to_all_v signal"),
+                GetWindowBuffer(call->args_[3], "all_to_all_v send_counts"),
+                GetWindowBuffer(call->args_[4], "all_to_all_v recv_counts"),
+            };
+          },
+          [](const CallPtr& call) { return call->args_[2]; },
+          [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[1]; },
+      },
   };
   for (const auto& rule : kRules) {
     if (op_name == rule.pld_name) return &rule;
@@ -442,6 +532,10 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
     return std::make_shared<SeqStmts>(std::move(stmts), span, leading_comments);
   }
 
+  // NOTE: for the fully-dynamic all-device domain (devices_ empty), signal's
+  // compile-time shape[0] is trusted to equal the runtime world_size — PyPTO
+  // has no runtime-assert IR primitive today to check this at compile time
+  // (see KNOWN_ISSUES.md).
   auto loop_var = std::make_shared<Var>("r", std::make_shared<ScalarType>(DataType::INT64), call->span_);
   auto zero = std::make_shared<ConstInt>(0, DataType::INT64, call->span_);
   auto one = std::make_shared<ConstInt>(1, DataType::INT64, call->span_);

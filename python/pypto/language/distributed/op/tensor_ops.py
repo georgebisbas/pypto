@@ -886,9 +886,10 @@ def all_to_all_v(
     5-arg form: ``pld.tensor.all_to_all_v(input, target, signal, send_counts,
     recv_counts)``.
 
-    Each rank sends ``send_counts[dest]`` rows to peer ``dest`` — the counts are
-    read at runtime, so they may be data-dependent (e.g. MoE tokens per expert),
-    and only those rows cross the interconnect.  Mirrors the symmetric
+    Each rank pushes a full ``MAX_RECV``-row capacity block to peer ``dest``;
+    only ``send_counts[dest]`` of those rows are logically valid — the counts
+    are read at runtime, so they may be data-dependent (e.g. MoE tokens per
+    expert), but they do not change the transfer size.  Mirrors the symmetric
     ``pld.tensor.all_to_all`` otherwise: rows are pushed into a flat 2D staging
     window via ``pld.tile.put``, and the window is returned so the caller can
     read back via ``pl.load``.  There is no built-in read-back phase — the user
@@ -900,21 +901,24 @@ def all_to_all_v(
     [NR*MAX_RECV, SIZE] — the staging window that doubles as the result;
     rank ``src``'s rows land at ``src*MAX_RECV ...``.
 
-    ``MAX_RECV = target.shape[0] // NR`` is the compile-time per-peer
-    *capacity*, not the transfer size: it fixes the row-index arithmetic so a
-    receiver can locate each sender's block without knowing that sender's
-    count.  Counts are clamped to ``MAX_RECV``.  Rows beyond a sender's count
-    are never written, so those window rows keep their prior contents — as with
-    ``MPI_Alltoallv``, the untouched tail of the receive buffer is not zeroed.
-    Zero it yourself if the read-back path relies on it.
+    ``MAX_RECV = target.shape[0] // NR`` is both the compile-time per-peer
+    *capacity* and the fixed transfer size: it fixes the row-index arithmetic
+    so a receiver can locate each sender's block without knowing that
+    sender's count, and every push transfers exactly ``MAX_RECV`` rows
+    regardless of the runtime count.  Counts are clamped to ``MAX_RECV``.
+    Rows beyond a sender's count still physically cross the wire but are
+    logically invalid — as with ``MPI_Alltoallv``, the receiver must not read
+    past its published ``recv_counts`` entry; the tail is not zeroed, so
+    treat it as containing stale/undefined data, not zeros.
 
     During the same push, each rank also publishes
     ``min(send_counts[dest], MAX_RECV)`` into peer ``dest``'s
     ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set). After the
-    barrier, ``recv_counts[src, 0]`` tells this rank how many valid rows ``src``
-    wrote — use that count to skip the unwritten holes. This is the
-    MPI_Alltoallv recvcounts side (published value equals rows actually
-    transferred).
+    barrier, ``recv_counts[src, 0]`` tells this rank how many of the
+    physically-transferred rows from ``src`` are logically valid — use that
+    count to know where to stop reading. This is the MPI_Alltoallv recvcounts
+    side (published value is the clamped logical count, not the physical
+    transfer size).
 
     The barrier ``signal`` is single-use (same Set(1)/wait≥1 protocol as
     allreduce) and must not be reused inside a ``for``/``while`` loop.

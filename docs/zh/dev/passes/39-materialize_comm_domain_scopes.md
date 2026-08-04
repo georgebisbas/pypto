@@ -57,7 +57,11 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
    每个位置参数若是已记录的 view Var，就向对应 alloc 追加该描述符。
 
 4. **合并描述符**。对每个 alloc 折叠记录到的所有描述符：任何 `kAll` ⇒ `kAll`；
-   否则取 subset 并集。
+   否则取 subset 并集。HOST 级 collective 的 signal（以及
+   `pld.tensor.all_to_all_v` 的 `recv_counts`）自身没有 `device=`，因此从
+   collective 配对的 data/target alloc 继承设备覆盖范围——一次调用可以注册
+   多个共享同一 data alloc 的配对（`all_to_all_v` 会注册两个：一个用于
+   `signal`，一个用于 `recv_counts`）。
 
 5. **构造 `WindowBuffer`**。对每个 alloc 构造
    `WindowBuffer(base = ptr_var, size = size_expr, load_from_host = false,
@@ -85,6 +89,9 @@ alloc / view / dispatch 点在此时仍然可见。放在较晚阶段还能让�
   归纳变量。
 - 同一 comm-domain scope 内 `name_hint_` 重名（parser 已在程序范围内做了唯一性
   校验，本 pass 再次断言）。
+- `pld.tensor.all_to_all_v` 调用位于 HOST orchestrator 的 `for`/`while`
+  循环内——其 Set(1)/wait≥1 信号是单次使用的，无法在动态调用间复用（与
+  `LowerCompositeOps` 在 InCore 路径上强制的限制相同）。
 
 ## 输出不变量
 

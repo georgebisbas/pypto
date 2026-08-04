@@ -398,8 +398,10 @@ def all_to_all_v(
     per-source valid-row counts after the barrier (published via
     ``pld.system.notify`` as ``min(send_counts[dest], MAX_RECV)``). Powered by
     LowerCompositeOps into a 2-phase push-based decomposition (push → barrier),
-    returning the target window. The caller reads back from the window with
-    ``pl.load``, using ``recv_counts[src, 0]`` to skip unwritten holes.
+    returning the target window. Each push transfers a full MAX_RECV-row
+    capacity block regardless of the runtime count; the caller reads back
+    from the window with ``pl.load``, using ``recv_counts[src, 0]`` to know
+    how many of the physically-transferred rows are logically valid.
 
     ``send_counts`` is read at runtime, so the counts may be data-dependent;
     each count is clamped to the per-peer capacity ``MAX_RECV =

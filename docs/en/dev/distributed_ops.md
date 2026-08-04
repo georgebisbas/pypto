@@ -34,7 +34,7 @@ There are **thirteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `min(send_counts[dest], MAX_RECV)` rows per destination into a flat 2D staging window, and publishes that clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver can skip unwritten holes; returns window as result (same window-as-result pattern as symmetric `all_to_all`). Rows beyond a sender's count are not transferred, so those window rows keep their prior contents. InCore only — there is no HOST-orchestration lowering | `DistributedTensorType` (same as target) | composite InCore |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes the full MAX_RECV-row block per destination into a flat 2D staging window (transfer size is the full per-destination capacity block), and publishes `min(send_counts[dest], MAX_RECV)` into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver can skip rows beyond its count; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
@@ -334,7 +334,7 @@ pld.tensor.all_to_all_v(
 ) -> DistributedTensorType(target)
 ```
 
-InCore-only variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
+Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 
 - `input` — Tensor or DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
@@ -343,11 +343,38 @@ InCore-only variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
 
 `MAX_RECV = target.shape[0] // NR`. Lowering reads `send_counts[dest]` at
-runtime, clamps to `MAX_RECV`, TPUTs that many rows into the peer window, and
-publishes the **clamped** count into peer `recv_counts[my_rank, 0]` via
-`pld.system.notify` (Set). After the barrier the receiver uses
-`recv_counts[src, 0]` to skip unwritten holes. Rows beyond the count are not
-transferred (window tails keep prior contents).
+runtime, clamps to `MAX_RECV`, and publishes the **clamped** count into peer
+`recv_counts[my_rank, 0]` via `pld.system.notify` (Set). The push itself
+always transfers the full `MAX_RECV`-row capacity block per destination —
+independent of the runtime count — so rows beyond a sender's actual count
+still cross the wire; after the barrier the receiver uses `recv_counts[src, 0]`
+to skip those rows (MPI_Alltoallv semantics apply to the logical result, not
+the wire transfer). On the InCore path the transfer is a compile-time-sized
+`pld.tile.put` (PTOAS requires static partition-view dims); on the HOST path
+the kernel derives `MAX_RECV` at entry from the runtime rank count
+(`target.shape[0] / nranks`), so it is always consistent with the devices
+actually running.
+
+**InCore composite** (`LowerCompositeOps`): the primitive above, decomposed
+into `pld.tile.put` + `pld.system.notify`/`wait` inside a chip kernel.
+
+**HOST builtin** (`LowerHostTensorCollectives`): the same 5-arg call, made
+from a `host_orch` function, lowers per-device to `builtin.tensor.all_to_all_v`
+— an in-kernel-TPUT AIV builtin following the same pattern as
+`builtin.tensor.all_to_all`. `input` and `send_counts` must both be
+window-bound `DistributedTensor`s at this layer (narrower than the composite's
+`AsTensorTypeLike`, forced by the HOST dispatch codegen, which only supports
+window-bound or tile args) — all five operands (`input`, `target`, `signal`,
+`send_counts`, `recv_counts`) must resolve to pairwise-distinct window
+allocations (aliasing any pair is a cross-process race: data-vs-data is a TPUT
+overwrite, data-vs-control is a notify/count write racing a kernel read,
+control-vs-control is a notify racing a count publish). The kernel derives
+`MAX_RECV` at entry as `target.shape[0] / nranks` (the runtime comm-domain
+size), so the block layout is always consistent with the devices actually
+running — no exact `signal.shape[0]` == device-count requirement and no
+per-`MAX_RECV` variant mangling. Not supported inside a `for`/`while` loop in
+`host_orch` (single-use signal protocol) — the same restriction
+`LowerCompositeOps` enforces on the InCore path.
 
 ### `pld.tensor.allreduce`
 
@@ -502,7 +529,8 @@ dispatches before the final `Simplify`.
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
-  `test_l3_tensor_all_to_all_v_intrinsic.py`, and related L3 STs
+  `test_l3_tensor_all_to_all_v_intrinsic.py` (InCore composite),
+  `test_l3_host_tensor_all_to_all_v.py` (HOST builtin), and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
   chunked/pipelined transfers ✅), `test_l3_get.py` (ring read, row-offset get ✅),
