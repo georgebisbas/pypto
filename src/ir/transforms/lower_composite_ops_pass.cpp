@@ -1780,8 +1780,10 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
   ValidateMeshSignalShape(signal_type, "pld.tensor.reduce_scatter", span);
 
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.reduce_scatter");
-  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
-      << "pld.tensor.reduce_scatter lowering supports ReduceOp::kSum only (got int " << op_value << ")";
+  INTERNAL_CHECK_SPAN(
+      op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
+      << "pld.tensor.reduce_scatter lowering received unknown ReduceOp " << op_value;
+  const auto reduce_op = static_cast<ReduceOp>(op_value);
 
   auto& reg = OpRegistry::GetInstance();
   auto comm = b.EmitCommSetup(target, span);
@@ -1818,7 +1820,7 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
                   OpRegistry::GetInstance().Create("pld.tile.remote_load",
                                                    {target, peer, my_data_offsets, chunk_shape}, {}, span),
                   span);
-              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+              return then_body.Bind("acc_next", then_body.Reduce(reduce_op, acc, recv, span), span);
             },
             [&](LoweringBuilder&) -> ExprPtr { return acc; }, span);
       },
