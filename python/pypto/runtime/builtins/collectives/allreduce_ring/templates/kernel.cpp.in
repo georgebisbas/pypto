@@ -143,10 +143,13 @@ AICORE inline void NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *sign
   pipe_barrier(PIPE_ALL);
 }
 
-// Land with RoundBarrier first (NPU-safe baseline), then swap in NeighborBarrier
-// and re-verify P=2 → P=4 on silicon.  RoundBarrier is O(P²) per round but
-// brute-forces memory consistency on every rail; NeighborBarrier is O(1) and
-// only safe once the TPUT push engine (which orders the writes) is in place.
+// StepBarrier dispatches to the ring barrier selected by kUseNeighborBarrier.
+// With the TPUT push engine verified on silicon at P=2/4, the O(1)
+// NeighborBarrier (notify/wait the two ring neighbours only) is the default:
+// the TPUT write pipeline orders the pushed data ahead of the signal.  The
+// O(P²) RoundBarrier remains as a brute-force fallback — it notifies/waits
+// every peer and stays correct on any rail, at the cost of P−1 notifies per
+// round per rank.
 AICORE inline void StepBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                int nranks) {
   if (kUseNeighborBarrier) {

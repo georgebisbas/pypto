@@ -2098,6 +2098,7 @@ def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
     puts = [call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name]
     stage_creates = [call for call in collector.calls if call.op.name == ir.get_op("tile.create").name]
     assert puts
+    assert stage_creates
     assert all(len(call.args) == 7 for call in puts)
 
     stmt_collector = _StmtKindCollector()

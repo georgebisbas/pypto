@@ -1438,14 +1438,14 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
               chunk_body.EmitIf(
                   send_active,
                   [&](LoweringBuilder& push_body) {
-                    push_body.Bind(
+                    auto rs_stage_valid = push_body.Bind(
                         "rs_stage_valid",
                         reg.Create("tile.set_validshape", {put_stage, one_idx, send_valid_cols}, {}, span),
                         span);
                     push_body.Bind("push_rs",
                                    reg.Create("pld.tile.put",
-                                              {ring_target, right_peer, ring_target, put_stage, send_offsets,
-                                               send_offsets, send_valid_shape},
+                                              {ring_target, right_peer, ring_target, rs_stage_valid,
+                                               send_offsets, send_offsets, send_valid_shape},
                                               {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
                                    span);
                   },
@@ -1581,12 +1581,12 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
               chunk_body.EmitIf(
                   active,
                   [&](LoweringBuilder& push_body) {
-                    push_body.Bind(
+                    auto ag_stage_valid = push_body.Bind(
                         "ag_stage_valid",
                         reg.Create("tile.set_validshape", {put_stage, one_idx, valid_cols}, {}, span), span);
                     push_body.Bind("push_ag",
                                    reg.Create("pld.tile.put",
-                                              {ring_target, right_peer, ring_target, put_stage, offsets,
+                                              {ring_target, right_peer, ring_target, ag_stage_valid, offsets,
                                                offsets, valid_shape},
                                               {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
                                    span);
