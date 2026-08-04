@@ -133,8 +133,9 @@ class HostTensorAllToAll:
 def _build_host_all_to_all_signal_reuse_program():
     """Host all_to_all reusing ONE signal buffer across 2 back-to-back calls.
 
-    The self-clearing epilogue restores the Set(1) cells to 0 after each call;
-    without it the second call's Ge(1) wait passes on the stale satisfied cell.
+    The self-clearing epilogue restores the AtomicAdd(+1) cells to 0 after each
+    call; without it the second call's Ge(1) wait passes on the stale
+    satisfied cell.
     """
     ROUNDS = 2
 
