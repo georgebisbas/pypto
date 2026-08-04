@@ -42,6 +42,7 @@ def _make_rank_inputs(
     *,
     dtype: torch.dtype = torch.float32,
     op_name: str = "sum",
+    round_offset: float = 0.0,
 ) -> torch.Tensor:
     if op_name == "prod":
         rows = [
@@ -50,7 +51,9 @@ def _make_rank_inputs(
         ]
     else:
         rows = [
-            torch.arange(r * 100.0, r * 100.0 + size, dtype=torch.float32).reshape(1, size)
+            torch.arange(
+                r * 100.0 + round_offset, r * 100.0 + round_offset + size, dtype=torch.float32
+            ).reshape(1, size)
             for r in range(n_ranks)
         ]
     return torch.stack(rows).to(dtype)
@@ -269,14 +272,18 @@ def _build_host_allreduce(
     return HostTensorAllReduceArbitraryLength
 
 
-def _build_host_allreduce_signal_reuse(rounds: int = 3):
-    """Host allreduce that reuses ONE signal buffer across ``rounds`` back-to-back
-    calls — the self-clearing credit-barrier epilogue's target case. Before the
-    epilogue a reused signal carried stale credits and the second call's Ge(1)
-    wait passed spuriously (NPU-visible; the sim executor is sequentially
-    consistent, so the real proof is the NPU developer gate)."""
+def _build_host_allreduce_signal_reuse():
+    """Host allreduce reusing ONE signal buffer across 3 back-to-back calls.
 
-    ROUNDS = rounds
+    The program unrolls exactly three rounds (the HOST rail rejects allreduce
+    under a dynamic-trip-count loop), each reusing the shared ``signal`` — the
+    self-clearing credit-barrier epilogue's target case. Before the epilogue a
+    reused signal carried stale credits and the second call's Ge(1) wait passed
+    spuriously (NPU-visible; the sim executor is sequentially consistent, so the
+    real proof is the NPU developer gate).
+    """
+
+    ROUNDS = 3
 
     @pl.program
     class HostTensorAllReduceSignalReuse:
@@ -398,7 +405,7 @@ class TestL3HostTensorAllReduce:
 
         rounds = 3
         compiled = ir.compile(
-            _build_host_allreduce_signal_reuse(rounds),
+            _build_host_allreduce_signal_reuse(),
             platform=test_config.platform,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
@@ -408,7 +415,11 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__sum__fp32"
         assert variant_dir.is_dir()
 
-        inputs = torch.stack([_make_rank_inputs(n_ranks) for _ in range(rounds)])
+        # Each round carries a distinct offset so a stale round-1 result in a
+        # later round (a missed epilogue reset) cannot match the round's golden.
+        inputs = torch.stack(
+            [_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)]
+        )
         outputs = torch.zeros_like(inputs)
         compiled(inputs, outputs)
 
