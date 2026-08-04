@@ -269,6 +269,93 @@ def _build_host_allreduce(
     return HostTensorAllReduceArbitraryLength
 
 
+def _build_host_allreduce_signal_reuse(rounds: int = 3):
+    """Host allreduce that reuses ONE signal buffer across ``rounds`` back-to-back
+    calls — the self-clearing credit-barrier epilogue's target case. Before the
+    epilogue a reused signal carried stale credits and the second call's Ge(1)
+    wait passed spuriously (NPU-visible; the sim executor is sequentially
+    consistent, so the real proof is the NPU developer gate)."""
+
+    ROUNDS = rounds
+
+    @pl.program
+    class HostTensorAllReduceSignalReuse:
+        @pl.function(type=pl.FunctionType.InCore)
+        def publish_step(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+            local = pl.load(inp, [0, 0], [1, SIZE])
+            return pl.store(local, [0, 0], data)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def publish_orch(
+            self,
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+        ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+            return self.publish_step(inp, data)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            reduced = pl.load(data, [0, 0], [1, SIZE])
+            return pl.store(reduced, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            return self.consume_step(data, out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[ROUNDS, NR, 1, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[ROUNDS, NR, 1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[ROUNDS, NR, 1, SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+
+            # Round 1 — every round below reuses the shared ``signal``.
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                self.publish_orch(inputs[0, r], data, device=r)
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, outputs[0, r], device=r)
+
+            # Round 2 — reuse the same signal.
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                self.publish_orch(inputs[1, r], data, device=r)
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, outputs[1, r], device=r)
+
+            # Round 3 — reuse the same signal again.
+            for r in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                self.publish_orch(inputs[2, r], data, device=r)
+            data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, outputs[2, r], device=r)
+
+            return outputs
+
+    return HostTensorAllReduceSignalReuse
+
+
 class TestL3HostTensorAllReduce:
     @pytest.mark.parametrize("n_ranks", [2, 4])
     def test_host_tensor_allreduce(self, test_config, device_ids, n_ranks):
@@ -297,6 +384,40 @@ class TestL3HostTensorAllReduce:
         assert torch.allclose(outputs, expected), (
             f"host allreduce P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_host_tensor_allreduce_signal_reuse(self, test_config, device_ids, n_ranks):
+        """Reuse ONE signal buffer across 3 back-to-back allreduce calls.
+
+        The self-clearing credit-barrier epilogue restores the signal to all-zero
+        after each call; without it a reused signal carries stale credits and the
+        next call's Ge(1) wait passes spuriously (NPU-visible; sim is sequential).
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"host allreduce P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        rounds = 3
+        compiled = ir.compile(
+            _build_host_allreduce_signal_reuse(rounds),
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:n_ranks],
+                num_sub_workers=0,
+            ),
+        )
+        variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__sum__fp32"
+        assert variant_dir.is_dir()
+
+        inputs = torch.stack([_make_rank_inputs(n_ranks) for _ in range(rounds)])
+        outputs = torch.zeros_like(inputs)
+        compiled(inputs, outputs)
+
+        for rd in range(rounds):
+            expected = _expected_allreduce(inputs[rd])
+            assert torch.allclose(outputs[rd], expected), (
+                f"host allreduce signal-reuse round {rd} P={n_ranks} mismatch: "
+                f"max diff = {(outputs[rd] - expected).abs().max().item()}"
+            )
 
     def test_host_tensor_allreduce_max(self, test_config, device_ids):
         """Cover a non-default op in the materialized host builtin."""
