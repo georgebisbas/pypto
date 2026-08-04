@@ -28,9 +28,9 @@ def _expected_allreduce(inputs: torch.Tensor) -> torch.Tensor:
 
 def _make_rank_inputs(n_ranks: int, round_offset: float = 0.0) -> torch.Tensor:
     rows = [
-        torch.arange(
-            r * 100.0 + round_offset, r * 100.0 + round_offset + SIZE, dtype=torch.float32
-        ).reshape(1, SIZE)
+        torch.arange(r * 100.0 + round_offset, r * 100.0 + round_offset + SIZE, dtype=torch.float32).reshape(
+            1, SIZE
+        )
         for r in range(n_ranks)
     ]
     return torch.stack(rows)
@@ -238,9 +238,7 @@ class TestL3HostTensorAllReduceRing:
 
         # Each round carries a distinct offset so a stale round-1 result in a
         # later round (a missed epilogue reset) cannot match the round's golden.
-        inputs = torch.stack(
-            [_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)]
-        )
+        inputs = torch.stack([_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)])
         outputs = torch.zeros_like(inputs)
         compiled(inputs, outputs)
 

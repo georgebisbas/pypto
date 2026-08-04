@@ -417,9 +417,7 @@ class TestL3HostTensorAllReduce:
 
         # Each round carries a distinct offset so a stale round-1 result in a
         # later round (a missed epilogue reset) cannot match the round's golden.
-        inputs = torch.stack(
-            [_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)]
-        )
+        inputs = torch.stack([_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)])
         outputs = torch.zeros_like(inputs)
         compiled(inputs, outputs)
 
