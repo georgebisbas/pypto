@@ -76,10 +76,11 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TASSIGN(recv_tile, 0x10000);
 
   // Signal scheme: each slot is single-writer (rank j writes into my_rank's
-  // signal[j]). TNOTIFY adds a constant 1 per tile; the TWAIT threshold grows
-  // 1, 2, 3, … because TWAIT(GE) is non-consuming — the slot retains its
-  // accumulated value across tiles. This matches the reduce_scatter signal
-  // protocol (constant notify + incrementing wait threshold).
+  // signal[j]). TNOTIFY adds a constant 1 per tile plus one for the final
+  // read-complete round; the TWAIT threshold grows 1, 2, 3, … because TWAIT(GE)
+  // is non-consuming — the slot retains its accumulated value across tiles.
+  // This matches the reduce_scatter signal protocol (constant notify +
+  // incrementing wait threshold).
   int32_t expected = 1;
   for (int64_t base = 0; base < numel; base += kTileCount) {
     int64_t chunk64 = numel - base;
@@ -126,11 +127,32 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
   }
 
+  // Final read-complete barrier: each rank notifies peers (+1) only after its
+  // last tile read finishes, then waits for every peer's final notify. The
+  // per-tile wait above only guarantees the peers *notified* for the last tile
+  // — they read it after their own notify — so without this round a fast root
+  // could return, have its window reused by the next host statement, and
+  // corrupt a slow peer's final TLOAD. Mirrors the allreduce_ring final
+  // RoundBarrier and the reduce_scatter per-tile secondary sync.
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+  }
+  for (int peer = 0; peer < nranks; ++peer) {
+    if (peer == my_rank) continue;
+    pto::comm::Signal sig(signal_base + peer);
+    pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
+  }
+  pipe_barrier(PIPE_ALL);
+
   // Self-clearing epilogue: each peer AtomicAdd(+1) into its own cell in my
-  // memory once per tile (expected starts at 1 and ends at num_tiles + 1), so
-  // subtracting (expected - 1) restores every cell to 0 and makes the signal
-  // reusable across calls (the InCore credit-barrier protocol).
-  const int32_t barrier_count = expected - 1;
+  // memory once per tile plus once for the final read-complete round
+  // (expected starts at 1 and ends at num_tiles + 1), so subtracting expected
+  // restores every cell to 0 and makes the signal reusable across calls
+  // (the InCore credit-barrier protocol).
+  const int32_t barrier_count = expected;
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
