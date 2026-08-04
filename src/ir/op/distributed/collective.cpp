@@ -714,11 +714,10 @@ TypePtr DeduceTensorReduceScatterType(const std::vector<ExprPtr>& args,
       << "pld.tensor.reduce_scatter signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
 
-  // Validate op kwarg — kSum only for first version (same as allreduce).
+  // Validate op kwarg — all four reduce ops supported (mirror allreduce).
   auto op_value = GetRequiredKwarg<int>(kwargs, "op", "pld.tensor.reduce_scatter");
-  CHECK(op_value == static_cast<int>(ReduceOp::kSum))
-      << "pld.tensor.reduce_scatter op must be ReduceOp.Sum (got int " << op_value
-      << "); Max / Min / Prod lowerings are not yet implemented";
+  CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
+      << "pld.tensor.reduce_scatter op must be ReduceOp.Sum, Max, Min, or Prod (got int " << op_value << ")";
 
   // Result type: same as target (in-place rebind — rank r's row now holds
   // the reduced chunk r).
@@ -733,7 +732,7 @@ REGISTER_OP("pld.tensor.reduce_scatter")
         "rank receives one reduced chunk. `target` has shape [NR, SIZE] — each rank stages "
         "all NR chunks before the call. After the call, rank r's row [r, 0:SIZE] holds the "
         "reduced value of chunk r. `signal` is a window-bound INT32 matrix for the cross-rank "
-        "barrier. `op` selects the reduction operator (Sum only in first version). "
+        "barrier. `op` selects the reduction operator (Sum, Max, Min, Prod). "
         "InCore path: lowered to a 5-phase decomposition by LowerCompositeOps. "
         "HOST builtin path: lowered to builtin.tensor.reduce_scatter per chip by "
         "LowerHostTensorCollectives.")

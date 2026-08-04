@@ -1875,24 +1875,43 @@ def test_reduce_scatter_lowering_is_idempotent():
     ir.assert_structural_equal(twice, once)
 
 
-def test_reduce_scatter_deducer_rejects_unsupported_reduce_op():
-    """First-version lowering supports ``ReduceOp.Sum`` only — the deducer
-    must reject other variants."""
+def _build_reduce_scatter_op_program(reduce_op):
+    """Build a minimal Before program for a given ``pld.tensor.reduce_scatter`` op."""
     SIZE = _REDUCE_SCATTER_SIZE
     nr = _REDUCE_SCATTER_NRANKS
 
-    with pytest.raises((ValueError, TypeError, ParserError)):
+    @pl.program
+    class ReduceScatterOp:
+        @pl.function(type=pl.FunctionType.InCore)
+        def reduce_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, SIZE], pl.FP32]:
+            data = pld.tensor.reduce_scatter(data, signal, op=reduce_op)
+            return data
 
-        @pl.program
-        class BadOp:
-            @pl.function(type=pl.FunctionType.InCore)
-            def f(
-                self,
-                data: pl.InOut[pld.DistributedTensor[[nr, SIZE], pl.FP32]],
-                signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            ) -> pl.Tensor[[nr, SIZE], pl.FP32]:
-                data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Max)
-                return data
+    return ReduceScatterOp
+
+
+def test_reduce_scatter_supports_all_reduce_ops():
+    """All four reduce ops decompose; the accumulate step uses the matching
+    tile op (add / maximum / minimum / mul) instead of a hard-coded tile.add."""
+    op_to_tile_op = {
+        pld.ReduceOp.Sum: "tile.add",
+        pld.ReduceOp.Max: "tile.maximum",
+        pld.ReduceOp.Min: "tile.minimum",
+        pld.ReduceOp.Prod: "tile.mul",
+    }
+    for reduce_op, tile_op in op_to_tile_op.items():
+        After = passes.lower_composite_ops()(_build_reduce_scatter_op_program(reduce_op))
+        op_names = set(_collect_op_names(After))
+        assert "pld.tensor.reduce_scatter" not in op_names, (
+            "lower_composite_ops must remove the composite reduce_scatter call entirely"
+        )
+        assert tile_op in op_names, (
+            f"reduce_scatter({reduce_op}) expected {tile_op} in lowered IR, got {sorted(op_names)}"
+        )
 
 
 # ============================================================================
