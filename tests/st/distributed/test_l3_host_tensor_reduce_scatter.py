@@ -27,9 +27,11 @@ def _expected_reduce_scatter(inputs: torch.Tensor, n_ranks: int) -> torch.Tensor
     return torch.stack(chunks).reshape(n_ranks, 1, SIZE)
 
 
-def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
+def _make_rank_inputs(n_ranks: int, round_offset: float = 0.0) -> torch.Tensor:
     rows = [
-        torch.arange(r * 100.0, r * 100.0 + n_ranks * SIZE, dtype=torch.float32).reshape(n_ranks, SIZE)
+        torch.arange(
+            r * 100.0 + round_offset, r * 100.0 + round_offset + n_ranks * SIZE, dtype=torch.float32
+        ).reshape(n_ranks, SIZE)
         for r in range(n_ranks)
     ]
     return torch.stack(rows)
@@ -216,7 +218,9 @@ class TestL3HostTensorReduceScatter:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.reduce_scatter__sum__fp32"
         assert variant_dir.is_dir()
 
-        inputs = torch.stack([_make_rank_inputs(n_ranks) for _ in range(rounds)])
+        # Each round carries a distinct offset so a stale earlier-round result
+        # (a missed epilogue reset) cannot match the round's golden.
+        inputs = torch.stack([_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)])
         outputs = torch.zeros((rounds, n_ranks, 1, SIZE), dtype=torch.float32)
         compiled(inputs, outputs)
 
