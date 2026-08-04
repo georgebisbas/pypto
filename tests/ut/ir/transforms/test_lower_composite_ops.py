@@ -2013,12 +2013,8 @@ def test_ring_allreduce_accepts_arbitrary_lengths(size, n_ranks):
 
     collector = CallCollector()
     collector.visit_program(After)
-    puts = [
-        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name
-    ]
-    stage_creates = [
-        call for call in collector.calls if call.op.name == ir.get_op("tile.create").name
-    ]
+    puts = [call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name]
+    stage_creates = [call for call in collector.calls if call.op.name == ir.get_op("tile.create").name]
     loads = [call for call in collector.calls if call.op.name == ir.get_op("tile.load").name]
     set_valid_shapes = [
         call for call in collector.calls if call.op.name == ir.get_op("tile.set_validshape").name
@@ -2099,12 +2095,8 @@ def test_ring_allreduce_fp16_uses_aligned_ring_schedule(size, n_ranks):
 
     collector = CallCollector()
     collector.visit_program(After)
-    puts = [
-        call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name
-    ]
-    stage_creates = [
-        call for call in collector.calls if call.op.name == ir.get_op("tile.create").name
-    ]
+    puts = [call for call in collector.calls if call.op.name == ir.get_op("pld.tile.put").name]
+    stage_creates = [call for call in collector.calls if call.op.name == ir.get_op("tile.create").name]
     assert puts
     assert all(len(call.args) == 7 for call in puts)
 

@@ -1388,8 +1388,7 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
               auto send_active = MakeLt(subcol, send_segment_cols, span);
               auto send_remaining = MakeSub(send_segment_cols, subcol, span);
               auto send_valid_cols = MakeMin(chunk_cols, send_remaining, span);
-              auto send_valid_shape =
-                  tile_conversion_utils::MakeShapeTuple({one_idx, send_valid_cols}, span);
+              auto send_valid_shape = tile_conversion_utils::MakeShapeTuple({one_idx, send_valid_cols}, span);
               auto send_offsets = tile_conversion_utils::MakeShapeTuple(
                   {zero_idx, MakeAdd(send_segment_offset, subcol, span)}, span);
 
@@ -1443,13 +1442,12 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
                         "rs_stage_valid",
                         reg.Create("tile.set_validshape", {put_stage, one_idx, send_valid_cols}, {}, span),
                         span);
-                    push_body.Bind(
-                        "push_rs",
-                        reg.Create("pld.tile.put",
-                                   {ring_target, right_peer, ring_target, put_stage, send_offsets,
-                                    send_offsets, send_valid_shape},
-                                   {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
-                        span);
+                    push_body.Bind("push_rs",
+                                   reg.Create("pld.tile.put",
+                                              {ring_target, right_peer, ring_target, put_stage, send_offsets,
+                                               send_offsets, send_valid_shape},
+                                              {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                                   span);
                   },
                   /*else_fn=*/nullptr, span);
 
@@ -1585,15 +1583,13 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
                   [&](LoweringBuilder& push_body) {
                     push_body.Bind(
                         "ag_stage_valid",
-                        reg.Create("tile.set_validshape", {put_stage, one_idx, valid_cols}, {}, span),
-                        span);
-                    push_body.Bind(
-                        "push_ag",
-                        reg.Create("pld.tile.put",
-                                   {ring_target, right_peer, ring_target, put_stage, offsets, offsets,
-                                    valid_shape},
-                                   {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
-                        span);
+                        reg.Create("tile.set_validshape", {put_stage, one_idx, valid_cols}, {}, span), span);
+                    push_body.Bind("push_ag",
+                                   reg.Create("pld.tile.put",
+                                              {ring_target, right_peer, ring_target, put_stage, offsets,
+                                               offsets, valid_shape},
+                                              {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                                   span);
                   },
                   /*else_fn=*/nullptr, span);
 
