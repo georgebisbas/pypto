@@ -48,20 +48,18 @@ NR = pl.dynamic("world_size")
 
 
 def _expected_all_to_all(inputs: torch.Tensor) -> torch.Tensor:
-    """Golden: output[rank, src, j] = src * 1000 + rank * 100 + j."""
-    nranks = inputs.shape[0]
-    rank_idx = torch.arange(nranks, dtype=torch.float32).view(-1, 1, 1)
-    src_idx = torch.arange(nranks, dtype=torch.float32).view(1, -1, 1)
-    j = torch.arange(SIZE, dtype=torch.float32).view(1, 1, -1)
-    return src_idx * 1000 + rank_idx * 100 + j
+    """Golden: output[rank, src, j] = inputs[src, rank, j] (rank src's chunk
+    destined for rank ``rank`` lands in rank's slot ``src``). Input-dependent so
+    distinct per-round data propagates to the expected output."""
+    return inputs.permute(1, 0, 2)
 
 
-def _make_rank_inputs(n_ranks: int) -> torch.Tensor:
-    """Each rank r fills input[r, d, j] = r * 1000 + d * 100 + j."""
+def _make_rank_inputs(n_ranks: int, round_offset: float = 0.0) -> torch.Tensor:
+    """Each rank r fills input[r, d, j] = r * 1000 + d * 100 + j (+ round_offset)."""
     r = torch.arange(n_ranks, dtype=torch.float32).view(-1, 1, 1)
     d = torch.arange(n_ranks, dtype=torch.float32).view(1, -1, 1)
     j = torch.arange(SIZE, dtype=torch.float32).view(1, 1, -1)
-    return r * 1000 + d * 100 + j
+    return round_offset + r * 1000 + d * 100 + j
 
 
 @pl.program
@@ -186,20 +184,32 @@ def _build_host_all_to_all_signal_reuse_program():
             inputs: pl.Tensor[[ROUNDS, NR, NR, SIZE], pl.FP32],
             outputs: pl.Out[pl.Tensor[[ROUNDS, NR, NR, SIZE], pl.FP32]],
         ) -> pl.Tensor[[ROUNDS, NR, NR, SIZE], pl.FP32]:
-            stage_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
-            data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            stage_buf_1 = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            stage_buf_2 = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            data_buf_1 = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            data_buf_2 = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
             signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
 
-            for rd in pl.range(ROUNDS):
-                for r in pl.range(pld.world_size()):
-                    stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-                    self.stage_orch(inputs[rd, r], stage, r, device=r)
-                stage = pld.window(stage_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-                data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
-                data = pld.tensor.all_to_all(stage, data, signal)
-                for r in pl.range(pld.world_size()):
-                    self.consume_orch(data, outputs[rd, r], device=r)
+            # Round 1 — distinct stage/data windows per round, ONE shared signal.
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(stage_buf_1, [pld.world_size(), SIZE], dtype=pl.FP32)
+                self.stage_orch(inputs[0, r], stage, r, device=r)
+            stage = pld.window(stage_buf_1, [pld.world_size(), SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf_1, [pld.world_size(), SIZE], dtype=pl.FP32)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, outputs[0, r], device=r)
+
+            # Round 2 — reuse the same signal.
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(stage_buf_2, [pld.world_size(), SIZE], dtype=pl.FP32)
+                self.stage_orch(inputs[1, r], stage, r, device=r)
+            stage = pld.window(stage_buf_2, [pld.world_size(), SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf_2, [pld.world_size(), SIZE], dtype=pl.FP32)
+            data = pld.tensor.all_to_all(stage, data, signal)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, outputs[1, r], device=r)
             return outputs
 
     return HostTensorAllToAllSignalReuse
@@ -255,7 +265,9 @@ class TestL3HostTensorAllToAll:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.all_to_all__fp32"
         assert variant_dir.is_dir()
 
-        inputs = torch.stack([_make_rank_inputs(n_ranks) for _ in range(rounds)])
+        # Each round carries a distinct offset so a stale earlier-round result
+        # (a missed epilogue reset) cannot match the round's golden.
+        inputs = torch.stack([_make_rank_inputs(n_ranks, round_offset=rd * 10000.0) for rd in range(rounds)])
         outputs = torch.zeros((rounds, n_ranks, n_ranks, SIZE), dtype=torch.float32)
         compiled(inputs, outputs)
 
