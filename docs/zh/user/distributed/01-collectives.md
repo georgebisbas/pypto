@@ -76,8 +76,8 @@ rank 还必须使用相同的 `ReduceOp` 和 `mode`。
 signal = pld.tensor.barrier(signal)
 ```
 
-在 signal 上使用 `Set(1)` + `Ge(1)`。单次使用；下一次 barrier 前需分配新
-buffer。
+在 signal 上使用自清理信用屏障（`AtomicAdd(+1)` / `Ge(1)` 并带重置尾声），
+因此同一个 signal buffer 可在连续调用间复用。
 
 ## Broadcast
 

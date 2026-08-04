@@ -916,8 +916,8 @@ def all_to_all_v(
     MPI_Alltoallv recvcounts side (published value equals rows actually
     transferred).
 
-    The barrier ``signal`` is single-use (same Set(1)/wait≥1 protocol as
-    allreduce) and must not be reused inside a ``for``/``while`` loop.
+    The barrier ``signal`` is self-clearing (restored to zero after each call)
+    and safe to reuse inside a ``for``/``while`` loop.
 
     Args:
         input: Flat 2D Tensor or DistributedTensor [NR*MAX_RECV, SIZE] with
