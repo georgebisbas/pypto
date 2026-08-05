@@ -78,6 +78,10 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `mode="ring"` 下尚未支持。Ring allreduce 最多支持 16 个参与设备
 （`world_size <= 16`）。
 
+signal 可复用：host builtin kernel 会在每次调用后自清理屏障 cell
+（信用屏障尾声），因此一个合成或用户分配的 signal 可以支撑任意数量的
+连续调用或循环迭代，无需重新分配。
+
 ## Pass 属性
 
 | 字段 | 取值 |

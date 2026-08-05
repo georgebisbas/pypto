@@ -33,12 +33,10 @@ data buffer.
 For every host-orchestration function:
 
 1. Collect existing variable names in the program.
-2. Visit direct `AssignStmt`, `EvalStmt`, and `ReturnStmt` forms of
-   `pld.tensor.allreduce`.
-3. Preserve calls that already pass an explicit signal argument.
-4. For calls that pass only the target tensor, allocate fresh generated names
-   for a private signal buffer and signal view.
-5. Insert statement-level bindings immediately before the allreduce call:
+2. Pre-scan the body: does it carry any `pld.tensor.allreduce` call, and does
+   any of those calls omit the signal argument?
+3. If the function has an implicit-signal (single-argument) call, hoist ONE
+   shared signal binding to the top of the function body:
 
 ```python
 __allreduce_signal_world_size_0 = pld.system.world_size()
@@ -48,12 +46,25 @@ __allreduce_signal_0 = pld.tensor.window(
     [__allreduce_signal_world_size_0, 1],
     dtype=pl.INT32,
 )
+```
+
+4. Rewrite every implicit-signal `pld.tensor.allreduce` call — including calls
+   inside `for` / `while` loops — to pass the shared signal:
+
+```python
 data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
 ```
 
+5. Preserve calls that already pass an explicit signal argument unchanged;
+   return-position calls are still lifted to an assignment so host lowering can
+   dispatch them.
+
 The generated signal shape is rank-2 `[world_size, 1]`. This matches the InCore
 allreduce signal indexing model and gives host lowering a single canonical
-signal representation.
+signal representation. One binding is shared per function and reused by every
+implicit-signal call — correct because the host builtin kernels self-clear
+their barrier cells after every call, so a reused signal is safe back-to-back
+and across loop iterations.
 
 ## Print / Parse Round Trip
 
@@ -74,16 +85,15 @@ The pass raises `pypto::ValueError` when:
 - an allreduce call has a positional argument count other than `target` or
   `target, signal`,
 - an allreduce appears as a nested expression instead of a direct assignment,
-  expression statement, or return value,
-- an allreduce appears inside a `for` / `while` loop.
+  expression statement, or return value.
 
-The loop restriction applies to the HOST rail: the `builtin.tensor.allreduce`
-kernel (lowered by `LowerHostTensorCollectives`) is not self-clearing — it adds
-ready/per-chunk credits via `AtomicAdd(+1)` and never subtracts them — so a
-signal synthesized (or explicitly passed) before a loop would be reused on a
-later iteration with stale `>=` thresholds. InCore composites lowered by
+Implicit-signal calls inside `for` / `while` loops are accepted: the function's
+single shared signal is reused on every iteration, which is correct because the
+host builtin kernels (`builtin.tensor.allreduce` / `builtin.tensor.allreduce_ring`,
+lowered by `LowerHostTensorCollectives`) self-clear their barrier cells after
+every call via a credit-barrier epilogue. InCore composites lowered by
 [`LowerCompositeOps`](12-lower_composite_ops.md#barrier-signal-protocol) are
-loop-safe because that pass emits the self-clearing epilogue.
+loop-safe for the same reason — that pass emits the self-clearing epilogue.
 
 ## Pass Properties
 

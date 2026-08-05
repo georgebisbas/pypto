@@ -90,6 +90,11 @@ Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 with `mode="ring"`. Ring allreduce also supports at most 16 participating
 devices (`world_size <= 16`).
 
+Signals are reusable: the host builtin kernels self-clear their barrier cells
+after every call (credit-barrier epilogue), so one synthesized or
+user-allocated signal can back any number of consecutive or loop-carried
+collective calls without re-allocation.
+
 ## Pass properties
 
 | Field | Value |

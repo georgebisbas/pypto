@@ -29,12 +29,10 @@ allocation 处理，并放入 allreduce data buffer 所属的通信域。
 对每个 host-orchestration 函数：
 
 1. 收集当前 program 中已有变量名。
-2. 访问直接出现在 `AssignStmt`、`EvalStmt`、`ReturnStmt` 中的
-   `pld.tensor.allreduce`。
-3. 已经传入显式 signal 的调用保持不变。
-4. 对只传入 target tensor 的调用，生成 fresh 的私有 signal buffer 和
-   signal view 名字。
-5. 在 allreduce 之前插入普通 statement-level binding：
+2. 预扫描函数体：是否携带 `pld.tensor.allreduce` 调用，其中是否有省略
+   signal 参数的调用。
+3. 若函数存在隐式 signal（单参数）调用，则把 ONE 个共享 signal binding
+   （world_size / alloc_window_buffer / window）提升到函数体顶部：
 
 ```python
 __allreduce_signal_world_size_0 = pld.system.world_size()
@@ -44,11 +42,23 @@ __allreduce_signal_0 = pld.tensor.window(
     [__allreduce_signal_world_size_0, 1],
     dtype=pl.INT32,
 )
+```
+
+4. 把每个隐式 signal 的 `pld.tensor.allreduce` 调用 —— 包括 `for` / `while`
+   循环内的调用 —— 改写为使用该共享 signal：
+
+```python
 data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
 ```
 
+5. 已经传入显式 signal 的调用保持不变；return 位置的调用仍然提升为
+   赋值语句，以便 host lowering 派发。
+
 合成 signal 使用 rank-2 `[world_size, 1]`。这个形态与 InCore allreduce 的
 signal 索引模型一致，也让 host lowering 面向同一种 canonical signal 表示。
+每个函数共享一个 binding，并被所有隐式 signal 调用复用 —— 这是正确的，
+因为 host builtin kernel 会在每次调用后自清理屏障 cell，因此共享 signal
+在连续调用与循环迭代之间都可以安全复用。
 
 ## Print / Parse Round Trip
 
@@ -65,10 +75,14 @@ alloc / window / allreduce 链路。
 以下情况会抛出 `pypto::ValueError`：
 
 - allreduce 位置参数数量不是 `target` 或 `target, signal`；
-- allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value；
-- allreduce 出现在 `for` / `while` 循环内。
+- allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value。
 
-该循环限制针对 HOST 通道：`builtin.tensor.allreduce` kernel（由 `LowerHostTensorCollectives` lower）不是自清理的 —— 它用 `AtomicAdd(+1)` 增加 ready/per-chunk 信用却从不回减 —— 因此循环前合成（或显式传入）的 signal 会在后续迭代中复用残留的 `>=` 阈值。由 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议) lower 的 InCore 组合算子则因该 pass 会发出自清理尾声而具备循环安全性。
+`for` / `while` 循环内的隐式 signal 调用会被接受：函数唯一的共享 signal
+会在每次迭代中被复用，这是正确的，因为 host builtin kernel
+（`builtin.tensor.allreduce` / `builtin.tensor.allreduce_ring`，由
+`LowerHostTensorCollectives` lower）通过信用屏障尾声在每次调用后自清理屏障
+cell。由 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议) lower
+的 InCore 组合算子同样具备循环安全性 —— 该 pass 会发出自清理尾声。
 
 ## Pass 属性
 
