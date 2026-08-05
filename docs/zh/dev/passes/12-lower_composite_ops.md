@@ -188,7 +188,7 @@ sin 与 cos 共用同一组多项式系数：cos 路径只在区间归约阶段�
 
 ## `pld.tensor.*` 分布式集合通信算子
 
-本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），`allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`；reduce-scatter 当前仍用 `tile.add`。七条规则共享同一套**自清理信用屏障协议**（`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
+本 Pass 同时降级 `pld.tensor.*` 系列的窗口绑定 (window-bound) 分布式集合通信算子。每个集合通信算子都是一个组合 `Call`，展开为 notify / wait + 数据搬运序列，外加自清理尾声。数据搬运原语因算子而异：`allgather` 使用 `pld.tile.put`（基于 TPUT 的推送，经 VEC staging tile 自动分块），`broadcast` 用 `pld.tile.get` 搬运窗口数据（GM→GM 拷贝），`allreduce` 与 `reduce_scatter` 用 `pld.tile.remote_load` 把 peer chunk 拉进 UB tile。allreduce 与 reduce-scatter 都根据规约类型选择 `tile.add`、`tile.maximum`、`tile.minimum` 或 `tile.mul`。七条规则共享同一套**自清理信用屏障协议**（`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`）—— 参见下方[屏障-信号协议](#屏障-信号协议) —— 因此 `signal` buffer 可以在连续调用之间复用，甚至在 `for` / `while` / `if` 内部也可以。
 
 ### 屏障-信号协议
 
@@ -279,14 +279,14 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 - Phase 2a：notify-all（`AtomicAdd 1`）
 - Phase 2b：wait-all（`Ge 1`）
 - 尾调用：`EmitEpilogueReset`（自清理信用屏障）
-- Phase 3：对每个 peer `p`，`remote_load` 该 peer 的 chunk `r` 并用 `tile.add` 累加到本地 scratch
+- Phase 3：对每个 peer `p`，`remote_load` 该 peer 的 chunk `r` 并用与 `ReduceOp` 匹配的 tile 算子（`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`）累加到本地 scratch
 - Phase 3.5a：re-notify（`AtomicAdd 1`）
 - Phase 3.5b：re-wait（`Ge 2`）
 - Phase 4：`tile.store` 把归约后的 chunk `r` 写回 `target[r, 0:SIZE]`
 
 `target` 形状为 `[NR, SIZE]`；每个 rank 在调用前暂存全部 `NR` 个 chunk。调用后 rank `r` 的行 `[r, 0:SIZE]` 持有所有 rank 上 chunk `r` 的逐元素和。post-reduce 屏障与 `allreduce` 出于同样的 WAR 原因而必需。
 
-第一版仅支持 `ReduceOp::kSum`；C++ deducer 会拒绝 `Max` / `Min` / `Prod`。
+四种 `ReduceOp` 均受支持 —— `kSum`、`kMax`、`kMin`、`kProd` —— 通过共享的 `Reduce()` helper 路由，与 allreduce 规则使用的分发一致。
 
 ### `pld.tensor.broadcast`
 
