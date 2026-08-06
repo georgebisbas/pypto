@@ -76,10 +76,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TASSIGN(recv_tile, 0x10000);
 
   // Signal scheme: each slot is single-writer (rank j writes into my_rank's
-  // signal[j]). TNOTIFY adds a constant 1 per tile; the TWAIT threshold grows
-  // 1, 2, 3, … because TWAIT(GE) is non-consuming — the slot retains its
-  // accumulated value across tiles. This matches the reduce_scatter signal
-  // protocol (constant notify + incrementing wait threshold).
+  // signal[j]). The root announces each tile AFTER its self-copy with one
+  // AtomicAdd(+1) per non-root; every non-root waits on cell[kRoot] with a
+  // growing Ge threshold (TWAIT(GE) is non-consuming, so the slot retains its
+  // accumulated value across tiles). A non-root never notifies during the loop:
+  // only the root's cell is ever waited on, so per-tile read-complete notifies
+  // to the other non-roots would just accumulate garbage credits. Instead there
+  // is ONE read-complete round after the loop: each non-root sends a single +1
+  // to root's cell[me] and the root waits for all of them before returning, so
+  // a fast root cannot return and have its window reused while a slow peer
+  // still reads the last tile.
   int32_t expected = 1;
   for (int64_t base = 0; base < numel; base += kTileCount) {
     int64_t chunk64 = numel - base;
@@ -100,21 +106,22 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
     pipe_barrier(PIPE_ALL);
 
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
-      pto::comm::Signal sig(remote_signal);
-      pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
-    }
-    for (int peer = 0; peer < nranks; ++peer) {
-      if (peer == my_rank) continue;
-      pto::comm::Signal sig(signal_base + peer);
+    if (my_rank == kRoot) {
+      // Root: announce the tile is written. Each non-root waits on cell[kRoot]
+      // in its own memory, so one +1 per non-root per tile is enough.
+      for (int peer = 0; peer < nranks; ++peer) {
+        if (peer == my_rank) continue;
+        __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+        pto::comm::Signal sig(remote_signal);
+        pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+      }
+    } else {
+      // Non-root: wait for the root's tile (data-ready), then read it. No
+      // per-tile completion notify — the single read-complete round after the
+      // loop covers it, and notifying every peer here would leave P-2 garbage
+      // credits in cells nobody waits on.
+      pto::comm::Signal sig(signal_base + kRoot);
       pto::comm::TWAIT(sig, expected, pto::comm::WaitCmp::GE);
-    }
-    ++expected;
-    pipe_barrier(PIPE_ALL);
-
-    if (my_rank != kRoot) {
       __gm__ {{dtype_cpp}} *root_target = CommRemotePtr(comm_ctx, target + base, kRoot);
       Global root_g(root_target, shape, stride);
       TLOAD(recv_tile, root_g);
@@ -124,7 +131,35 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
       set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
       wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
     }
+    ++expected;
+    pipe_barrier(PIPE_ALL);
   }
 
+  // One read-complete round after the loop, then a role-aware credit reset. The
+  // root must not return (and have its window reused by the next host
+  // statement) while a non-root still reads the last tile. Each non-root sends
+  // exactly one +1 to root's cell[me]; the root sent one +1 per tile into every
+  // non-root's cell[kRoot]. The resets are local self-notifies (TNOTIFY on a
+  // local address is the same st_atomic the remote path uses), so the signal is
+  // provably all-zero again before the kernel returns.
+  const int32_t tiles = expected - 1;
+  if (my_rank == kRoot) {
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == my_rank) continue;
+      pto::comm::Signal sig(signal_base + peer);
+      pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+    }
+    for (int peer = 0; peer < nranks; ++peer) {
+      if (peer == my_rank) continue;
+      pto::comm::Signal self_sig(signal_base + peer);
+      pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+    }
+  } else {
+    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, kRoot);
+    pto::comm::Signal sig(remote_signal);
+    pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
+    pto::comm::Signal self_sig(signal_base + kRoot);
+    pto::comm::TNOTIFY(self_sig, -tiles, pto::comm::NotifyOp::AtomicAdd);
+  }
   pipe_barrier(PIPE_ALL);
 }
