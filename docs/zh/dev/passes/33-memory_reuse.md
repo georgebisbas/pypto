@@ -29,6 +29,18 @@
 会在 DSA-RP 评估之前删除候选方案。生命周期干涉、语义 no-alias 规则与目标
 hazard 等正确性事实，在 DSA-RP 问题中仍然是硬约束。
 
+## 容量诊断
+
+当某个内存空间在任意双缓冲深度下都无法容纳——包括按 legacy（不复用）模式重新
+打包之后——`MemoryReuse` 会发出一条 `Warning` 诊断，指明空间名、实际占用
+footprint 与平台容量，例如 `capacity-gated reuse could not fit memory space
+Right ... footprint = 131072 bytes > capacity = 65536 bytes — compile will
+fail at AllocateMemoryAddr`。由于本 pass 与 `AllocateMemoryAddr` 都通过共享的
+`SpaceFootprint` 走计算 footprint，警告中的数值与 `AllocateMemoryAddr` 对同一
+溢出抛出的硬 `CHECK` 完全一致；警告会预先说明结果。硬失败刻意保留在
+`AllocateMemoryAddr`：它是对最终提交布局（含保留区与 slot）数值唯一精确的位置，
+且在 `memory_planner=PTOAS` 下两个 pass 都会被跳过。
+
 ## API
 
 | C++ | Python | 级别 |

@@ -2310,16 +2310,23 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(
           // Fold into the diagnostic channel (Warning) so all capacity-degradation signals go through one
           // place (perf hint for a partial reduction below; this Warning for a space that fits at no depth).
           if (out_hints != nullptr) {
-            const bool still_overflows = footprint(buffers) > cap;
+            const uint64_t used = footprint(buffers);
+            const bool still_overflows = used > cap;
             const std::string why =
                 within_budget ? "at any double-buffering depth" : "within the shed-repack budget";
-            out_hints->emplace_back(
-                DiagnosticSeverity::Warning, "MemoryReuse", 0,
-                "capacity-gated reuse could not fit memory space " + MemorySpaceToString(space) + " " + why +
-                    "; fell back to the legacy packing" +
-                    (still_overflows ? " (which also overflows — reduce tile size or stage count)" : "") +
-                    ".",
-                func ? func->span_ : Span::unknown());
+            // The footprint/capacity pair is the same SpaceFootprint the AllocateMemoryAddr CHECK
+            // compares (#1475), so when the legacy packing also overflows, state the outcome here
+            // instead of making the author read the allocator's CHECK to learn it.
+            const std::string overflow_note =
+                still_overflows
+                    ? " (footprint = " + std::to_string(used) + " bytes > capacity = " + std::to_string(cap) +
+                          " bytes — compile will fail at AllocateMemoryAddr; reduce tile size or stage count)"
+                    : "";
+            out_hints->emplace_back(DiagnosticSeverity::Warning, "MemoryReuse", 0,
+                                    "capacity-gated reuse could not fit memory space " +
+                                        MemorySpaceToString(space) + " " + why +
+                                        "; fell back to the legacy packing" + overflow_note + ".",
+                                    func ? func->span_ : Span::unknown());
           }
           break;
         }

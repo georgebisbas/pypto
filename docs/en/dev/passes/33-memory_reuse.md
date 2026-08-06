@@ -33,6 +33,21 @@ both would erase alternatives before DSA-RP can evaluate them. Correctness
 facts collected for this pass—lifetime interference, semantic no-alias rules,
 and target hazards—remain hard constraints in the DSA-RP problem.
 
+## Capacity diagnostic
+
+When a memory space cannot fit at any double-buffering depth — including after
+re-packing in legacy (no-reuse) mode — `MemoryReuse` emits a `Warning`
+diagnostic naming the space, the realized footprint, and the platform capacity,
+e.g. `capacity-gated reuse could not fit memory space Right ... footprint =
+131072 bytes > capacity = 65536 bytes — compile will fail at
+AllocateMemoryAddr`. Because both this pass and `AllocateMemoryAddr` compute the
+footprint with the shared `SpaceFootprint` walk, the warning's numbers are
+identical to the hard `CHECK` that `AllocateMemoryAddr` raises on the same
+overflow; the warning states the outcome up front. The hard failure
+deliberately stays in `AllocateMemoryAddr`: it is the only place the number
+over the final committed layout (including reserved regions and slots) is
+exact, and both passes are skipped under `memory_planner=PTOAS`.
+
 ## API
 
 | C++ | Python | Level |
