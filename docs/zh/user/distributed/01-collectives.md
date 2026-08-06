@@ -62,10 +62,12 @@ signal（仅限 mesh）。
 
 ### 支持的 ReduceOp
 
-全部四种——`Sum`、`Max`、`Min`、`Prod`——InCore 组合调用和 Host 内置路径均
-支持。`target` 的 dtype 必须是 `FP16` 或 `FP32`；这是编译期硬性检查，而非
-仅存储位宽的限制。除了本页开头要求的形状相同的 signal tensor 外，所有
-rank 还必须使用相同的 `ReduceOp` 和 `mode`。
+全部四种——`Sum`、`Max`、`Min`、`Prod`——InCore 组合调用和 Host 内置的
+mesh 路径均支持。Host 内置的 ring 路径（`builtin.tensor.allreduce_ring`）
+更窄：仅 `Sum`，且 target 须为 4 字节的 `FP32`（编译期检查）。mesh 路径的
+`target` dtype 必须是 `FP16` 或 `FP32`；ring 路径仅 `FP32`。除了本页开头
+要求的形状相同的 signal tensor 外，所有 rank 还必须使用相同的 `ReduceOp`
+和 `mode`。
 
 ## Barrier
 
@@ -168,15 +170,16 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | **位置** | `@pl.jit.incore` | `@pl.jit.incore` | `@pl.jit.host` |
 | **实现** | 手写 `notify`/`wait` + `remote_load` 循环 | 直接调用 `pld.tensor.allreduce(data, sig, ...)` | 直接调用 `pld.tensor.allreduce(data, [sig,] ...)` |
 | **Lowering** | 自行实现原语 | `LowerCompositeOps` | `LowerHostTensorCollectives` |
-| **支持的模式** | 取决于自己的实现 | `mesh` 和 `ring` | 仅 `mesh` |
-| **Signal 形状** | 取决于自己的分配 | mesh 为 `[nranks, 1]`（rank 数量可为动态）；ring 为 `[2×(NR−1), NR]`（`NR` 必须是编译期常量） | 一维 `[world_size]` 或二维 `[world_size, 1]`——编译器合成的 signal 为二维 |
-| **适用场景** | 学习、自定义协议 | 需要 `ring` 模式，或已身处 InCore kernel 内部 | 日常的 host 编排集合通信 |
+| **支持的模式** | 取决于自己的实现 | `mesh` 和 `ring` | `mesh` 和 `ring`（ring：仅 `Sum` + `FP32`） |
+| **Signal 形状** | 取决于自己的分配 | mesh 为 `[nranks, 1]`（rank 数量可为动态）；ring 为 `[2×(NR−1), NR]`（`NR` 必须是编译期常量） | mesh：一维 `[world_size]` 或二维 `[world_size, 1]`（编译器合成的 signal 为二维）；ring：`[2*(NR−1)+1, NR]` |
+| **适用场景** | 学习、自定义协议 | ring 需要非 `Sum`/非 `FP32`，或已身处 InCore kernel 内部 | 日常的 host 编排集合通信 |
 
 日常 host 编排代码优先使用 Host 级别内置——它们自动处理屏障编排和分块。
 只有 `allreduce` 可以省略 signal 参数（编译器会在循环外自动合成一个）；
 其余五种集合通信（`barrier`、`broadcast`、`allgather`、`reduce_scatter`、
-`all_to_all`）始终需要调用方显式分配并传入 signal。当需要 `mode="ring"`
-时改用 InCore 组合调用，因为 Host 内置路径只 lowering `mesh`。
+`all_to_all`）始终需要调用方显式分配并传入 signal。InCore 组合调用与 Host
+内置均支持 `mode="ring"`；当 ring 需要 `Sum` 以外的 `ReduceOp` 或非 `FP32`
+的 dtype 时改用 InCore 组合调用，因为 Host 内置的 ring 路径仅支持 `Sum` + `FP32`。
 
 ## 可运行示例
 
@@ -186,7 +189,7 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | 集合通信 | InCore 手写 | InCore 组合调用 | HOST 内置 |
 | -------- | ----------- | --------------- | --------- |
 | allreduce | `collectives/test_l3_allreduce.py` | `collectives/test_l3_tensor_allreduce_intrinsic.py` | `test_l3_host_tensor_allreduce.py` |
-| allreduce（ring） | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | 无（仅 mesh） |
+| allreduce（ring） | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | `test_l3_host_tensor_allreduce_ring.py` |
 | barrier | — | `collectives/test_l3_tensor_barrier_intrinsic.py` | `test_l3_host_tensor_barrier.py` |
 | broadcast | `collectives/test_l3_broadcast.py` | `collectives/test_l3_tensor_broadcast_intrinsic.py` | `test_l3_host_tensor_broadcast.py` |
 | allgather | `collectives/test_l3_allgather.py` | `collectives/test_l3_tensor_allgather_intrinsic.py` | `test_l3_host_tensor_allgather.py` |

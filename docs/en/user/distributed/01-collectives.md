@@ -67,11 +67,12 @@ the reduced result). All ranks must pass identically shaped `target` tensors.
 
 ### Supported ReduceOp
 
-All four — `Sum`, `Max`, `Min`, `Prod` — on both the InCore composite and the
-HOST builtin path. `target`'s dtype must be `FP16` or `FP32`; this is a hard
-compile-time check, not just a storage-width constraint. Every rank must
-agree on the same `ReduceOp` and `mode`, on top of the identically-shaped
-signal tensors required of every collective.
+All four — `Sum`, `Max`, `Min`, `Prod` — on the InCore composite and the HOST
+builtin mesh path. The HOST builtin ring path (`builtin.tensor.allreduce_ring`)
+is narrower: `Sum` only, with a 4-byte `FP32` target (a compile-time check).
+`mesh` targets must be `FP16` or `FP32`; the ring path is `FP32`-only. Every
+rank must agree on the same `ReduceOp` and `mode`, on top of the
+identically-shaped signal tensors required of every collective.
 
 ## Barrier
 
@@ -175,17 +176,19 @@ runs and whether you need `mode="ring"`:
 | **Where** | `@pl.jit.incore` | `@pl.jit.incore` | `@pl.jit.host` |
 | **How** | Manual `notify`/`wait` + `remote_load` loops | `pld.tensor.allreduce(data, sig, ...)` called directly | `pld.tensor.allreduce(data, [sig,] ...)` called directly |
 | **Lowering** | You write the primitives | `LowerCompositeOps` | `LowerHostTensorCollectives` |
-| **Modes** | Whatever you implement | `mesh` and `ring` | `mesh` only |
-| **Signal shape** | Whatever you allocate | `[nranks, 1]` for mesh (rank count may be dynamic); `[2×(NR−1), NR]` for ring (`NR` must be a compile-time constant) | Rank-1 `[world_size]` or rank-2 `[world_size, 1]` — the compiler-synthesized signal is rank-2 |
-| **When** | Learning, custom protocols | Need `ring` mode, or already inside an InCore kernel | Day-to-day host-orchestrated collectives |
+| **Modes** | Whatever you implement | `mesh` and `ring` | `mesh` and `ring` (ring: `Sum` + `FP32` only) |
+| **Signal shape** | Whatever you allocate | `[nranks, 1]` for mesh (rank count may be dynamic); `[2×(NR−1), NR]` for ring (`NR` must be a compile-time constant) | Mesh: rank-1 `[world_size]` or rank-2 `[world_size, 1]` (the compiler-synthesized signal is rank-2). Ring: `[2*(NR−1)+1, NR]` |
+| **When** | Learning, custom protocols | Ring with non-`Sum`/non-`FP32`, or already inside an InCore kernel | Day-to-day host-orchestrated collectives |
 
 Prefer HOST builtins for day-to-day host-orchestrated code — they handle
 barrier orchestration and chunking automatically. Only `allreduce` can also
 omit the signal argument (the compiler synthesizes one outside loops); the
 other five collectives (`barrier`, `broadcast`, `allgather`,
 `reduce_scatter`, `all_to_all`) always take an explicit, caller-allocated
-signal. Reach for the InCore composite specifically when you need
-`mode="ring"`, since the HOST builtin path only lowers `mesh`.
+signal. Both the InCore composite and the HOST builtin lower `mode="ring"`;
+reach for the InCore composite when you need ring with a `ReduceOp` other than
+`Sum` or a non-`FP32` dtype, since the HOST builtin ring path is `Sum`+`FP32`
+only.
 
 ## Runnable Examples
 
@@ -195,7 +198,7 @@ Every collective above has a runnable counterpart under
 | Collective | InCore hand-rolled | InCore composite | HOST builtin |
 | ---------- | ------------------ | ---------------- | ------------ |
 | allreduce | `collectives/test_l3_allreduce.py` | `collectives/test_l3_tensor_allreduce_intrinsic.py` | `test_l3_host_tensor_allreduce.py` |
-| allreduce (ring) | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | n/a (mesh only) |
+| allreduce (ring) | `collectives/test_l3_allreduce_ring.py` | `collectives/test_l3_tensor_allreduce_ring_intrinsic.py` | `test_l3_host_tensor_allreduce_ring.py` |
 | barrier | — | `collectives/test_l3_tensor_barrier_intrinsic.py` | `test_l3_host_tensor_barrier.py` |
 | broadcast | `collectives/test_l3_broadcast.py` | `collectives/test_l3_tensor_broadcast_intrinsic.py` | `test_l3_host_tensor_broadcast.py` |
 | allgather | `collectives/test_l3_allgather.py` | `collectives/test_l3_tensor_allgather_intrinsic.py` | `test_l3_host_tensor_allgather.py` |

@@ -181,7 +181,24 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 
 ## 分布式
 
-`pypto.language.distributed`（约定简写 `pld`）承载集合通信与远程原语。它有独立的一章，但尚未编写 —— 在此之前见 [分布式算子](../../dev/distributed_ops.md)。
+`pypto.language.distributed`（约定简写 `pld`）承载集合通信与远程原语。完整参考见[分布式编程](../distributed/index.md)；教程见[distributed/00-model.md](../distributed/00-model.md)。
+
+### 功能矩阵
+
+| 操作 | API | 模式 | ReduceOp | Atomic | 支持的 dtype | 说明 |
+| ---- | --- | ---- | -------- | ------ | ------------ | ---- |
+| AllReduce | `pld.tensor.allreduce` | `mesh`（InCore + HOST），`ring`（InCore + HOST） | `Sum`、`Max`、`Min`、`Prod`（mesh）；仅 `Sum`（HOST ring） | — | FP16、FP32（mesh；编译期硬性检查）；HOST ring：仅 FP32（4 字节） | Mesh: 每步 O(N) 远程流量。Ring: 每步 O(N/P) 远程流量，2(P-1) 步。 |
+| AllGather | `pld.tensor.allgather` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 推式。输入和 target 必须是不同的 buffer。 |
+| ReduceScatter | `pld.tensor.reduce_scatter` | — | 仅 `Sum` | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
+| Broadcast | `pld.tensor.broadcast` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | Root 在调用前将数据写入。 |
+| All-to-All | `pld.tensor.all_to_all` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 个性化交换。输入和 target 必须是不同的 buffer。 |
+| Barrier | `pld.tensor.barrier` | — | — | — | — | Signal 为 INT32，每次调用单次使用。 |
+| Put | `pld.tensor.put` | — | — | `None_` / `Add` | 所有 GM dtype | `dst` 必须是 window-bound。支持分块和流水线 staging。 |
+| Get | `pld.tensor.get` | — | — | — | 所有 GM dtype | `src` 必须是 window-bound。支持分块和流水线 staging。 |
+| Notify | `pld.system.notify` | `AtomicAdd` / `Set` | — | — | — | 仅副作用的信号投递。 |
+| Wait | `pld.system.wait` | `Eq` / `Ge` | — | — | — | 仅副作用的信号阻塞。 |
+| Remote Load | `pld.tile.remote_load` | — | — | — | 任意（tile） | Tile 级跨 rank 加载。 |
+| Remote Store | `pld.tile.remote_store` | — | — | — | 任意（tile） | Tile 级跨 rank 写入。 |
 
 ## See Also
 

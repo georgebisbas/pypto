@@ -4,7 +4,7 @@ How to write, compile, run, and debug PyPTO programs.
 
 ## Reading paths
 
-Pick the path that matches what you are trying to do. All three assume
+Pick the path that matches what you are trying to do. All four assume
 [Installation](01-installation.md) is done.
 
 ### I want to write my first kernel
@@ -36,6 +36,15 @@ Check `report/perf_hints.log` from your compile output before measuring anything
 compiler may already have told you. The dedicated performance chapter is not written yet;
 see the table below for where its material currently lives.
 
+### I want to run across multiple devices
+
+[Distributed Programming](distributed/index.md)
+
+Get a single-device kernel running first — distributed programs compose the same
+`pl.*` kernels behind `pld.*` collectives and a HOST orchestrator. Once it runs
+correctly, the distributed chapter covers ring vs. mesh trade-offs and
+cross-rank overlap.
+
 ## Contents
 
 | Page | What it covers |
@@ -48,6 +57,7 @@ see the table below for where its material currently lives.
 | [Compiling a Program](01-language_guide.md) | `ir.compile()` and `JITFunction.compile()`, and inspecting the result |
 | [Running on Device](00-getting_started.md) | Resident device tensors, explicit dispatch, benchmarking, distributed execution |
 | [Torch Codegen Debug Guide](03-torch_codegen_debug.md) | Generating a PyTorch reference implementation from the IR to isolate accuracy problems |
+| [Distributed Programming](distributed/index.md) | Symmetric-memory model, collectives, primitives, execution, and debugging for cross-rank programs |
 
 ## What PyPTO gives you
 
@@ -60,7 +70,7 @@ see the table below for where its material currently lives.
 | The full `@pl.jit` family (`.incore`, `.inline`, `.opaque`, `.host`) | [Quickstart](02-quickstart.md), [Functions and Programs](language/01-functions.md) |
 | Hand-written C++ kernel integration | [External Kernels](../dev/language/01-external-kernels.md) |
 | Device-resident tensors, explicit dispatch, benchmarking | [Running on Device](00-getting_started.md) |
-| Distributed (multi-card) programs and collectives | [Distributed Operators](../dev/distributed_ops.md) |
+| Distributed (multi-card) programs and collectives | [Distributed Programming](distributed/index.md) |
 | Accuracy debugging against a PyTorch reference | [Torch Codegen Debug Guide](03-torch_codegen_debug.md) |
 | Compile-time diagnostics and performance hints | [Diagnostics](../dev/passes/92-diagnostics.md) |
 | Runtime DFX: swimlane, PMU, dependency graph, scope stats | [Runtime DFX](../dev/03-runtime-dfx.md) |
@@ -68,15 +78,14 @@ see the table below for where its material currently lives.
 
 ## What is not here yet
 
-This manual is being expanded into a full chaptered structure — tutorials, distributed
-programming, performance optimization, and accuracy debugging each get their own
-chapter. Until those land, the corresponding material lives in the
-[developer documentation](../dev/index.md):
+This manual is being expanded into a full chaptered structure — tutorials,
+performance optimization, and accuracy debugging each get their own chapter.
+Until those land, the
+corresponding material lives in the [developer documentation](../dev/index.md):
 
 | Topic | Current location |
 | ----- | ---------------- |
 | Mixed kernels (AIC + AIV in one function) | [LowerAutoVectorSplit](../dev/passes/20-lower_auto_vector_split.md), [ExpandMixedKernel](../dev/passes/21-expand_mixed_kernel.md), [TPUSH/TPOP](../reference/pto-isa/01-tpush_tpop.md) |
-| Distributed DSL and collectives | [Distributed Operators](../dev/distributed_ops.md) |
 | Performance hints and diagnostics | [Diagnostics](../dev/passes/92-diagnostics.md), [Compile Profiling](../dev/01-compile-profiling.md) |
 | Runtime DFX flags, ring sizing, memory map | [Runtime DFX](../dev/03-runtime-dfx.md), [Per-Task Ring Sizing](../dev/05-runtime-ring-sizing.md), [Memory Map](../dev/07-memory-map.md) |
 | External C++ kernels | [Integrating Hand-Written C++ Kernels](../dev/language/01-external-kernels.md) |
