@@ -294,4 +294,4 @@ effect.
 - [Language Guide](language/index.md) — the full surface: tile-level authoring, `pl.load` / `pl.store`, memory spaces, and the `@pl.function` / `@pl.program` form `@pl.jit` specializes into.
 - [Operations](ops/index.md) — the operator surface across `pl.*`, `pl.tensor.*`, and `pl.tile.*`.
 - [Running on Device](00-getting_started.md) — resident device tensors, explicit dispatch, benchmarking, distributed execution.
-- `examples/kernels/` — tile-level kernels in the same `@pl.jit` idiom.
+- `examples/beginner/` and `examples/intermediate/` — tile-level kernels in the same `@pl.jit` idiom.

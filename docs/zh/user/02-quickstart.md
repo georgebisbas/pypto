@@ -273,4 +273,4 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 - [语言指南](language/index.md) —— 完整表面：tile 级写法、`pl.load` / `pl.store`、内存空间，以及 `@pl.jit` 所特化成的 `@pl.function` / `@pl.program` 形态。
 - [算子](ops/index.md) —— `pl.*`、`pl.tensor.*`、`pl.tile.*` 三个命名空间的算子全貌。
 - [在设备上运行](00-getting_started.md) —— 常驻设备张量、显式派发、性能基准、分布式执行。
-- `examples/kernels/` —— 同一套 `@pl.jit` 写法下的 tile 级 kernel。
+- `examples/beginner/` 与 `examples/intermediate/` —— 同一套 `@pl.jit` 写法下的 tile 级 kernel。
