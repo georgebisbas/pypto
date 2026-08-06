@@ -52,7 +52,7 @@ device execution) for each kernel. The per-mode hardware semantics of TINSERT
 (Acc->Mat NZ vs. Vec->Vec ND_VEC) are best validated on device via
 ``tests/st/runtime/ops/test_assemble.py`` rather than against a torch reference.
 
-Run:  python examples/kernels/08_assemble.py
+Run:  python examples/intermediate/05_assemble.py
 Next: examples/models/01_ffn.py
 """
 

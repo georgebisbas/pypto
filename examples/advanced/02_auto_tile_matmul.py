@@ -45,7 +45,7 @@ directional modes keep the Vector cast. FIXPIPE narrows tie-even on **both** A2/
 forces bf16, A5 may keep f32), so the folded cast needs ``mode="rint"`` on either backend.
 The last two kernels are the full-K (no K-loop) and split-K (K-loop) fits-L0c cases.
 
-Run:  python examples/kernels/11_auto_tile_matmul.py
+Run:  python examples/advanced/02_auto_tile_matmul.py
 """
 
 import pypto.language as pl

@@ -8,26 +8,40 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Activation functions (32x128 tiles).
+Activation functions.
 
 Kernels:
-  silu    -- SiLU:   output = x * sigmoid(x)                    = x / (1 + exp(-x))
-  gelu    -- GELU:   output = x * sigmoid(1.702 * x)            (fast approximation)
-  swiglu  -- SwiGLU: output = gate * sigmoid(gate) * up
-  geglu   -- GeGLU:  output = gate * sigmoid(1.702 * gate) * up
+  fused_add_relu -- relu(a + b)                                (128x128, vector only)
+  silu           -- SiLU:   output = x * sigmoid(x)             = x / (1 + exp(-x))  (32x128)
+  gelu           -- GELU:   output = x * sigmoid(1.702 * x)     (fast approximation) (32x128)
+  swiglu         -- SwiGLU: output = gate * sigmoid(gate) * up                       (32x128)
+  geglu          -- GeGLU:  output = gate * sigmoid(1.702 * gate) * up               (32x128)
 
 Concepts introduced:
+  - Activation functions: pl.relu
   - pl.exp, pl.recip for building sigmoid from primitives
   - Chaining element-wise ops for complex activation functions
   - Two-input activations (SwiGLU, GeGLU) with gate and up projections
 
-Run:  python examples/kernels/05_activation.py
-Next: examples/kernels/06_softmax.py
+Run:  python examples/beginner/04_activation.py
+Next: examples/beginner/05_matmul.py
 """
 
 import pypto.language as pl
 import torch
 from pypto.runtime import RunConfig
+
+
+@pl.jit
+def fused_add_relu(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Fused: load a, b -> add -> relu -> store c."""
+    with pl.at(level=pl.Level.CORE_GROUP):
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_b = pl.load(b, [0, 0], [128, 128])
+        tile_sum = pl.add(tile_a, tile_b)
+        tile_c = pl.relu(tile_sum)
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
 @pl.jit
@@ -96,6 +110,13 @@ def geglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
 if __name__ == "__main__":
     torch.manual_seed(0)
     config = RunConfig()
+
+    # fused_add_relu
+    a = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b = torch.full((128, 128), 3.0, dtype=torch.float32)
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    fused_add_relu(a, b, c, config=config)
+    assert torch.allclose(c, torch.relu(a + b), rtol=1e-5, atol=1e-5)
 
     # SiLU
     x = torch.randn(32, 128, dtype=torch.float32)

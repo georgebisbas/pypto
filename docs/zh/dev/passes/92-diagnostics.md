@@ -84,15 +84,15 @@ Register(DiagnosticCheck::MyCheck,
 
 > **源 span 限制：** span 为流水线后 IR 文本位置（`<string>:line:col`），并非原始 DSL `pl.at` / 切片表达式，也未命名控制内层维度的 chunk 常量。回溯到用户源代码并命名内层维度常量需要将 DSL 源 span 通过 parser/IR 传递到 tile op 上——目前 `TileType`、`Call` op、`Span` 都未携带该元数据（issue #1305 第 2/3 项）。
 
-示例：stderr 摘要 + `perf_hints.log` 内容（`examples/kernels/08_assemble.py`，Ascend950）：
+示例：stderr 摘要 + `perf_hints.log` 内容（`examples/intermediate/05_assemble.py`，Ascend950）：
 
 ```text
 # stderr：
 [perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
 
 # /tmp/build/perf_hints.log：
-[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
-[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:60:4
 ```
 
 ## 用户面 API

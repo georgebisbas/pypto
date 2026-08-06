@@ -84,15 +84,15 @@ Inspects every `tile.load` and `tile.store` op. When the innermost-dimension byt
 
 > **Source-span limitation:** the span is the post-pipeline IR-text location (`<string>:line:col`), not the originating DSL `pl.at` / slicing expression, and the controlling chunk constant is not named. Mapping back to user source and naming the inner-dim constant requires DSL source spans to be threaded through the parser/IR onto the tile op — that metadata is not yet carried on `TileType`, the `Call` op, or `Span` (issue #1305 asks 2/3).
 
-Example: console summary plus `perf_hints.log` content (from `examples/kernels/08_assemble.py` on Ascend950):
+Example: console summary plus `perf_hints.log` content (from `examples/intermediate/05_assemble.py` on Ascend950):
 
 ```text
 # stderr:
 [perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
 
 # /tmp/build/perf_hints.log:
-[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
-[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/intermediate/05_assemble.py:60:4
 ```
 
 ## User-facing API

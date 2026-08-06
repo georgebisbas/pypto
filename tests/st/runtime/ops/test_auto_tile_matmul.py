@@ -9,7 +9,7 @@
 
 """Runtime st for AutoTileMatmulL0's compiler-driven L0 tiling.
 
-Validates on device the cases from examples/kernels/11_auto_tile_matmul.py:
+Validates on device the cases from examples/advanced/02_auto_tile_matmul.py:
 
   - **Oversized 2x2 matrix** -- an oversized ``[256, 256]`` FP32 output (> L0c) tiled and
     placed either to **DDR** (direct-store) or an **L1/Mat scratch** (consumed on-chip by a
@@ -35,7 +35,7 @@ import dataclasses
 import pypto.language as pl
 import pytest
 import torch
-from examples.kernels.auto_tile_matmul import (
+from examples.advanced.auto_tile_matmul import (
     ddr_full_k,
     ddr_split_k,
     fits_l0c_full_k,

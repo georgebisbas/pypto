@@ -8,15 +8,21 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-PyPTO Examples — a two-axis layout: difficulty tiers for the teaching kernels,
-category folders for everything else.
+Advanced examples — performance and low-level techniques.
 
-  beginner/     — language basics, one concept per file (start here)
-  intermediate/ — real-kernel patterns
-  advanced/     — performance and low-level techniques
-  models/       — multi-kernel programs with orchestration (FFN, attention, ...)
-  runtime/      — host/runtime patterns (dispatch, distributed callbacks, KV cache)
-  utils/        — parsing, cross-function calls, error handling
-
-See each folder's __init__.py for detailed reading order within.
+  01_split_k.py          — split-K matmul (parallel K reduction, atomic-add)
+  02_auto_tile_matmul.py — compiler-driven L0 matmul tiling (DDR/Mat-scratch x full-K/split-K)
 """
+
+import importlib
+import sys
+
+_ALIASES = {
+    "split_k": "01_split_k",
+    "auto_tile_matmul": "02_auto_tile_matmul",
+}
+
+for _alias, _numbered in _ALIASES.items():
+    _mod = importlib.import_module(f".{_numbered}", __package__)
+    globals()[_alias] = _mod
+    sys.modules[f"{__package__}.{_alias}"] = _mod

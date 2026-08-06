@@ -15,7 +15,7 @@ partial product into one global-memory output via
 in-kernel before the parallel loop. This test compiles the pattern through the
 full pass pipeline and verifies the per-core kernel emits an atomic-add store.
 
-Mirrors ``examples/kernels/10_split_k.py``.
+Mirrors ``examples/advanced/01_split_k.py``.
 """
 
 import re

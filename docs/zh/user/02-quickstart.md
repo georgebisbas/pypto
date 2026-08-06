@@ -243,8 +243,8 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 ```
 
 直接调用一个 `@pl.jit` 函数会一次做完全部事情：按实参的形状与 dtype 特化、编译、缓存、派发。
-后续用相同形状调用会复用缓存的编译产物。`examples/hello_world.py` 就是这个模式，只是写在
-tile 级。
+后续用相同形状调用会复用缓存的编译产物。`examples/beginner/01_hello_world.py` 就是这个模式，
+只是写在 tile 级。
 
 ## Edge Cases
 

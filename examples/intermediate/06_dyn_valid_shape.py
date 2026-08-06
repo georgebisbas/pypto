@@ -34,7 +34,7 @@ Full end-to-end execution is exercised under
 ``tests/st/codegen/dsl/test_dyn_valid_shape_loop.py`` and
 ``tests/st/codegen/dsl/test_dynamic_valid_shape_if_else.py``.
 
-Run:  python examples/kernels/09_dyn_valid_shape.py
+Run:  python examples/intermediate/06_dyn_valid_shape.py
 """
 
 # DSL function bodies are parsed as AST -- runtime scalars (vlen, ...)

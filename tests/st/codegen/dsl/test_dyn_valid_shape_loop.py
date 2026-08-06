@@ -14,7 +14,7 @@ The pre-JIT version of this test exercised a per-block loop with an in-DSL
 specializer's alpha-renamer rewrites the rebinding of ``vlen`` in the
 else-branch to a distinct alias, which then fails ``ConvertToSSA`` ("used
 outside its defining scope").  The current recommended workaround --
-documented in ``examples/kernels/09_dyn_valid_shape.py`` -- is to push the
+documented in ``examples/intermediate/06_dyn_valid_shape.py`` -- is to push the
 per-call/per-iteration choice of ``vlen`` to the caller and pass a single
 scalar parameter.
 
@@ -29,7 +29,7 @@ succeeds for both vlen values that previously appeared inside the if/else:
 
 import pytest
 import torch
-from examples.kernels.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
+from examples.intermediate.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
 
 # Original tests carried this constant for the multi-block tensor row count
 # (2 blocks of Q_TILE=64).  The single-block @pl.jit kernel is per-block, so

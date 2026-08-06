@@ -16,8 +16,8 @@ Kernels:
 Concepts introduced:
   - pl.concat for column-wise tile concatenation
 
-Run:  python examples/kernels/04_concat.py
-Next: examples/kernels/05_activation.py
+Run:  python examples/beginner/06_concat.py
+Next: examples/intermediate/01_fused_linear.py
 """
 
 import pypto.language as pl

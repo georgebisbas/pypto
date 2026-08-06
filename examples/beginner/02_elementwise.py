@@ -20,8 +20,8 @@ Concepts introduced:
   - pl.mul for element-wise multiplication
   - Multiple @pl.jit kernels in one file
 
-Run:  python examples/kernels/01_elementwise.py
-Next: examples/kernels/02_fused_ops.py
+Run:  python examples/beginner/02_elementwise.py
+Next: examples/beginner/03_scalar_ops.py
 """
 
 import pypto.language as pl

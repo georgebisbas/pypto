@@ -28,7 +28,7 @@ Concepts introduced:
 NOTE: atomic-add accumulation order across cores is not fixed, so the
 floating-point result is non-deterministic at the ulp level.
 
-Run:  python examples/kernels/10_split_k.py
+Run:  python examples/advanced/01_split_k.py
 """
 
 import pypto.language as pl

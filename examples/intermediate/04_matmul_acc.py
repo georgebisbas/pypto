@@ -8,37 +8,22 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Matrix multiplication on the cube unit (64x64).
+Matrix multiply with accumulation: K-dimension tiling (64x64).
 
-Kernels:
-  matmul_64     — full 64x64 matmul in one shot
-  matmul_acc_64 — K=64 split into two K=32 chunks with matmul + matmul_acc
+Kernel:
+  matmul_acc_64 -- K=64 split into two K=32 chunks with matmul + matmul_acc
 
 Concepts introduced:
-  - Memory hierarchy: GM -> Mat (L1) -> Left/Right (L0A/L0B) -> matmul -> Acc (L0C)
-  - pl.matmul for cube unit multiplication
   - pl.matmul_acc for accumulating partial products
   - K-dimension tiling for large reductions
 
-Run:  python examples/kernels/03_matmul.py
-Next: examples/kernels/04_concat.py
+Run:  python examples/intermediate/04_matmul_acc.py
+Next: examples/intermediate/05_assemble.py
 """
 
 import pypto.language as pl
 import torch
 from pypto.runtime import RunConfig
-
-
-@pl.jit
-def matmul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-    with pl.at(level=pl.Level.CORE_GROUP):
-        tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
-        tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-        tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        pl.store(tile_c_l0c, [0, 0], c)
-    return c
 
 
 @pl.jit
@@ -73,10 +58,6 @@ if __name__ == "__main__":
 
     a = torch.randn(64, 64, dtype=torch.float32)
     b = torch.randn(64, 64, dtype=torch.float32)
-
-    c = torch.zeros((64, 64), dtype=torch.float32)
-    matmul_64(a, b, c, config=cfg)
-    assert torch.allclose(c, torch.matmul(a, b), rtol=1e-3, atol=1e-3)
 
     c = torch.zeros((64, 64), dtype=torch.float32)
     matmul_acc_64(a, b, c, config=cfg)

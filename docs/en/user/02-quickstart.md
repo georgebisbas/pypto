@@ -262,7 +262,7 @@ assert torch.allclose(out, a + b, rtol=1e-5, atol=1e-5)
 
 Calling a `@pl.jit` function directly does the whole thing: specialize on the argument
 shapes and dtypes, compile, cache, dispatch. Later calls with the same shapes reuse the
-cached compilation. `examples/hello_world.py` is this pattern, at tile level.
+cached compilation. `examples/beginner/01_hello_world.py` is this pattern, at tile level.
 
 ## Edge Cases
 

@@ -15,7 +15,7 @@ In the @pl.jit world the specializer's alpha-renamer rewrites the
 rebinding of ``vlen`` in the else-branch to a distinct alias, which then
 fails ``ConvertToSSA`` ("used outside its defining scope").  The current
 recommended workaround -- documented in
-``examples/kernels/09_dyn_valid_shape.py`` -- is to push the
+``examples/intermediate/06_dyn_valid_shape.py`` -- is to push the
 ``vlen`` selection to the caller.
 
 These tests verify that the JIT pipeline succeeds for both branches of
@@ -27,7 +27,7 @@ the original ``if/else``:
 
 import pytest
 import torch
-from examples.kernels.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
+from examples.intermediate.dyn_valid_shape import BLOCK_COL, Q_TILE, dyn_valid_shape
 
 
 class TestDynValidShapeIfElse:

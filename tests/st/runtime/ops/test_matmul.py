@@ -21,7 +21,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from examples.kernels.matmul import matmul_acc_64
+from examples.intermediate.matmul_acc import matmul_acc_64
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto import backend as _backend
 from pypto import ir, passes

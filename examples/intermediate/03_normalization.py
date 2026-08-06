@@ -21,8 +21,8 @@ Concepts introduced:
   - pl.col_expand_mul, pl.col_expand for broadcasting column vectors
   - pl.sqrt for square root
 
-Run:  python examples/kernels/07_normalization.py
-Next: examples/kernels/08_assemble.py
+Run:  python examples/intermediate/03_normalization.py
+Next: examples/intermediate/04_matmul_acc.py
 """
 
 import pypto.language as pl

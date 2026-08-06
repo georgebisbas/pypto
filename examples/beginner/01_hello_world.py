@@ -16,8 +16,8 @@ Concepts introduced:
   - pl.Out[] marks output tensor parameters (in-place mutation)
   - Tensor (global memory) vs Tile (on-chip register) types
 
-Run:  python examples/hello_world.py
-Next: examples/kernels/01_elementwise.py
+Run:  python examples/beginner/01_hello_world.py
+Next: examples/beginner/02_elementwise.py
 """
 
 import pypto.language as pl
