@@ -415,6 +415,45 @@ jobs:
       if: needs.changes.outputs.docs_only == 'true'
       run: echo "Every changed path is documentation — no build, no tests."
 
+  examples-tests:
+    # The distributed examples ladder (doc-plan 02) — every example must compile
+    # AND run with a passing golden on the simulator (a2a3sim), so the teaching
+    # material cannot silently rot. Same gate as unit-tests: on a docs-only PR
+    # the job checks out and reports green without building the extension.
+    needs: [changes, pre-commit, clang-tidy]
+    if: >-
+      !cancelled()
+      && needs.pre-commit.result == 'success'
+      && (needs.clang-tidy.result == 'success' || needs.clang-tidy.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install project and dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -v .[dev]
+      - name: Run distributed examples on the simulator
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          set -e
+          for ex in examples/distributed/*.py; do
+            case "$ex" in */__init__.py) continue ;; esac
+            echo "=== $ex ==="
+            python "$ex" -p a2a3sim -d 0,1
+          done
+      - name: Skipped (documentation-only change)
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Every changed path is documentation — no build, no examples."
+
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
     # on-board. --codegen-only skips assembly (ptoas), pto-isa, simpler and
