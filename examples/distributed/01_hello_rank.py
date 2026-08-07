@@ -28,7 +28,7 @@ scalar wedged between tensors fails at runtime with "cannot add tensor after
 scalar".
 
 Run:  python examples/distributed/01_hello_rank.py -p a2a3sim -d 0,1
-Next: examples/distributed/02_three_level_model.py
+Next: examples/distributed/02_programming_model.py
 """
 
 import argparse

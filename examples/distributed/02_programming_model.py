@@ -21,7 +21,7 @@ Concepts introduced:
 This is the same skeleton as 01_hello_rank; the point here is the labels — three
 functions, three levels, one processor each.
 
-Run:  python examples/distributed/02_three_level_model.py -p a2a3sim -d 0,1
+Run:  python examples/distributed/02_programming_model.py -p a2a3sim -d 0,1
 Next: examples/distributed/03_window_buffer.py
 """
 
@@ -82,7 +82,7 @@ def host_orch(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="02_three_level_model")
+    parser = argparse.ArgumentParser(description="02_programming_model")
     parser.add_argument(
         "-p",
         "--platform",
@@ -126,7 +126,7 @@ def main() -> int:
 
     expected = x * torch.arange(1, N_RANKS + 1, dtype=torch.float32).view(N_RANKS, 1, 1)
     assert torch.allclose(y, expected, rtol=1e-5, atol=1e-5), (
-        f"three_level_model mismatch: max diff = {(y - expected).abs().max().item()}"
+        f"programming_model mismatch: max diff = {(y - expected).abs().max().item()}"
     )
     print("OK")
     return 0
