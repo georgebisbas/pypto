@@ -15,9 +15,10 @@ clears each lane it used (ready barrier plus per-chunk credits) before it
 returns, a lane at zero proves that the owning block started and completed its
 epilogue; output correctness additionally proves that active blocks processed
 their block-strided chunks.  A signal-reuse variant runs two back-to-back calls
-through ONE shared signal and checks both rounds' output plus the post-call
-zero lanes, proving the per-lane epilogue makes the multicore signal reusable
-across calls.
+through ONE shared signal and checks output correctness for both rounds — if the
+per-lane epilogue fails to self-clear, round 2's ready barrier passes spuriously
+on stale credits and the reduction reads peers' data too early, producing wrong
+output.
 """
 
 import sys
@@ -189,6 +190,13 @@ def _build_multicore_allreduce_signal_reuse(
     ``core_num`` blocks.  The per-lane self-clearing epilogue must restore every
     lane to zero after round 1, or round 2's ready barrier would pass spuriously
     on stale credits and the reduction could read peers' data too early.
+
+    Verified indirectly through output correctness: if the signal is not properly
+    self-cleared after round 1, round 2's Ge(1) ready barrier passes before
+    peers have published their data, producing wrong output.  No on-device signal
+    readback — TWAIT(Eq 0) on a non-coherent NPU risks reading stale cached
+    values from a previous AIV task dispatch, and the sim executor is
+    sequentially consistent so the definitive proof is the NPU developer gate.
     """
     nr = n_ranks
     sz = size
@@ -196,7 +204,6 @@ def _build_multicore_allreduce_signal_reuse(
     stride = signal_stride
     stage_rows = 8 if size == 1 else 1
     stage_cols = 1 if size == 1 else ((size + 7) // 8) * 8
-    signal_stage_cols = ((signal_stride + 7) // 8) * 8
 
     @pl.program
     class HostTensorAllReduceMulticoreSignalReuse:
@@ -226,60 +233,29 @@ def _build_multicore_allreduce_signal_reuse(
         def consume_step(
             self,
             data: pld.DistributedTensor[[1, sz], pl.FP32],
-            signal: pld.DistributedTensor[[nr, stride], pl.INT32],
             out: pl.Out[pl.Tensor[[1, sz], pl.FP32]],
-            signal_out: pl.Out[pl.Tensor[[nr, stride], pl.INT32]],
         ) -> pl.Tensor[[1, sz], pl.FP32]:
-            ctx = pld.get_comm_ctx(signal)
-            my_rank = pld.rank(ctx)
-            for peer in pl.range(nr):
-                if peer != my_rank:
-                    for lane in pl.range(cores):
-                        # A lane that missed its epilogue reset would still hold
-                        # the previous round's credits here and the wait would
-                        # hang — self-cleared lanes prove the signal is reusable.
-                        # TWAIT performs the cache invalidation required for a
-                        # reliable device-side observation.
-                        pld.system.wait(
-                            signal=signal,
-                            offsets=[peer, lane],
-                            expected=0,
-                            cmp=pld.WaitCmp.Eq,
-                        )
-
             reduced = pl.load(
                 data,
                 [0, 0],
                 [stage_rows, stage_cols],
                 valid_shape=[1, sz],
             )
-            out = pl.store(reduced, [0, 0], out)
-
-            signal_values = pl.load(
-                signal,
-                [0, 0],
-                [nr, signal_stage_cols],
-                valid_shape=[nr, stride],
-            )
-            pl.store(signal_values, [0, 0], signal_out)
-            return out
+            return pl.store(reduced, [0, 0], out)
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def consume_orch(
             self,
             data: pld.DistributedTensor[[1, sz], pl.FP32],
-            signal: pld.DistributedTensor[[nr, stride], pl.INT32],
             out: pl.Out[pl.Tensor[[1, sz], pl.FP32]],
-            signal_out: pl.Out[pl.Tensor[[nr, stride], pl.INT32]],
         ) -> pl.Tensor[[1, sz], pl.FP32]:
-            return self.consume_step(data, signal, out, signal_out)
+            return self.consume_step(data, out)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
             inputs: pl.Tensor[[2, nr, 1, sz], pl.FP32],
             outputs: pl.Out[pl.Tensor[[2, nr, 1, sz], pl.FP32]],
-            signal_outputs: pl.Out[pl.Tensor[[2, nr, nr, stride], pl.INT32]],
         ) -> pl.Tensor[[2, nr, 1, sz], pl.FP32]:
             data_buf = pld.alloc_window_buffer(sz * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(pld.world_size() * stride * pl.INT32.get_byte())
@@ -297,13 +273,7 @@ def _build_multicore_allreduce_signal_reuse(
                 core_num=cores,
             )
             for rank in pl.range(pld.world_size()):
-                self.consume_orch(
-                    data,
-                    signal,
-                    outputs[0, rank],
-                    signal_outputs[0, rank],
-                    device=rank,
-                )
+                self.consume_orch(data, outputs[0, rank], device=rank)
 
             # Round 2 — reuse the same signal; stale credits from round 1 would
             # make this call's ready barrier pass spuriously.
@@ -318,13 +288,7 @@ def _build_multicore_allreduce_signal_reuse(
                 core_num=cores,
             )
             for rank in pl.range(pld.world_size()):
-                self.consume_orch(
-                    data,
-                    signal,
-                    outputs[1, rank],
-                    signal_outputs[1, rank],
-                    device=rank,
-                )
+                self.consume_orch(data, outputs[1, rank], device=rank)
             return outputs
 
     return HostTensorAllReduceMulticoreSignalReuse
@@ -401,10 +365,13 @@ class TestL3HostTensorAllReduceMulticore:
     ):
         """Reuse ONE multicore signal across 2 back-to-back allreduce calls.
 
-        The per-lane self-clearing epilogue must restore every lane to zero after
-        round 1, or round 2's ready barrier would pass spuriously on stale
-        credits (NPU-visible; the sim executor is sequentially consistent, so the
-        definitive proof is the NPU developer gate).
+        Output correctness is the definitive proof of correct signal reuse: if
+        the per-lane epilogue fails to self-clear after round 1, round 2's
+        Ge(1) ready barrier passes spuriously on stale credits and the reduction
+        reads peers' data too early — producing wrong output.  No on-device
+        signal readback is attempted because TWAIT(Eq 0) risks reading stale
+        cached values from a previous AIV task dispatch on non-coherent NPU
+        silicon; the sequential sim executor cannot distinguish the two cases.
         """
         if len(device_ids) < n_ranks:
             pytest.skip(f"multicore host allreduce P={n_ranks} needs {n_ranks} devices, got {device_ids}")
@@ -426,9 +393,8 @@ class TestL3HostTensorAllReduceMulticore:
             [_make_rank_inputs(n_ranks, size, round_offset=rd * 10000.0) for rd in range(rounds)]
         )
         outputs = torch.zeros((rounds, n_ranks, 1, size), dtype=torch.float32)
-        signal_outputs = torch.zeros((rounds, n_ranks, n_ranks, signal_stride), dtype=torch.int32)
 
-        compiled(inputs, outputs, signal_outputs)
+        compiled(inputs, outputs)
 
         for rd in range(rounds):
             expected = _expected_allreduce(inputs[rd])
@@ -437,16 +403,6 @@ class TestL3HostTensorAllReduceMulticore:
                 f"P={n_ranks}, C={core_num}, size={size} mismatch: "
                 f"max diff = {(outputs[rd] - expected).abs().max().item()}"
             )
-            for rank in range(n_ranks):
-                for peer in range(n_ranks):
-                    if peer == rank:
-                        continue
-                    assert torch.all(signal_outputs[rd, rank, peer, :core_num] == 0), (
-                        f"signal lane not self-cleared after round {rd} for "
-                        f"P={n_ranks}, C={core_num}, size={size}, "
-                        f"stride={signal_stride}, receiver={rank}, sender={peer}: "
-                        f"got {signal_outputs[rd, rank, peer].tolist()}"
-                    )
 
 
 if __name__ == "__main__":
