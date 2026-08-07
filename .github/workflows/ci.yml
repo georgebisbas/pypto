@@ -473,6 +473,14 @@ jobs:
             echo "=== $ex ==="
             python "$ex" -p a2a3sim -d 0,1
           done
+          # Alternate modes documented in the walkthroughs — every documented
+          # invocation must be CI-validated too, or the teaching material rots.
+          echo "=== examples/distributed/04_barrier.py --use-builtin ==="
+          python examples/distributed/04_barrier.py -p a2a3sim -d 0,1 --use-builtin
+          echo "=== examples/distributed/05_remote_load_store.py --mode store ==="
+          python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1 --mode store
+          echo "=== examples/distributed/06_put_get.py --mode get ==="
+          python examples/distributed/06_put_get.py -p a2a3sim -d 0,1 --mode get
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going
