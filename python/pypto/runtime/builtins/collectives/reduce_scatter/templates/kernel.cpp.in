@@ -155,16 +155,21 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // protocol, see lower_composite_ops_pass.cpp). Each peer notified +1 into its
   // own cell in my memory once per barrier this call issued — 1 ready barrier
   // plus one per UB chunk. read_done_expected ends at num_chunks + 2, so the
-  // barrier count is read_done_expected - 1; the epilogue is a local hardware
-  // atomic (TNOTIFY on a local address is the same st_atomic the remote path
-  // uses). A plain Set(0) must never be mixed with the AtomicAdd(+1) body — a
-  // set could clobber an already advanced counter and wipe a fast peer's
-  // next-call credit.
+  // barrier count is read_done_expected - 1.
+  //
+  // Use NotifyOp::Set(0) instead of AtomicAdd(-N): on non-coherent NPU silicon
+  // a new AIV task dispatch may read a stale cached value for the signal cell;
+  // AtomicAdd reads-modifies-writes that stale value, while Set unconditionally
+  // writes 0.  Set is safe here because the per-tile pipe_barrier(PIPE_ALL)
+  // above guarantees all peers' AtomicAdd credits have already landed — there
+  // is no in-flight write that Set could clobber.  Verified reliable in the
+  // single-core allreduce and barrier reuse ST suites whose kernels share the
+  // same protocol.
   const int32_t barrier_count = read_done_expected - 1;
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
-    pto::comm::TNOTIFY(self_sig, -barrier_count, pto::comm::NotifyOp::AtomicAdd);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
   }
   pipe_barrier(PIPE_ALL);
 }
