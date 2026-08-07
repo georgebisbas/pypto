@@ -165,7 +165,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // is no in-flight write that Set could clobber.  Verified reliable in the
   // single-core allreduce and barrier reuse ST suites whose kernels share the
   // same protocol.
-  const int32_t barrier_count = read_done_expected - 1;
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
