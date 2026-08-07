@@ -5,6 +5,8 @@ tensor 级点对点移动，push 与 pull。
 
 > **前置条件：** [10-remote_load_store](10-remote_load_store.md)。两个设备。
 
+**建议阅读顺序（Suggested reading order）：** 01 → 02 → 03 → 04 → 05 → **06** — 本页为步骤 06。
+
 ## 思路（The idea）
 
 步骤 05 用 `remote_load`/`remote_store` 一次移动一个 *tile*。tensor 级原语

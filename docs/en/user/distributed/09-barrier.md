@@ -6,6 +6,8 @@ synchronization.
 
 > **Prerequisites:** [08-window_buffer](08-window_buffer.md). Two devices.
 
+**Suggested reading order:** 01 → 02 → 03 → **04** → 05 → 06 — this page is step 04.
+
 ## The idea
 
 The window buffer's **signal tail** exists for one job: cross-rank

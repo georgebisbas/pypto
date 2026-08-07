@@ -9,6 +9,8 @@ the output, and the golden proves each rank touched exactly its own row.
 > no prior distributed experience — just the [Getting
 > Started](../00-getting_started.md) baseline.
 
+**Suggested reading order:** **01** → 02 → 03 → 04 → 05 → 06 — this page is step 01.
+
 ## The idea
 
 A distributed program runs the **same source** on every participating device,

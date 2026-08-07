@@ -5,6 +5,8 @@ slice——尚无通信，但后续每一步都通过这个对象移动数据。
 
 > **前置条件：** [07-programming_model](07-programming_model.md)。两个设备。
 
+**建议阅读顺序（Suggested reading order）：** 01 → 02 → **03** → 04 → 05 → 06 — 本页为步骤 03。
+
 ## 思路（The idea）
 
 `pld` 中的分布式内存是**对称的**：每个 rank 在相同的虚拟地址分配*相同*的

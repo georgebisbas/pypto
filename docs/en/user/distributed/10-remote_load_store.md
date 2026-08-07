@@ -5,6 +5,8 @@ Move one slice between ranks with `pld.tile.remote_load` and
 
 > **Prerequisites:** [09-barrier](09-barrier.md). Two devices.
 
+**Suggested reading order:** 01 → 02 → 03 → 04 → **05** → 06 — this page is step 05.
+
 ## The idea
 
 A window is symmetric: you can reach *any* rank's slice of it, not just your

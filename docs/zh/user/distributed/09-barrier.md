@@ -5,6 +5,8 @@
 
 > **前置条件：** [08-window_buffer](08-window_buffer.md)。两个设备。
 
+**建议阅读顺序（Suggested reading order）：** 01 → 02 → 03 → **04** → 05 → 06 — 本页为步骤 04。
+
 ## 思路（The idea）
 
 window buffer 的**信号尾**只有一个职责：跨 rank 同步。两个原语驱动它。

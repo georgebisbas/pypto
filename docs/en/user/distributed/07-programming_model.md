@@ -5,6 +5,8 @@ orchestration, device kernel — and see which processor runs which.
 
 > **Prerequisites:** [06-hello_rank](06-hello_rank.md). Two devices.
 
+**Suggested reading order:** 01 → **02** → 03 → 04 → 05 → 06 — this page is step 02.
+
 ## The idea
 
 A `pld` program is not one function but three, and the interesting part of the

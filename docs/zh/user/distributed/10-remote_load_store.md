@@ -5,6 +5,8 @@ slice——一步环形移位的两个侧面。
 
 > **前置条件：** [09-barrier](09-barrier.md)。两个设备。
 
+**建议阅读顺序（Suggested reading order）：** 01 → 02 → 03 → 04 → **05** → 06 — 本页为步骤 05。
+
 ## 思路（The idea）
 
 window 是对称的：你可以到达*任何* rank 的 slice，而不仅是自己的。

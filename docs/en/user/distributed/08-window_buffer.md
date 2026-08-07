@@ -7,6 +7,8 @@ data through exactly this object.
 > **Prerequisites:** [07-programming_model](07-programming_model.md). Two
 > devices.
 
+**Suggested reading order:** 01 → 02 → **03** → 04 → 05 → 06 — this page is step 03.
+
 ## The idea
 
 Distributed memory in `pld` is **symmetric**: every rank allocates the *same*
