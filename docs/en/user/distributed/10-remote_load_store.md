@@ -21,9 +21,9 @@ its data one position around the ring. `--mode load` shows the *pull* side
 `--mode store` shows the *push* side (each rank remote-stores into the next
 rank's slice, then reads its own back → `y[r] = x[(r-1) % N]`).
 
-**Cost card:** one ring shift moves `P-1` slices of `N` bytes per rank, in one
-communication round, each move a single remote read or write. Latency-bound:
-the cost is the round trips, not the bytes.
+**Cost card:** one step moves one slice of `N` bytes to (or from) one peer per
+rank, in one communication round, a single remote read or write.
+Latency-bound: the cost is the round trip, not the bytes.
 
 ## Run it
 
@@ -112,7 +112,7 @@ structural: anything you want to share must flow through a
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 05)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 05)
 - [02-primitives](../distributed/02-primitives.md) §Tile-Level RMA — the full
   `pld.tile.*` surface
 - [01-collectives](../distributed/01-collectives.md) — all-reduce is these

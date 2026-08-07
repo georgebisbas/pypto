@@ -100,7 +100,7 @@ windows do not cost what their shape suggests.
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 03)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 03)
 - [02-primitives](../distributed/02-primitives.md) §Window Buffer Management —
   the full API
 - [00-model](../distributed/00-model.md) §Glossary — window buffer, signal

@@ -8,15 +8,16 @@
 # -----------------------------------------------------------------------------------------------------------
 # -----------------------------------------------------------------------------------------------------------
 
-"""Signals only: a reusable N-rank barrier built from notify/wait.
+"""Signals only: an N-rank barrier for one rendezvous, built from notify/wait.
 
 Concepts introduced:
   - ``pld.system.notify`` (``NotifyOp.AtomicAdd``) / ``pld.system.wait``
     (``WaitCmp.Ge``): the cross-rank signal handshake
-  - a reusable N-rank barrier: every rank notifies all peers, then waits on
-    every peer -- no data moves
-  - why AtomicAdd + Ge keeps the barrier reusable across calls (monotonic
-    counters, no reset between calls)
+  - an N-rank barrier for one rendezvous: every rank notifies all peers, then
+    waits on every peer -- no data moves
+  - why AtomicAdd + Ge: N ranks write the same signal cell, so the
+    contribution must accumulate (a Set would clobber earlier arrivals);
+    Ge(1) passes when every peer has arrived
   - ``pld.rank(ctx)`` / ``pld.nranks(ctx)`` derived from ``pld.get_comm_ctx``
   - the reveal: ``pld.tensor.barrier`` provides the same synchronization as
     one call (run with ``--use-builtin``)
@@ -27,6 +28,10 @@ window. After the barrier, rank r's row in its OWN window is
 notifies itself). The example surfaces that row as the output, so the result
 proves every peer arrived, on every rank.
 
+The example runs a single rendezvous. Reusing the same window for a second
+barrier needs either a cell reset or a generation-specific expected threshold:
+the counters are monotonic, so ``Ge(1)`` would already be satisfied.
+
 With ``--use-builtin`` the barrier is one ``pld.tensor.barrier`` call. The
 builtin synchronizes but does not leave a tally in the signal window, so the
 reveal instead proves correct ordering with data: every rank stages its slice,
@@ -34,9 +39,7 @@ barriers, then remote-loads the next rank's slice. A missing barrier would let
 the load race the peer's store; the golden ``y[r] = x[(r+1) % N]`` holds only
 because the barrier ordered them.
 
-Run:  python examples/distributed/04_barrier.py -p a2a3sim -d 0,1
-      python examples/distributed/04_barrier.py -p a2a3sim -d 0,1 --use-builtin
-Next: examples/distributed/05_remote_load_store.py
+Run + walkthrough: see docs/en/user/distributed/09-barrier.md
 """
 
 import argparse
@@ -56,13 +59,15 @@ def barrier_handrolled(
     y: pl.Out[pl.Tensor[[N_RANKS, 1], pl.INT32]],
     signal: pld.DistributedTensor[[N_RANKS, 1], pl.INT32],
 ):
-    """Chip kernel: hand-rolled reusable N-rank barrier, then surface the signal row."""
+    """Chip kernel: hand-rolled N-rank barrier for one rendezvous, then surface the signal row."""
     ctx = pld.get_comm_ctx(signal)
     my_rank = pld.rank(ctx)
 
     # Every rank notifies all peers (AtomicAdd), then waits on all peers (Ge).
-    # AtomicAdd + Ge is reusable: the counter only grows, so a fresh call does
-    # not need the slots reset.
+    # N ranks write the same cell, so the contribution must accumulate; a Set
+    # would clobber earlier arrivals. This is a single rendezvous -- reusing
+    # the window for another barrier needs a cell reset or a generation-
+    # specific expected threshold.
     for peer in pl.range(N_RANKS):
         if peer != my_rank:
             pld.system.notify(

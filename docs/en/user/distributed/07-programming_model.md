@@ -118,7 +118,7 @@ its own index.
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 02)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 02)
 - [00-model](../distributed/00-model.md) — model vocabulary, L2 vs L3
 - [03-execution](../distributed/03-execution.md) — worker lifecycle per level
 - Next step: [08-window_buffer](08-window_buffer.md) — the memory substrate

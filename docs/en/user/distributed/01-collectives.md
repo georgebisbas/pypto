@@ -219,11 +219,11 @@ only.
 
 Every collective above has a runnable counterpart under
 `tests/st/distributed/` (paths below are relative to that directory). The
-[ladder](05-ladder.md) walkthroughs are the user-facing counterparts that
+[tutorials](05-tutorials.md) are the user-facing counterparts that
 build each collective by hand before the builtin is revealed:
 
-| Collective | Ladder step | Hand-rolled first? |
-| ---------- | ----------- | ------------------ |
+| Collective | Tutorial step | Hand-rolled first? |
+| ---------- | ------------- | ------------------ |
 | barrier | [09-barrier](09-barrier.md) | yes (step 04, then reveal) |
 | allreduce | planned — steps 07–10 | yes (mesh, two-phase, ring, then reveal) |
 | broadcast | planned — step 11 | yes |

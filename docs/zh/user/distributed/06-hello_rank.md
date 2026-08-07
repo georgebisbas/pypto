@@ -3,7 +3,7 @@
 运行你的第一个双 rank 程序：每个 rank 将自己的索引加到输出的对应 slice 上，
 golden 证明每个 rank 恰好触碰了自己的那一行。
 
-> **前置条件：** 阶梯总览见 [05-ladder](05-ladder.md)；词汇见
+> **前置条件：** 教程总览见 [05-tutorials](05-tutorials.md)；词汇见
 > [分布式编程](../distributed/index.md)章节。需要两个设备（或两个模拟设备）。
 > 你的第一个 `pld` 程序不需要任何分布式经验——只需 [快速入门](../00-getting_started.md)
 > 的基础。
@@ -111,7 +111,8 @@ assert torch.allclose(y, x + torch.arange(N_RANKS).view(N_RANKS, 1, 1), ...)
 
 `DistributedConfig(device_ids=[0, 1], num_sub_workers=0)` 声明两个设备且不
 启用主机子 worker——最小的多 rank 配置。golden `y == x + r` **带容差**
-（`allclose`）校验，因为归约顺序会改变浮点结果。
+（`allclose`）校验——计算是逐元素的，容差只是为后端浮点差异预留的余量；
+若需要严格保证，可使用精确相等。
 
 ## 边界情况（Edge cases）
 
@@ -129,7 +130,7 @@ assert torch.allclose(y, x + torch.arange(N_RANKS).view(N_RANKS, 1, 1), ...)
 
 ## 参见（See also）
 
-- [05-ladder](05-ladder.md) — 阶梯总览（本步骤 = 第 01 行）
+- [05-tutorials](05-tutorials.md) — 教程总览（本步骤 = 第 01 行）
 - [00-model](../distributed/00-model.md) — 快速入门 + 模型词汇
 - [03-execution](../distributed/03-execution.md) — `DistributedConfig` 与
   worker 生命周期

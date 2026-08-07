@@ -1,7 +1,7 @@
 # Barrier: Signals Only
 
-Build a reusable N-rank barrier from `notify`/`wait` — no data moves — then
-reveal the builtin `pld.tensor.barrier` that provides the same
+Build an N-rank barrier for one rendezvous from `notify`/`wait` — no data
+moves — then reveal the builtin `pld.tensor.barrier` that provides the same
 synchronization.
 
 > **Prerequisites:** [08-window_buffer](08-window_buffer.md). Two devices.
@@ -24,11 +24,12 @@ rank `r`'s own row reads `[1, …, 0, …, 1]` — a `1` in every column except 
 own, because a rank never notifies itself. Surfacing that row is the proof
 that every peer arrived.
 
-**Why `AtomicAdd` + `Ge` keeps the barrier reusable.** A one-shot barrier could
-use `Set`/`Eq`, but a reusable one must be safe to call many times on the same
-window without resetting it. `AtomicAdd` only ever *grows* a counter and `Ge`
-passes when the counter reaches the threshold — so consecutive calls compose
-naturally, and nothing needs zeroing between calls.
+**Why `AtomicAdd` + `Ge`.** N ranks write the same signal cell, so the
+contribution must accumulate: `AtomicAdd` grows the counter, `Ge(1)` passes
+when every peer has arrived, and a `Set` would silently clobber earlier
+arrivals. The example runs a single rendezvous — the counters are monotonic,
+so reusing the same window for a second barrier needs a cell reset or a
+generation-specific expected threshold.
 
 **Cost card:** one communication round, `P-1` notifications + `P-1` waits per
 rank, zero data bytes. This is the cheapest rendezvous in the language —
@@ -123,14 +124,16 @@ missing barrier would let the load race the peer's store; the golden
 
 ## Edge cases
 
-> **Fatal pitfall — `Set`/`Eq` barrier that works once.** `NotifyOp.Set` +
-> `WaitCmp.Eq` produces a barrier that passes the first call and then either
-> blocks or misfires on the second, because nothing resets the counter. **Fix:**
-> use `AtomicAdd` + `Ge` so counters are monotonic and calls compose.
+> **Fatal pitfall — `Set`/`Eq` barrier that never sees all arrivals.**
+> `NotifyOp.Set` + `WaitCmp.Eq` makes N ranks write the same cell with plain
+> overwrites, so earlier arrivals are silently clobbered and the barrier can
+> pass before every peer has arrived. **Fix:** use `AtomicAdd` + `Ge` so the
+> contributions accumulate.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| Barrier hangs on the second call | `Set`/`Eq` — counter not monotonic | Use `AtomicAdd` + `Ge` |
+| Barrier passes before every peer arrived | `Set`/`Eq` — later writes clobber earlier ones | Use `AtomicAdd` + `Ge` so contributions accumulate |
+| Second barrier passes before peers arrive | Reusing the same window — counters already satisfy `Ge(1)` | Reset the cells, or track a generation and raise `expected` per call |
 | Own signal row shows `0` where peers arrived | Forgot rank `r` skips itself in the notify loop | Skip `peer == my_rank` |
 | `pto.alloc_tile` … `32-byte aligned` | Tile-loading a narrow `INT32` window (e.g. `[2,1]` = 8 B column) | Read/write cells as scalars with `pl.read`/`pl.write`, or widen the window |
 | Builtin reveal output is all zeros | Reading the signal tally after `pld.tensor.barrier` | The builtin synchronizes but does not leave a tally — prove ordering with data instead |
@@ -138,7 +141,7 @@ missing barrier would let the load race the peer's store; the golden
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 04)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 04)
 - [02-primitives](../distributed/02-primitives.md) §Notify & Wait + §Choosing
   NotifyOp and WaitCmp — the full signal API
 - [01-collectives](../distributed/01-collectives.md) §Barrier — where the

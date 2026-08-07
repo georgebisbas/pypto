@@ -21,8 +21,7 @@ Concepts introduced:
 This is the same skeleton as 01_hello_rank; the point here is the labels — three
 functions, three levels, one processor each.
 
-Run:  python examples/distributed/02_programming_model.py -p a2a3sim -d 0,1
-Next: examples/distributed/03_window_buffer.py
+Run + walkthrough: see docs/en/user/distributed/07-programming_model.md
 """
 
 import argparse

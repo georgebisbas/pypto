@@ -1,6 +1,6 @@
 # Barrier：仅信号（Signals Only）
 
-用 `notify`/`wait` 构建可复用的 N-rank barrier——不移动任何数据——然后揭示
+用 `notify`/`wait` 为一次汇合构建 N-rank barrier——不移动任何数据——然后揭示
 提供同样同步语义的内置原语 `pld.tensor.barrier`。
 
 > **前置条件：** [08-window_buffer](08-window_buffer.md)。两个设备。
@@ -19,10 +19,10 @@ barrier 是纯粹的同步。本步骤手工用 `notify`/`wait` 编写 barrier�
 rank `r` 自己的行读作 `[1, …, 0, …, 1]`——除自身外每一列都是 `1`，因为
 rank 从不通知自己。将该行呈现出来，就是"每个对端都已到达"的证明。
 
-**为什么 `AtomicAdd` + `Ge` 让 barrier 可复用。** 一次性 barrier 可以用
-`Set`/`Eq`，但可复用的 barrier 必须能在同一个 window 上安全地多次调用而
-无需重置。`AtomicAdd` 只会*增长*计数器，`Ge` 在计数器达到阈值时通过——
-因此连续调用自然组合，两次调用之间无需清零。
+**为什么 `AtomicAdd` + `Ge`。** N 个 rank 写入同一个信号单元，因此贡献必须
+累加：`AtomicAdd` 增长计数器，`Ge(1)` 在每个对端都已到达时通过，而 `Set`
+会静默覆盖更早的到达。本示例只运行一次汇合——计数器是单调的，因此在同一
+window 上复用第二次 barrier 需要重置单元，或按代次提高 `expected` 阈值。
 
 **成本卡片：** 一轮通信，每个 rank 发出 `P-1` 次 notify + `P-1` 次 wait，
 零数据字节。这是语言中最便宜的汇合——是每个集合通信的基准下限。
@@ -111,14 +111,16 @@ window 中留下计数*，因此揭示改用数据来证明 barrier：每个 ran
 
 ## 边界情况（Edge cases）
 
-> **致命陷阱——只能用一次的 `Set`/`Eq` barrier。** `NotifyOp.Set` +
-> `WaitCmp.Eq` 产生的 barrier 第一次调用通过，第二次要么阻塞要么误触发，
-> 因为计数器没有被重置。**修复：** 使用 `AtomicAdd` + `Ge`，使计数器单调，
-> 调用可组合。
+> **致命陷阱——`Set`/`Eq` barrier 永远看不到全部到达。** `NotifyOp.Set` +
+> `WaitCmp.Eq` 让 N 个 rank 用普通覆盖写入同一个单元，更早的到达被静默
+> 覆盖，barrier 可能在任何对端到达之前就通过。**修复：** 使用 `AtomicAdd`
+>
+> - `Ge`，让贡献累加。
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| 第二次调用 barrier 挂起 | `Set`/`Eq`——计数器不单调 | 使用 `AtomicAdd` + `Ge` |
+| 在每个对端到达之前 barrier 就通过 | `Set`/`Eq`——后写覆盖先写 | 使用 `AtomicAdd` + `Ge`，让贡献累加 |
+| 第二次 barrier 在对端到达之前就通过 | 复用同一 window——计数器已满足 `Ge(1)` | 重置单元，或跟踪代次并在每次调用时提高 `expected` |
 | 自己的信号行在对端到达处显示 `0` | 忘记 rank `r` 在 notify 循环中跳过自己 | 跳过 `peer == my_rank` |
 | `pto.alloc_tile` … `32-byte aligned` | tile-load 一个窄的 `INT32` window（如 `[2,1]` = 8 B 列） | 用 `pl.read`/`pl.write` 逐单元读写，或加宽 window |
 | 内置揭示输出全零 | 在 `pld.tensor.barrier` 后读取信号计数 | 内置只同步不留下计数——改用数据证明顺序 |
@@ -126,7 +128,7 @@ window 中留下计数*，因此揭示改用数据来证明 barrier：每个 ran
 
 ## 参见（See also）
 
-- [05-ladder](05-ladder.md) — 阶梯总览（本步骤 = 第 04 行）
+- [05-tutorials](05-tutorials.md) — 教程总览（本步骤 = 第 04 行）
 - [02-primitives](../distributed/02-primitives.md) §Notify 与 Wait + §选择
   NotifyOp 与 WaitCmp — 完整信号 API
 - [01-collectives](../distributed/01-collectives.md) §Barrier — barrier 在

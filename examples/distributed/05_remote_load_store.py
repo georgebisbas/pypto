@@ -24,9 +24,7 @@ Two modes show the same shift from the two sides of the RMA:
     then read your own window (which the previous rank just wrote) ->
     ``y[r] = x[(r-1) % N]``
 
-Run:  python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1
-      python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1 --mode store
-Next: examples/distributed/06_put_get.py
+Run + walkthrough: see docs/en/user/distributed/10-remote_load_store.md
 """
 
 import argparse

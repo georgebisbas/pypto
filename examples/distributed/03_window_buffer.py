@@ -21,8 +21,7 @@ Nothing is shared yet: every rank writes its own slice and reads it back, and
 ``y == x`` is the golden. The window is where all later cross-rank traffic
 (barrier signals, remote_load/store, put/get) will live.
 
-Run:  python examples/distributed/03_window_buffer.py -p a2a3sim -d 0,1
-Next: examples/distributed/04_barrier.py
+Run + walkthrough: see docs/en/user/distributed/08-window_buffer.md
 """
 
 import argparse

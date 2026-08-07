@@ -190,7 +190,7 @@ nav:
           - en/user/distributed/02-primitives.md
           - en/user/distributed/03-execution.md
           - en/user/distributed/04-debugging.md
-          - en/user/distributed/05-ladder.md
+          - en/user/distributed/05-tutorials.md
           - en/user/distributed/06-hello_rank.md
           - en/user/distributed/07-programming_model.md
           - en/user/distributed/08-window_buffer.md

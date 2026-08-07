@@ -93,7 +93,7 @@ def window_program(
 
 ## 参见（See also）
 
-- [05-ladder](05-ladder.md) — 阶梯总览（本步骤 = 第 03 行）
+- [05-tutorials](05-tutorials.md) — 教程总览（本步骤 = 第 03 行）
 - [02-primitives](../distributed/02-primitives.md) §Window Buffer 管理 — 完整 API
 - [00-model](../distributed/00-model.md) §术语表 — window buffer、信号
 - 下一步：[09-barrier](09-barrier.md) — 仅信号，无数据

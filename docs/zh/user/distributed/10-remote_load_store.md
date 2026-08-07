@@ -19,8 +19,8 @@ window 是对称的：你可以到达*任何* rank 的 slice，而不仅是自�
 slice → `y[r] = x[(r+1) % N]`）；`--mode store` 展示*推*侧（每个 rank
 remote-store 进下一个 rank 的 slice，再读回自己的 → `y[r] = x[(r-1) % N]`）。
 
-**成本卡片：** 一次环形移位每个 rank 移动 `P-1` 个 slice、每个 `N` 字节，
-一轮通信，每次移动是单次远程读或写。延迟受限：成本在于往返次数，而非字节数。
+**成本卡片：** 一步中每个 rank 向（或从）一个对端移动一个 `N` 字节的 slice，
+一轮通信，一次远程读或写。延迟受限：成本在于往返，而非字节数。
 
 ## 运行（Run it）
 
@@ -107,7 +107,7 @@ barrier 也为 store 排序。
 
 ## 参见（See also）
 
-- [05-ladder](05-ladder.md) — 阶梯总览（本步骤 = 第 05 行）
+- [05-tutorials](05-tutorials.md) — 教程总览（本步骤 = 第 05 行）
 - [02-primitives](../distributed/02-primitives.md) §Tile 级 RMA — 完整的
   `pld.tile.*` 表面
 - [01-collectives](../distributed/01-collectives.md) — all-reduce 就是这些

@@ -26,9 +26,9 @@ The example is the same ring shift as step 05, one step: `--mode put` pushes
 into the next rank then reads its own `dst` back → `y[r] = x[(r-1) % N]`;
 `--mode get` pulls the next rank's `src` → `y[r] = x[(r+1) % N]`.
 
-**Cost card:** one step, one `P-1`-slice exchange per rank. For small slices
-this is latency-bound; for large slices the runtime's chunked + pipelined
-staging overlaps the rounds and turns a latency-bound move into a
+**Cost card:** one step, one slice exchanged with one peer per rank. For small
+slices this is latency-bound; for large slices the runtime's chunked +
+pipelined staging overlaps the rounds and turns a latency-bound move into a
 bandwidth-bound one (the same trick steps 07–09 use for all-reduce).
 
 ## Run it
@@ -125,9 +125,9 @@ full-slice form; the chapter reference documents the chunk-size rules.
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 06)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 06)
 - [02-primitives](../distributed/02-primitives.md) §Put and Get — chunking and
   pipelining constraints
 - [01-collectives](../distributed/01-collectives.md) — how collectives compose
   these moves (steps 07–15)
-- Next step: [05-ladder](05-ladder.md) — steps 07–15 (all-reduce) are planned
+- Next step: [05-tutorials](05-tutorials.md) — steps 07–15 (all-reduce) are planned

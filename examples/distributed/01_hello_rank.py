@@ -27,8 +27,7 @@ The distributed TaskArgs packing requires tensors-first / scalars-last — a
 scalar wedged between tensors fails at runtime with "cannot add tensor after
 scalar".
 
-Run:  python examples/distributed/01_hello_rank.py -p a2a3sim -d 0,1
-Next: examples/distributed/02_programming_model.py
+Run + walkthrough: see docs/en/user/distributed/06-hello_rank.md
 """
 
 import argparse

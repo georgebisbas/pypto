@@ -24,9 +24,9 @@ tensor 级点对点移动，push 与 pull。
 然后读回自己的 `dst` → `y[r] = x[(r-1) % N]`；`--mode get` 拉取下一个 rank
 的 `src` → `y[r] = x[(r+1) % N]`。
 
-**成本卡片：** 一步，每个 rank 交换 `P-1` 个 slice。小 slice 时为延迟受限；
-大 slice 时运行时的分块 + 流水线 staging 会重叠各轮，把延迟受限的移动变成
-带宽受限（与步骤 07–09 用于 all-reduce 的技巧相同）。
+**成本卡片：** 一步，每个 rank 与一个对端交换一个 slice。小 slice 时为延迟
+受限；大 slice 时运行时的分块 + 流水线 staging 会重叠各轮，把延迟受限的
+移动变成带宽受限（与步骤 07–09 用于 all-reduce 的技巧相同）。
 
 ## 运行（Run it）
 
@@ -118,9 +118,9 @@ get 侧是接收方发起的镜像：
 
 ## 参见（See also）
 
-- [05-ladder](05-ladder.md) — 阶梯总览（本步骤 = 第 06 行）
+- [05-tutorials](05-tutorials.md) — 教程总览（本步骤 = 第 06 行）
 - [02-primitives](../distributed/02-primitives.md) §Put 与 Get — 分块与流水线
   约束
 - [01-collectives](../distributed/01-collectives.md) — 集合通信如何组合这些
   移动（步骤 07–15）
-- 下一步：[05-ladder](05-ladder.md) — 步骤 07–15（all-reduce）为规划中
+- 下一步：[05-tutorials](05-tutorials.md) — 步骤 07–15（all-reduce）为规划中

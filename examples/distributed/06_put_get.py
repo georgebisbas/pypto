@@ -23,9 +23,7 @@ Two modes, one step:
   - ``--mode get``: stage, signal, ``get`` the next rank's slice -> ``y[r] =
     x[(r+1) % N]``
 
-Run:  python examples/distributed/06_put_get.py -p a2a3sim -d 0,1
-      python examples/distributed/06_put_get.py -p a2a3sim -d 0,1 --mode get
-Next: examples/distributed/07_allreduce_mesh.py
+Run + walkthrough: see docs/en/user/distributed/11-put_get.md
 """
 
 import argparse

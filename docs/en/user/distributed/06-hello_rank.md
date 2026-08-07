@@ -3,7 +3,7 @@
 Run your first two-rank program: every rank adds its own index to its slice of
 the output, and the golden proves each rank touched exactly its own row.
 
-> **Prerequisites:** [05-ladder](05-ladder.md) for the ladder map; the
+> **Prerequisites:** [05-tutorials](05-tutorials.md) for the tutorial index; the
 > [Distributed Programming](../distributed/index.md) chapter for the
 > vocabulary. Two devices (or two sim devices). Your first `pld` program needs
 > no prior distributed experience — just the [Getting
@@ -118,8 +118,9 @@ assert torch.allclose(y, x + torch.arange(N_RANKS).view(N_RANKS, 1, 1), ...)
 
 `DistributedConfig(device_ids=[0, 1], num_sub_workers=0)` declares the two
 devices and no host sub-workers — the minimal multi-rank setup. The golden
-`y == x + r` is checked **with a tolerance** (`allclose`), because reduction
-order changes floating-point results.
+`y == x + r` is checked **with a tolerance** (`allclose`) — the computation is
+elementwise, so the tolerance is just headroom for backend floating-point
+differences; use exact equality if you need a strict guarantee.
 
 ## Edge cases
 
@@ -138,7 +139,7 @@ order changes floating-point results.
 
 ## See also
 
-- [05-ladder](05-ladder.md) — the ladder map (this step = row 01)
+- [05-tutorials](05-tutorials.md) — the tutorial index (this step = row 01)
 - [00-model](../distributed/00-model.md) — quickstart + model vocabulary
 - [03-execution](../distributed/03-execution.md) — `DistributedConfig` and the
   worker lifecycle

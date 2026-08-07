@@ -191,10 +191,10 @@ for peer in pl.range(nranks):
 
 ## 可运行示例
 
-[阶梯](05-ladder.md)教程在揭示任何内置原语之前，先手工教授每个原语
+[教程](05-tutorials.md)在揭示任何内置原语之前，先手工教授每个原语
 （步骤 03–06 已交付；07–15 为规划中）：
 
-| 原语 | 阶梯步骤 |
+| 原语 | 教程步骤 |
 | ---- | -------- |
 | window buffer | [08-window_buffer](08-window_buffer.md)（步骤 03） |
 | notify / wait | [09-barrier](09-barrier.md)（步骤 04） |
