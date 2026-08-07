@@ -73,13 +73,19 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   }
 
   // Self-clearing epilogue: each peer's AtomicAdd(+1) left its cell satisfied;
-  // a local self-notify (TNOTIFY on a local address is the same st_atomic the
-  // remote path uses) restores every cell to 0 so the signal is reusable
+  // a local self-notify restores every cell to 0 so the signal is reusable
   // across calls.
+  //
+  // Use NotifyOp::Set(0) instead of AtomicAdd(-1): on non-coherent NPU silicon
+  // a new AIV task dispatch may read a stale cached value for the signal cell;
+  // AtomicAdd reads-modifies-writes that stale value, while Set unconditionally
+  // writes 0.  Set is safe here because the TWAIT above guarantees all peers'
+  // AtomicAdd credits have already landed — there is no in-flight write that
+  // Set could clobber.
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
-    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
   }
   pipe_barrier(PIPE_ALL);
 }
