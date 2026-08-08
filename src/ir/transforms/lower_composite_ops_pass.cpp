@@ -225,6 +225,55 @@ void ValidateMeshSignalShape(const DistributedTensorTypePtr& signal_type, const 
   }
 }
 
+/// Per-dtype UB chunking constants shared by every InCore collective lowering.
+/// ``chunk_elements`` is the widest element count that fits one
+/// ``kAllReduceChunkBytes`` tile; ``alignment_elements`` is the element count
+/// spanning one ``kPTOTileAlignmentBytes`` PTO tile row.
+struct CollectiveChunkGeometry {
+  int64_t element_bytes = 0;
+  int64_t chunk_elements = 0;
+  int64_t alignment_elements = 0;
+  ExprPtr alignment_elements_idx;
+  ExprPtr alignment_minus_one_idx;
+  ExprPtr max_chunk_cols;
+};
+
+/// Derives the chunk geometry for ``dtype``. ``op_name`` is woven into the
+/// diagnostics so a caller-specific message survives the extraction.
+CollectiveChunkGeometry MakeChunkGeometry(const DataType& dtype, const Span& span, const char* op_name) {
+  CollectiveChunkGeometry geo;
+  geo.element_bytes = static_cast<int64_t>(dtype.GetByte());
+  INTERNAL_CHECK_SPAN(geo.element_bytes > 0, span)
+      << op_name << " target dtype has no storage width: " << dtype.ToString();
+  geo.chunk_elements = kAllReduceChunkBytes / geo.element_bytes;
+  INTERNAL_CHECK_SPAN(geo.chunk_elements > 0, span)
+      << op_name << " dtype is wider than the chunk byte budget";
+  INTERNAL_CHECK_SPAN(kPTOTileAlignmentBytes % geo.element_bytes == 0, span)
+      << op_name << " dtype width must divide the tile alignment";
+  geo.alignment_elements = kPTOTileAlignmentBytes / geo.element_bytes;
+  geo.alignment_elements_idx = std::make_shared<ConstInt>(geo.alignment_elements, DataType::INDEX, span);
+  geo.alignment_minus_one_idx =
+      std::make_shared<ConstInt>(geo.alignment_elements - 1, DataType::INDEX, span);
+  geo.max_chunk_cols = std::make_shared<ConstInt>(geo.chunk_elements, DataType::INDEX, span);
+  return geo;
+}
+
+/// Picks the physical chunk width for a chunked collective. A statically known
+/// ``logical_extent`` smaller than one full chunk is rounded up to the nearest
+/// 32-byte-aligned element count, so a short collective does not reserve a full
+/// ``kAllReduceChunkBytes`` tile and the caller keeps its remaining VEC UB
+/// budget. Anything else — including a symbolic extent — uses the full chunk.
+ExprPtr SelectStaticChunkCols(const CollectiveChunkGeometry& geo, const ExprPtr& logical_extent,
+                              const Span& span) {
+  if (auto extent = As<ConstInt>(logical_extent);
+      extent && extent->value_ > 0 && extent->value_ < geo.chunk_elements) {
+    const int64_t aligned_extent =
+        ((extent->value_ - 1) / geo.alignment_elements + 1) * geo.alignment_elements;
+    return std::make_shared<ConstInt>(aligned_extent, DataType::INDEX, span);
+  }
+  return geo.max_chunk_cols;
+}
+
 // ============================================================================
 // LoweringBuilder
 //
@@ -918,18 +967,10 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
   auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
   auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
   auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
-  const int64_t element_bytes = static_cast<int64_t>(target_type->dtype_.GetByte());
-  INTERNAL_CHECK_SPAN(element_bytes > 0, span)
-      << "pld.tensor.allreduce target dtype has no storage width: " << target_type->dtype_.ToString();
-  const int64_t chunk_elements = kAllReduceChunkBytes / element_bytes;
-  INTERNAL_CHECK_SPAN(chunk_elements > 0, span)
-      << "pld.tensor.allreduce dtype is wider than the mesh chunk byte budget";
-  INTERNAL_CHECK_SPAN(kPTOTileAlignmentBytes % element_bytes == 0, span)
-      << "pld.tensor.allreduce dtype width must divide the tile alignment";
-  const int64_t alignment_elements = kPTOTileAlignmentBytes / element_bytes;
-  auto alignment_elements_idx = std::make_shared<ConstInt>(alignment_elements, DataType::INDEX, span);
-  auto alignment_minus_one_idx = std::make_shared<ConstInt>(alignment_elements - 1, DataType::INDEX, span);
-  auto max_chunk_cols = std::make_shared<ConstInt>(chunk_elements, DataType::INDEX, span);
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.allreduce");
+  auto alignment_elements_idx = chunk_geometry.alignment_elements_idx;
+  auto alignment_minus_one_idx = chunk_geometry.alignment_minus_one_idx;
+  auto max_chunk_cols = chunk_geometry.max_chunk_cols;
 
   const auto* partial_valid_shape = GetPartialValidShape(target_type, span);
   // A fully-valid packed tensor is one logical 1D stream. Keep the view
@@ -964,14 +1005,8 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
         << "pld.tensor.allreduce partial valid_shape must fit within one " << kAllReduceChunkBytes
         << "-byte mesh chunk using a statically bounded tile; chunking a partial rectangle with row gaps "
            "is not supported";
-  } else if (auto flat_extent = As<ConstInt>(flat_valid_shape[1]);
-             flat_extent && flat_extent->value_ > 0 && flat_extent->value_ < chunk_elements) {
-    // Do not reserve a full 16-KiB tile for a statically small allreduce. PTO
-    // tiles require a 32-byte-aligned row, so use the smallest legal physical
-    // width that covers the logical extent. Every chunk-local tile inherits
-    // this width, preserving the caller's remaining VEC UB budget.
-    const int64_t aligned_extent = ((flat_extent->value_ - 1) / alignment_elements + 1) * alignment_elements;
-    chunk_cols = std::make_shared<ConstInt>(aligned_extent, DataType::INDEX, span);
+  } else {
+    chunk_cols = SelectStaticChunkCols(chunk_geometry, flat_valid_shape[1], span);
   }
   auto flat_target = b.Bind(
       "target_2d", CreateAllReduceTargetView(target, flat_shape, flat_valid_shape, partial_valid_shape, span),
@@ -1224,18 +1259,11 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto size_const = As<ConstInt>(size_expr);
   auto nr_const = As<ConstInt>(nr_expr);
 
-  const int64_t element_bytes = static_cast<int64_t>(target_type->dtype_.GetByte());
-  INTERNAL_CHECK_SPAN(element_bytes > 0, span)
-      << "pld.tensor.allreduce mode=ring target dtype has no storage width: "
-      << target_type->dtype_.ToString();
-  const int64_t max_chunk_elements = kAllReduceChunkBytes / element_bytes;
-  INTERNAL_CHECK_SPAN(max_chunk_elements > 0, span)
-      << "pld.tensor.allreduce mode=ring dtype is wider than the chunk byte budget";
-  INTERNAL_CHECK_SPAN(kPTOTileAlignmentBytes % element_bytes == 0, span)
-      << "pld.tensor.allreduce mode=ring dtype width must divide the tile alignment";
-  const int64_t alignment_elements = kPTOTileAlignmentBytes / element_bytes;
-  auto alignment_elements_idx = std::make_shared<ConstInt>(alignment_elements, DataType::INDEX, span);
-  auto alignment_minus_one_idx = std::make_shared<ConstInt>(alignment_elements - 1, DataType::INDEX, span);
+  const auto chunk_geometry =
+      MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.allreduce mode=ring");
+  const int64_t alignment_elements = chunk_geometry.alignment_elements;
+  auto alignment_elements_idx = chunk_geometry.alignment_elements_idx;
+  auto alignment_minus_one_idx = chunk_geometry.alignment_minus_one_idx;
 
   // FP32 keeps balanced floor(i * SIZE / NR) boundaries. FP16 rounds each
   // interior boundary up to a 32-byte position so every non-empty segment
@@ -1255,13 +1283,7 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
     }
   }
 
-  ExprPtr chunk_cols = std::make_shared<ConstInt>(max_chunk_elements, DataType::INDEX, span);
-  if (auto segment_const = As<ConstInt>(max_segment_cols);
-      segment_const && segment_const->value_ > 0 && segment_const->value_ < max_chunk_elements) {
-    const int64_t aligned_segment =
-        ((segment_const->value_ - 1) / alignment_elements + 1) * alignment_elements;
-    chunk_cols = std::make_shared<ConstInt>(aligned_segment, DataType::INDEX, span);
-  }
+  ExprPtr chunk_cols = SelectStaticChunkCols(chunk_geometry, max_segment_cols, span);
   auto chunk_shape = tile_conversion_utils::MakeShapeTuple({one_idx, chunk_cols}, span);
   // Own a single explicit linear ND view for every subchunk. Besides making
   // the [1, 1] column-vector exception unambiguous, this keeps the remote-load,
