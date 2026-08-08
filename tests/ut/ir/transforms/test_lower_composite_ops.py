@@ -27,6 +27,7 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
 from pypto.language.parser.diagnostics.exceptions import ParserError
+from pypto.pypto_core import ir as _ir_core
 
 # Primitive tile ops the decomposition is allowed to emit (besides framework
 # infrastructure ops like tile.load / tile.store / tile.move that wrap the
@@ -3068,6 +3069,109 @@ def test_ring_allreduce_epilogue_resets_every_row():
         offsets = notify.args[2]
         assert isinstance(offsets, ir.MakeTuple)
         assert len(offsets.elements) == 2
+
+
+class _StageShapeCollector(ir.IRVisitor):
+    """Record the static shape of every ``tile.create`` Call encountered."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shapes: list[tuple[int, ...]] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        if op.op.name == _ir_core.get_op("tile.create").name and op.args:
+            shape = op.args[0]
+            if isinstance(shape, ir.MakeTuple):
+                dims = [d.value for d in shape.elements if isinstance(d, ir.ConstInt)]
+                if len(dims) == len(shape.elements):
+                    self.shapes.append(tuple(dims))
+        super().visit_call(op)
+
+
+def _stage_tile_shapes(prog) -> list[tuple[int, ...]]:
+    collector = _StageShapeCollector()
+    collector.visit_program(prog)
+    return collector.shapes
+
+
+@pytest.mark.parametrize("size", [64, 65537])
+def test_broadcast_stage_tile_is_capped_to_one_chunk(size):
+    """The broadcast staging tile is a bounded bounce buffer, not a copy of the
+    transfer: pld.tile.get slides the full extent through it, so a large SIZE
+    must not scale the tile (a [1, 65537] FP32 stage is 256 KiB and overflows UB).
+    """
+    nr = 2
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def broadcast_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, size], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, size], pl.FP32]:
+            data = pld.tensor.broadcast(data, signal, root=0)
+            return data
+
+    After = passes.lower_composite_ops()(Before)
+    # 16 KiB budget / 4 B per FP32 = 4096 elements.
+    assert (1, min(size, 4096)) in _stage_tile_shapes(After)
+
+
+def test_broadcast_accepts_dynamic_target_shape():
+    """The stage no longer derives from the target's static extent, so a dynamic
+    trailing dim lowers instead of tripping "broadcast target shape must be static".
+    """
+    nr = 2
+    n = pl.dynamic("BROADCAST_DYNAMIC_N")
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def broadcast_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, n], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, n], pl.FP32]:
+            data = pld.tensor.broadcast(data, signal, root=0)
+            return data
+
+    # A dynamic dimension that appears only on DistributedTensor is not yet
+    # self-contained in Python printer roundtrips. Keep pass verification, but
+    # skip the unrelated RoundtripInstrument limitation (same workaround as
+    # test_allreduce_dynamic_mesh_lowering_reaches_pto_codegen).
+    from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+    ctx = _core_passes.PassContext(
+        [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+    )
+    with ctx:
+        After = passes.lower_composite_ops()(Before)
+
+    assert "pld.tensor.broadcast" not in set(_collect_op_names(After))
+    # A dynamic extent takes the full chunk bound.
+    assert (1, 4096) in _stage_tile_shapes(After)
+
+
+@pytest.mark.parametrize("size", [64, 65537])
+def test_allgather_stage_tile_is_capped_to_one_chunk(size):
+    """Same cap on the allgather push stage; chunk_shape stays the transfer extent."""
+    nr = 2
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gather_step(
+            self,
+            inp: pl.Tensor[[1, size], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[nr, size], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[nr, size], pl.FP32]:
+            result = pld.tensor.allgather(inp, data, signal)
+            return result
+
+    After = passes.lower_composite_ops()(Before)
+    assert (1, min(size, 4096)) in _stage_tile_shapes(After)
 
 
 if __name__ == "__main__":

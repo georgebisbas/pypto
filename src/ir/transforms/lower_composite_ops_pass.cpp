@@ -274,6 +274,52 @@ ExprPtr SelectStaticChunkCols(const CollectiveChunkGeometry& geo, const ExprPtr&
   return geo.max_chunk_cols;
 }
 
+/// Sizes the 2D VEC staging tile that a ``pld.tile.put`` / ``pld.tile.get``
+/// transfer slides through.
+///
+/// pto-isa TPUT/TGET read the full extent from the partition views and 2D-slide
+/// the transfer through the stage, so the stage only has to *fit within* the
+/// flattened transfer rather than equal it (see comm_op::ValidateStageFitsTransfer).
+/// Sizing the stage from the whole transfer therefore buys nothing and costs
+/// everything: a [1, 65537] FP32 transfer would reserve 256 KiB of VEC and fail
+/// in AllocateMemoryAddr. Cap it to one ``kAllReduceChunkBytes`` tile instead.
+///
+/// ``transfer_shape`` is flattened to [rows = prod(leading dims), cols = innermost].
+/// A dynamic dim contributes the chunk bound directly, matching MakeTputStageShape's
+/// contract for pld.tensor.put / pld.tensor.get. The result never exceeds a
+/// statically known transfer dim, so the deducer's stage-fits-transfer invariant
+/// always holds.
+ExprPtr MakeCollectiveStageShape(const std::vector<ExprPtr>& transfer_shape,
+                                 const CollectiveChunkGeometry& geo, const Span& span,
+                                 const char* op_name) {
+  INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span) << op_name << " transfer shape must have rank >= 1";
+
+  int64_t cols_val = geo.chunk_elements;
+  if (auto cols_c = As<ConstInt>(transfer_shape.back()); cols_c && cols_c->value_ > 0) {
+    cols_val = std::min(cols_c->value_, geo.chunk_elements);
+  }
+
+  // Keep a 2D stage (e.g. all_to_all_v's [MAX_RECV, SIZE]) inside the same
+  // byte budget by trading rows against the chosen column width.
+  const int64_t rows_budget = std::max<int64_t>(1, geo.chunk_elements / cols_val);
+  int64_t rows_prod = 1;
+  bool rows_static = true;
+  for (size_t d = 0; d + 1 < transfer_shape.size(); ++d) {
+    auto dim_c = As<ConstInt>(transfer_shape[d]);
+    if (!dim_c || dim_c->value_ <= 0) {
+      rows_static = false;
+      break;
+    }
+    rows_prod *= dim_c->value_;
+  }
+  const int64_t rows_val = rows_static ? std::min(rows_prod, rows_budget) : 1;
+
+  return std::make_shared<MakeTuple>(
+      std::vector<ExprPtr>{std::make_shared<ConstInt>(rows_val, DataType::INDEX, span),
+                           std::make_shared<ConstInt>(cols_val, DataType::INDEX, span)},
+      span);
+}
+
 // ============================================================================
 // LoweringBuilder
 //
@@ -1624,19 +1670,12 @@ ExprPtr LowerTensorBroadcastRule(const CallPtr& call, const std::vector<ExprPtr>
   // Build a 2D VEC staging tile [rows, cols] where rows = prod(dims[:-1]),
   // cols = dims[-1], mirroring ConvertTensorToTileOps's lowering of
   // pld.tensor.get.
-  int64_t rows_val = 1;
-  for (size_t d = 0; d + 1 < target_type->shape_.size(); ++d) {
-    auto dim_c = As<ConstInt>(target_type->shape_[d]);
-    INTERNAL_CHECK_SPAN(dim_c, span) << "broadcast target shape must be static";
-    rows_val *= dim_c->value_;
-  }
-  auto last_dim_c = As<ConstInt>(target_type->shape_.back());
-  INTERNAL_CHECK_SPAN(last_dim_c, span) << "broadcast target shape must be static";
-  int64_t cols_val = last_dim_c->value_;
-
-  auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
-  auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
-  auto stage_shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+  // The stage is a bounded bounce buffer, not a copy of the transfer, so the
+  // target shape no longer has to be static: a dynamic extent simply takes the
+  // chunk bound. pld.tile.get slides the full extent through it.
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.broadcast");
+  auto stage_shape_tuple =
+      MakeCollectiveStageShape(target_type->shape_, chunk_geometry, span, "pld.tensor.broadcast");
 
   auto stage_tile =
       b.Bind("bcast_stage",
@@ -1730,11 +1769,17 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
   // Each peer receives this rank's chunk at target[my_rank, 0:SIZE].
   // Self-store (peer == my_rank) uses HCCL identity mapping — the same trust
   // model as the pld.tile.get self-path in the original pull-based allgather.
-  // pld.tile.put auto-chunks when SIZE exceeds the staging-tile capacity, so a
-  // single [1, SIZE] VEC staging tile suffices regardless of SIZE.
+  // pld.tile.put auto-chunks when SIZE exceeds the staging-tile capacity, so the
+  // stage is capped to one chunk rather than sized from SIZE — a [1, SIZE] stage
+  // would reserve SIZE * dtype bytes of VEC and overflow UB for a large SIZE.
+  // chunk_shape stays the *transfer* extent handed to pld.tile.put below.
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.allgather");
+  auto stage_shape =
+      MakeCollectiveStageShape({std::make_shared<ConstInt>(1, DataType::INDEX, span), size_expr},
+                               chunk_geometry, span, "pld.tensor.allgather");
   auto put_stage =
       b.Bind("ag_stage",
-             reg.Create("tile.create", {chunk_shape},
+             reg.Create("tile.create", {stage_shape},
                         {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
              span);
 
@@ -1968,11 +2013,16 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   //      larger than the stage is auto-chunked. The self-rank case (peer ==
   //      my_rank) falls out of the same path via HCCL identity mapping.
   //
-  // One shared [1, SIZE] VEC staging tile is reused across all destinations,
-  // mirroring allgather's per-peer pld.tile.get.
+  // One shared VEC staging tile is reused across all destinations, mirroring
+  // allgather's. It is capped to one chunk rather than sized from SIZE: the
+  // stage is a bounce buffer the transfer slides through, so a [1, SIZE] stage
+  // would only waste UB. chunk_shape stays the transfer extent.
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.all_to_all");
+  auto stage_shape = MakeCollectiveStageShape({one_idx, size_expr}, chunk_geometry, span,
+                                              "pld.tensor.all_to_all");
   auto put_stage =
       b.Bind("aa_stage",
-             reg.Create("tile.create", {chunk_shape},
+             reg.Create("tile.create", {stage_shape},
                         {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
              span);
 
@@ -2105,22 +2155,34 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   // MAX_RECV = target[0] / NR.  NR is extracted from signal[0]
   // (deducer-enforced compile-time constant).  Signal is required to be 2D
   // [NR, 1] so MakeSignalOffsets(rank) → [rank, 0] matches notify/wait.
+  // These three validate the caller's declared window/signal shapes, so a
+  // violation is a user error, not a compiler invariant — report it as such.
   auto total_rows_c = As<ConstInt>(target_type->shape_[0]);
-  INTERNAL_CHECK_SPAN(total_rows_c, span) << "target dim 0 must be a compile-time constant";
+  CHECK_SPAN(total_rows_c, span)
+      << "pld.tensor.all_to_all_v target dim 0 must be a compile-time constant (it is split as "
+         "NR * MAX_RECV to give every sender a fixed-capacity slot)";
   auto signal_type = As<DistributedTensorType>(signal->GetType());
   INTERNAL_CHECK_SPAN(signal_type, span) << "signal must be DistributedTensorType";
   ValidateMeshSignalShape(signal_type, "pld.tensor.all_to_all_v", span);
   auto nr_c = As<ConstInt>(signal_type->shape_[0]);
-  INTERNAL_CHECK_SPAN(nr_c, span) << "signal dim 0 (NR) must be a compile-time constant";
+  CHECK_SPAN(nr_c, span) << "pld.tensor.all_to_all_v signal dim 0 (NR) must be a compile-time constant";
   int64_t max_recv_value = total_rows_c->value_ / nr_c->value_;
-  INTERNAL_CHECK_SPAN(max_recv_value * nr_c->value_ == total_rows_c->value_, span)
-      << "target dim 0 (" << total_rows_c->value_ << ") must be divisible by NR (" << nr_c->value_ << ")";
+  // Divisibility is load-bearing, not incidental: the receiver locates sender
+  // s's block at row s * MAX_RECV without knowing s's count, so every sender
+  // needs an equal-capacity slot. This is deliberately not relaxed.
+  CHECK_SPAN(max_recv_value * nr_c->value_ == total_rows_c->value_, span)
+      << "pld.tensor.all_to_all_v target dim 0 (" << total_rows_c->value_ << ") must be divisible by NR ("
+      << nr_c->value_
+      << "): the receiver locates sender s's block at row s * MAX_RECV without knowing s's count, so "
+         "every sender needs an equal-capacity slot. Round the window's row count up to a multiple of NR";
   auto max_recv_expr = std::make_shared<ConstInt>(max_recv_value, DataType::INDEX, span);
 
-  // Per-destination staging tile: static [1, SIZE] — pto-isa auto-chunks the
-  // transfer through it.  The Transfer shape is static [MAX_RECV, SIZE]
-  // (PTOAS requires static partition-view dims for pto.comm.tput).
-  auto stage_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{one_idx, size_expr}, span);
+  // Per-destination staging tile, capped to one chunk — pto-isa slides the
+  // static [MAX_RECV, SIZE] transfer through it, so the stage need not (and
+  // should not) be sized from SIZE.
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.all_to_all_v");
+  auto stage_shape = MakeCollectiveStageShape({max_recv_expr, size_expr}, chunk_geometry, span,
+                                              "pld.tensor.all_to_all_v");
 
   // ---- Phase 1: push per-destination blocks to peer windows ----
   // One shared [1, SIZE] VEC staging tile reused across all destinations;
