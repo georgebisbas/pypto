@@ -219,7 +219,7 @@ Mesh and ring lowering support FP16 and FP32 with `ReduceOp::kSum`, `kMax`,
 
 Signature: `allgather(local_data, target, signal)`. `local_data` is this rank's chunk (`Tensor` or `Tile` `[1, SIZE]`), `target` is a window-bound `DistributedTensor[NR, SIZE]` staging area that also serves as the result, and `signal` is the INT32 barrier. Push-based decomposition:
 
-- ``tile.create([1, SIZE], dtype=..., target_memory=Vec)`` — allocate a VEC staging tile for ``pld.tile.put`` auto-chunking.  ``pld.tile.put`` reads directly from the ``local_data`` Tensor (or Tile) source — no explicit ``tile.load`` is emitted.
+- ``tile.create([1, min(SIZE, chunk)], dtype=..., target_memory=Vec)`` — allocate a VEC staging tile for ``pld.tile.put`` auto-chunking.  The stage is a bounded bounce buffer capped at one 16-KiB chunk, **not** a copy of the transfer: pto-isa reads the full extent from the partition views and 2-D-slides the transfer through it, so sizing the stage from ``SIZE`` would only waste UB (a ``[1, 65537]`` FP32 stage is 256 KiB and overflows the VEC budget).  ``pld.tile.put`` reads directly from the ``local_data`` Tensor (or Tile) source — no explicit ``tile.load`` is emitted.
 - Phase 1: for `peer` in `0..NR-1`, `pld.tile.put(target, peer, local_data, put_stage, [my_rank, 0], [0, 0], [1, SIZE])` — push this rank's chunk into every peer's window at row `my_rank`. Self-store (`peer == my_rank`) uses HCCL identity mapping. `pld.tile.put` auto-chunks when SIZE exceeds the staging-tile capacity
 - Phase 2: barrier (generation 1) + epilogue (subtract 1 from every non-self cell)
 - Return `target` — the window IS the gathered `[NR, SIZE]` result (window-as-result, `DistributedTensor`)
@@ -245,7 +245,7 @@ All four `ReduceOp`s are supported — `kSum`, `kMax`, `kMin`, and `kProd` — r
 Decomposes into a 3-phase recipe:
 
 - Phase 2: barrier (generation 1) + epilogue (subtract 1 from every non-self cell)
-- Phase 3: `tile.create` (VEC staging tile) + `pld.tile.get(target, peer=root, target, stage)` on every rank — each rank reads root's slice into its own `target`. For `peer == root` the HCCL identity mapping makes the get a local no-op, so root keeps its own data while non-root ranks receive root's.
+- Phase 3: `tile.create` (VEC staging tile, capped at one 16-KiB chunk like allgather's) + `pld.tile.get(target, peer=root, target, stage)` on every rank — each rank reads root's slice into its own `target`. For `peer == root` the HCCL identity mapping makes the get a local no-op, so root keeps its own data while non-root ranks receive root's. Because the stage no longer derives from the target's extent, a **dynamic** target shape is accepted — the dynamic dim simply takes the chunk bound.
 
 `root` is a static `int` kwarg known at compile time.
 

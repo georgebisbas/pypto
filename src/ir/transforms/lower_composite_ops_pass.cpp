@@ -252,8 +252,7 @@ CollectiveChunkGeometry MakeChunkGeometry(const DataType& dtype, const Span& spa
       << op_name << " dtype width must divide the tile alignment";
   geo.alignment_elements = kPTOTileAlignmentBytes / geo.element_bytes;
   geo.alignment_elements_idx = std::make_shared<ConstInt>(geo.alignment_elements, DataType::INDEX, span);
-  geo.alignment_minus_one_idx =
-      std::make_shared<ConstInt>(geo.alignment_elements - 1, DataType::INDEX, span);
+  geo.alignment_minus_one_idx = std::make_shared<ConstInt>(geo.alignment_elements - 1, DataType::INDEX, span);
   geo.max_chunk_cols = std::make_shared<ConstInt>(geo.chunk_elements, DataType::INDEX, span);
   return geo;
 }
@@ -290,8 +289,7 @@ ExprPtr SelectStaticChunkCols(const CollectiveChunkGeometry& geo, const ExprPtr&
 /// statically known transfer dim, so the deducer's stage-fits-transfer invariant
 /// always holds.
 ExprPtr MakeCollectiveStageShape(const std::vector<ExprPtr>& transfer_shape,
-                                 const CollectiveChunkGeometry& geo, const Span& span,
-                                 const char* op_name) {
+                                 const CollectiveChunkGeometry& geo, const Span& span, const char* op_name) {
   INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span) << op_name << " transfer shape must have rank >= 1";
 
   int64_t cols_val = geo.chunk_elements;
@@ -1305,8 +1303,7 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   auto size_const = As<ConstInt>(size_expr);
   auto nr_const = As<ConstInt>(nr_expr);
 
-  const auto chunk_geometry =
-      MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.allreduce mode=ring");
+  const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.allreduce mode=ring");
   const int64_t alignment_elements = chunk_geometry.alignment_elements;
   auto alignment_elements_idx = chunk_geometry.alignment_elements_idx;
   auto alignment_minus_one_idx = chunk_geometry.alignment_minus_one_idx;
@@ -2018,8 +2015,8 @@ ExprPtr LowerTensorAllToAllRule(const CallPtr& call, const std::vector<ExprPtr>&
   // stage is a bounce buffer the transfer slides through, so a [1, SIZE] stage
   // would only waste UB. chunk_shape stays the transfer extent.
   const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.all_to_all");
-  auto stage_shape = MakeCollectiveStageShape({one_idx, size_expr}, chunk_geometry, span,
-                                              "pld.tensor.all_to_all");
+  auto stage_shape =
+      MakeCollectiveStageShape({one_idx, size_expr}, chunk_geometry, span, "pld.tensor.all_to_all");
   auto put_stage =
       b.Bind("aa_stage",
              reg.Create("tile.create", {stage_shape},
@@ -2181,8 +2178,8 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   // static [MAX_RECV, SIZE] transfer through it, so the stage need not (and
   // should not) be sized from SIZE.
   const auto chunk_geometry = MakeChunkGeometry(target_type->dtype_, span, "pld.tensor.all_to_all_v");
-  auto stage_shape = MakeCollectiveStageShape({max_recv_expr, size_expr}, chunk_geometry, span,
-                                              "pld.tensor.all_to_all_v");
+  auto stage_shape =
+      MakeCollectiveStageShape({max_recv_expr, size_expr}, chunk_geometry, span, "pld.tensor.all_to_all_v");
 
   // ---- Phase 1: push per-destination blocks to peer windows ----
   // One shared [1, SIZE] VEC staging tile reused across all destinations;

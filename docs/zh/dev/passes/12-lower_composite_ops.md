@@ -263,7 +263,7 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 
 签名：`allgather(local_data, target, signal)`。`local_data` 是本 rank 的 chunk（`Tensor` 或 `Tile` `[1, SIZE]`），`target` 是窗口绑定的 `DistributedTensor[NR, SIZE]` 暂存区同时又是结果，`signal` 是 INT32 屏障。基于推送 (push-based) 的展开：
 
-- ``tile.create([1, SIZE], dtype=..., target_memory=Vec)`` — 分配一个 VEC staging tile 供 ``pld.tile.put`` 自动分块使用。``pld.tile.put`` 直接从 ``local_data`` Tensor（或 Tile）源读取 — 不发射显式的 ``tile.load``。
+- ``tile.create([1, min(SIZE, chunk)], dtype=..., target_memory=Vec)`` — 分配一个 VEC staging tile 供 ``pld.tile.put`` 自动分块使用。该 stage 是上限为一个 16-KiB chunk 的有界中转缓冲，**不是**传输的副本：pto-isa 从 partition view 读取完整 extent 并把传输在 stage 上做二维滑动，因此按 ``SIZE`` 来分配 stage 只会浪费 UB（``[1, 65537]`` 的 FP32 stage 为 256 KiB，会超出 VEC 预算）。``pld.tile.put`` 直接从 ``local_data`` Tensor（或 Tile）源读取 — 不发射显式的 ``tile.load``。
 - Phase 1：对 `peer` 从 `0` 到 `NR-1`，`pld.tile.put(target, peer, local_data, put_stage, [my_rank, 0], [0, 0], [1, SIZE])` — 将本 rank 的 chunk 推送到每个 peer 窗口的第 `my_rank` 行。自推送 (`peer == my_rank`) 通过 HCCL 恒等映射实现。`pld.tile.put` 在 SIZE 超过 staging tile 容量时自动分块
 - Phase 2a：notify-all（`AtomicAdd 1`）
 - Phase 2b：wait-all（`Ge 1`）
@@ -295,7 +295,7 @@ mesh 和 ring 降级均支持 FP16、FP32，以及任意正元素数量下的
 - Phase 2a：notify-all（`AtomicAdd 1`）
 - Phase 2b：wait-all（`Ge 1`）
 - 尾调用：`EmitEpilogueReset`（自清理信用屏障）
-- Phase 3：每个 rank 都发射 `tile.create`（VEC staging tile）+ `pld.tile.get(target, peer=root, target, stage)`，把 root 的切片读进自己的 `target`。`peer == root` 时 HCCL 恒等映射让该 get 成为本地空操作，因此 root 保留自己的数据，非 root rank 收到 root 的数据
+- Phase 3：每个 rank 都发射 `tile.create`（VEC staging tile，与 allgather 一样上限为一个 16-KiB chunk）+ `pld.tile.get(target, peer=root, target, stage)`，把 root 的切片读进自己的 `target`。`peer == root` 时 HCCL 恒等映射让该 get 成为本地空操作，因此 root 保留自己的数据，非 root rank 收到 root 的数据。由于 stage 不再由 target 的 extent 推导，**动态** target shape 现已被接受 — 动态维度直接取 chunk 上限
 
 `root` 是编译时已知的静态 `int` kwarg。
 
