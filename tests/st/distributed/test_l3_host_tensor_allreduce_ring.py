@@ -26,19 +26,21 @@ def _expected_allreduce(inputs: torch.Tensor) -> torch.Tensor:
     return torch.stack([reduced] * inputs.shape[0])
 
 
-def _make_rank_inputs(n_ranks: int, round_offset: float = 0.0) -> torch.Tensor:
+def _make_rank_inputs(n_ranks: int, round_offset: float = 0.0, size: int = SIZE) -> torch.Tensor:
     """Build distinct per-rank rows; ``round_offset`` distinguishes reuse rounds."""
     rows = [
-        torch.arange(r * 100.0 + round_offset, r * 100.0 + round_offset + SIZE, dtype=torch.float32).reshape(
-            1, SIZE
+        torch.arange(r * 100.0 + round_offset, r * 100.0 + round_offset + size, dtype=torch.float32).reshape(
+            1, size
         )
         for r in range(n_ranks)
     ]
     return torch.stack(rows)
 
 
-def _build_host_ring_allreduce_program(n_ranks: int):
+def _build_host_ring_allreduce_program(n_ranks: int, size: int = SIZE):
     total_rounds = 2 * (n_ranks - 1) + 1
+    # Bind the parametrized extent under the name the program body closes over.
+    SIZE = size  # noqa: N806
 
     @pl.program
     class HostTensorAllReduceRing:
@@ -190,12 +192,32 @@ def _build_host_ring_allreduce_signal_reuse_program(n_ranks: int):
 
 
 class TestL3HostTensorAllReduceRing:
-    @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_host_tensor_allreduce_ring(self, test_config, device_ids, n_ranks):
+    @pytest.mark.parametrize(
+        ("n_ranks", "size"),
+        [
+            pytest.param(2, SIZE, id="p2-aligned"),
+            pytest.param(4, SIZE, id="p4-aligned"),
+            # issue #2242: numel % NR == 0 (so the compile-time divisibility
+            # check passes) but chunk_elems = 36 is not a multiple of 16, and
+            # chunk 1 starts at byte 144 — not 64 B-aligned, so it straddles
+            # cache lines. Isolates the kernel's flush/alignment handling with
+            # no pass change.
+            #
+            # SIZE must also keep the *harness* legal: this test stages the
+            # whole row through a [1, SIZE] tile, and PTOAS requires a
+            # row-major tile row to be 32 B-aligned. SIZE=18 (the size named in
+            # issue #2242) fails codegen in consume_step with "tile row byte
+            # size ... to be 32-byte aligned, but got 72 bytes" before the ring
+            # kernel ever runs, so it cannot test the kernel. 72 satisfies both
+            # (72*4 = 288 = 9*32) while keeping chunk_elems unaligned.
+            pytest.param(2, 72, id="p2-unaligned-chunk"),
+        ],
+    )
+    def test_host_tensor_allreduce_ring(self, test_config, device_ids, n_ranks, size):
         if len(device_ids) < n_ranks:
             pytest.skip(f"host ring allreduce P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
-        program = _build_host_ring_allreduce_program(n_ranks)
+        program = _build_host_ring_allreduce_program(n_ranks, size)
         compiled = ir.compile(
             program,
             platform=test_config.platform,
@@ -209,14 +231,15 @@ class TestL3HostTensorAllReduceRing:
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()
 
-        inputs = _make_rank_inputs(n_ranks)
-        outputs = torch.zeros((n_ranks, 1, SIZE), dtype=torch.float32)
+        inputs = _make_rank_inputs(n_ranks, size=size)
+        outputs = torch.zeros((n_ranks, 1, size), dtype=torch.float32)
 
         compiled(inputs, outputs)
 
         expected = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected), (
-            f"host ring allreduce P={n_ranks} mismatch: max diff = {(outputs - expected).abs().max().item()}"
+            f"host ring allreduce P={n_ranks} SIZE={size} mismatch: "
+            f"max diff = {(outputs - expected).abs().max().item()}"
         )
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
