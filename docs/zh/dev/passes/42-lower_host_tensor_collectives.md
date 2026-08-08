@@ -95,7 +95,7 @@ Ring allreduce（`mode="ring"`）
 的 signal 为 rank-2，形状为 `[2 * (NR - 1) + 1, NR]`，其
 `shape[0]` 在 signal 两个维度均为编译期常量时必须恰好等于 `2 * (NR - 1) + 1`；仅
 `shape[0]` 静态可知时则至少为 `2 * (NR - 1) + 1`（两个维度均为动态时无静态检查）。
-当参与设备数静态可知时，signal 的静态容量必须足够。ring allreduce 还要求 `numel(src) % NR == 0`（ring schedule 将 src 划分为 NR 个连续 chunk；余数非零会留下内核无法处理的尾部部分 chunk）。host-ring 的 `src` 形状必须静态已知——动态 extent 会被拒绝，否则运行时 `numel` 不被 `NR` 整除时内核会静默返回未归约的数据。
+当参与设备数静态可知时，signal 的静态容量必须足够。ring allreduce 还要求 `numel(src) % NR == 0`（ring schedule 将 src 划分为 NR 个连续 chunk；余数非零会留下内核无法处理的尾部部分 chunk）。注意该检查**并不**保证每个 rank 的 chunk 满足 cache line 或传输对齐：在 `numel=72, NR=2` 时检查通过，但 `chunk_elems = 36` 不是 16 的倍数，且 chunk 1 起始于第 144 字节，跨越两条 cache line。因此内核会刷新包含 chunk 最后一个元素的那条 cache line（而不仅按 16 元素步长刷新），并以 32 B 对齐后的宽度发射 tile load、以逻辑宽度做 store。host-ring 的 `src` 形状必须静态已知——动态 extent 会被拒绝，否则运行时 `numel` 不被 `NR` 整除时内核会静默返回未归约的数据。
 
 Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `ReduceOp.Max`、`ReduceOp.Min`、`ReduceOp.Prod` 以及 `FP16` 在

@@ -110,7 +110,12 @@ signal dimensions are compile-time constants, and must be at least
 both dims are dynamic). When the participating device count is statically known, the signal
 must have enough static capacity. Ring allreduce additionally requires `numel(src) % NR == 0`
 (the ring schedule partitions src into NR contiguous chunks; a non-zero remainder would leave a
-trailing partial chunk the kernel cannot handle). The host-ring `src` shape must be
+trailing partial chunk the kernel cannot handle). Note this does **not** imply the per-rank chunk
+is cache-line or transfer aligned: at `numel=72, NR=2` the check passes while `chunk_elems = 36`
+is not a multiple of 16 and chunk 1 begins at byte 144, straddling two cache lines. The kernel
+therefore flushes the line holding a chunk's final element (not just the 16-element stride) and
+issues its tile loads at a 32 B-padded width while storing at the logical width. The host-ring
+`src` shape must be
 statically known — dynamic extents are rejected, since the kernel would otherwise silently
 return unreduced data when the runtime `numel` is not divisible by `NR`.
 
