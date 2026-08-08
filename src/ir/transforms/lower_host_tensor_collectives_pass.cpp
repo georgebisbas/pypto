@@ -245,13 +245,27 @@ void CheckRingSignalCapacity(const CallPtr& call, const ExprPtr& signal_expr, si
 ///
 /// Pure-IR unit tests run without a configured backend; there is nothing to
 /// bound in that case.
-void CheckAllReduceCoreCapacity(const CallPtr& call, int64_t core_num) {
+/// Bound against the AIV (VECTOR) core count, not CUBE: every host collective
+/// builtin is submitted through ``rt_submit_aiv_task``. Applies to any
+/// collective that carries a ``core_num``, not just allreduce.
+void CheckCollectiveCoreCapacity(const CallPtr& call, int64_t core_num, const std::string& op_name) {
   if (!backend::BackendConfig::IsConfigured()) return;
   const auto* be = backend::GetBackend();
   const auto max_blocks = static_cast<int64_t>(be->GetCoreCount(CoreType::VECTOR));
   CHECK_SPAN(core_num <= max_blocks, call->span_)
-      << "pld.tensor.allreduce core_num (" << core_num << ") exceeds the backend AIV core count ("
-      << max_blocks << ")";
+      << op_name << " core_num (" << core_num << ") exceeds the backend AIV core count (" << max_blocks
+      << ")";
+}
+
+/// Append a ``core_num`` kwarg+attr pair onto a builtin being constructed.
+/// kwargs feed the builtin op's type deducer; attrs feed codegen via GetAttr.
+/// Factored out so each collective that gains multicore support adds one line
+/// rather than repeating the pair.
+void AppendCoreNum(const CallPtr& call, std::vector<std::pair<std::string, std::any>>* kwargs,
+                   std::vector<std::pair<std::string, std::any>>* attrs) {
+  const auto core_num = call->GetKwarg<int>("core_num");
+  kwargs->emplace_back("core_num", core_num);
+  attrs->emplace_back("core_num", core_num);
 }
 
 /// Validate a HOST AllReduce call.
@@ -278,7 +292,7 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
     CheckRingChunkConstraints(call, call->args_[0], world_size);
     return;
   }
-  CheckAllReduceCoreCapacity(call, core_num);
+  CheckCollectiveCoreCapacity(call, core_num, "pld.tensor.allreduce");
   // A ``world_size`` of 0 makes the shape[0] bound vacuous, which is exactly the
   // right behaviour when the participating device count is only known at runtime.
   CheckStaticSignalCapacity(call, signal_expr, world_size, core_num, /*allow_wider_lanes=*/true);
@@ -313,10 +327,9 @@ void CheckAllReduceSignalCapacity(const CallPtr& call, const ExprPtr& signal_exp
   };
   // Only the mesh builtin launches an SPMD grid, so only it declares `core_num`.
   // The ring builtin runs a single block per rank.
+  // Ring runs a single block per rank, so it carries no core_num.
   if (!as_ring) {
-    const auto core_num = call->GetKwarg<int>("core_num");
-    kwargs.emplace_back("core_num", core_num);
-    attrs.emplace_back("core_num", core_num);
+    AppendCoreNum(call, &kwargs, &attrs);
   }
   INTERNAL_CHECK_SPAN(call->args_.size() >= 2, call->span_)
       << "LowerHostTensorCollectives: expected pld.tensor.allreduce to have an explicit signal by the time "
@@ -484,11 +497,25 @@ struct HostCollectiveRule {
   using ScopeBuffersFn = std::function<std::vector<WindowBufferPtr>(const CallPtr&)>;
   using SignalExprFn = std::function<ExprPtr(const CallPtr&)>;
   using AliasSourceFn = std::function<std::optional<ExprPtr>(const CallPtr&)>;
+  /// Per-collective capacity validation. Null means "the default is enough":
+  /// signal capacity at one lane per rank. A collective needs its own hook only
+  /// when it has constraints the default cannot express — allreduce does,
+  /// because it must branch on mesh vs ring and bound ``core_num``.
+  using ValidateFn = std::function<void(const CallPtr&, const ExprPtr&, size_t, bool)>;
   MakeBuiltinFn make_builtin;
   ScopeBuffersFn scope_buffers;
   SignalExprFn signal_expr;
   AliasSourceFn alias_source;
+  ValidateFn validate;
 };
+
+/// Capacity validation for a collective with no bespoke rule: one signal lane
+/// per rank. ``world_size == 0`` makes the shape[0] bound vacuous, which is the
+/// right behaviour when the device set is only known at runtime.
+void CheckHostCollectiveCapacity(const CallPtr& call, const ExprPtr& signal_expr, size_t world_size,
+                                 bool /*world_size_known*/) {
+  CheckStaticSignalCapacity(call, signal_expr, world_size);
+}
 
 [[nodiscard]] const HostCollectiveRule* LookupHostCollectiveRule(const std::string& op_name) {
   static const HostCollectiveRule kRules[] = {
@@ -501,6 +528,9 @@ struct HostCollectiveRule {
           },
           [](const CallPtr& call) { return call->args_[1]; },
           [](const CallPtr& call) -> std::optional<ExprPtr> { return call->args_[0]; },
+          // Allreduce is the one collective needing a bespoke validator: it
+          // branches mesh vs ring and bounds core_num against the AIV grid.
+          &CheckAllReduceSignalCapacity,
       },
       {
           "pld.tensor.barrier",
@@ -589,11 +619,11 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
                                   const CommDomainScopeStmtPtr& scope, const Span& span,
                                   const std::vector<std::string>& leading_comments) {
   if (!scope->devices_.empty()) {
-    if (IsOp(call, "pld.tensor.allreduce")) {
-      CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
-                                   /*world_size_known=*/true);
+    if (rule.validate) {
+      rule.validate(call, rule.signal_expr(call), scope->devices_.size(), /*world_size_known=*/true);
     } else {
-      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
+      CheckHostCollectiveCapacity(call, rule.signal_expr(call), scope->devices_.size(),
+                                  /*world_size_known=*/true);
     }
     std::vector<StmtPtr> stmts;
     stmts.reserve(scope->devices_.size());
@@ -614,10 +644,10 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   auto stop = OpRegistry::GetInstance().Create("pld.system.world_size", {}, call->span_);
   // The device set is dynamic here, so world-size-dependent capacity cannot be
   // checked; pass 0 so only the world-size-independent constraints apply.
-  if (IsOp(call, "pld.tensor.allreduce")) {
-    CheckAllReduceSignalCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
+  if (rule.validate) {
+    rule.validate(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
   } else {
-    CheckStaticSignalCapacity(call, rule.signal_expr(call), 0);
+    CheckHostCollectiveCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
   }
   auto body = std::make_shared<EvalStmt>(rule.make_builtin(call, loop_var), call->span_);
   return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
