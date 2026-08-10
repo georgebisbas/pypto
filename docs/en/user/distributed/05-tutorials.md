@@ -142,6 +142,25 @@ tutorials: nothing exists in code without being teachable from an example.
 | `device=r` | Pin one dispatch to one device from the host loop | [00-model](00-model.md) | 01 |
 | `DistributedConfig` | Device list + worker count for compilation | [03-execution](03-execution.md) | 01 |
 
+## Beyond the ladder: pypto-lib applications
+
+The ladder teaches the `pld` language; real programs built on it are
+applications and live in pypto-lib (or in pypto's model examples). The ladder
+cross-links them as "more advanced" next steps — by name and PR, never
+restating or duplicating their content:
+
+| Application | Pattern it uses | Home |
+| ----------- | --------------- | ---- |
+| L3 AllGather–GEMM comm/compute overlap ([#869](https://github.com/hw-native-sys/pypto-lib/pull/869)) | an allgather — step 13 | pypto-lib |
+| DeepSeek-V4 distributed MoE (EP dispatch/combine), LM-head TP | an all-to-all — step 15 | pypto-lib `models/deepseek_v4_*` |
+| Qwen3-32B JIT decode | the `@pl.jit` host + device model — step 02 | pypto `examples/models/qwen3_jit/` |
+| `examples/advanced/allreduce.py` | the "everything at once" version of steps 08–11 | pypto-lib `examples/advanced/` |
+
+The step-15 walkthrough ([20-all_to_all](20-all_to_all.md)) and the compose
+step ([21-putting_it_together](21-putting_it_together.md)) name the first two
+by PR already. The boundary is explicit: nothing from these applications is
+ported or restated here.
+
 ## See also
 
 - [00-model](00-model.md) — Quickstart and model vocabulary

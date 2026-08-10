@@ -134,6 +134,23 @@
 | `device=r` | 从主机循环将一次分发固定到某个设备 | [00-model](00-model.md) | 01 |
 | `DistributedConfig` | 编译的设备列表与 worker 数量 | [03-execution](03-execution.md) | 01 |
 
+## 阶梯之外：pypto-lib 应用
+
+本阶梯教授 `pld` 语言；构建于其上的真实程序是应用，位于 pypto-lib（或 pypto
+的模型示例）中。本阶梯按名称与 PR 将它们作为"更高级"的下一步交叉链接——
+绝不重述或复制其内容：
+
+| 应用 | 使用的模式 | 位置 |
+| ---- | ---------- | ---- |
+| L3 AllGather–GEMM 通信/计算重叠（[#869](https://github.com/hw-native-sys/pypto-lib/pull/869)） | allgather——步骤 13 | pypto-lib |
+| DeepSeek-V4 分布式 MoE（EP dispatch/combine）、LM-head TP | all-to-all——步骤 15 | pypto-lib `models/deepseek_v4_*` |
+| Qwen3-32B JIT decode | `@pl.jit` 宿主 + 设备模型——步骤 02 | pypto `examples/models/qwen3_jit/` |
+| `examples/advanced/allreduce.py` | 步骤 08–11 的"一步到位"版本 | pypto-lib `examples/advanced/` |
+
+步骤 15 的走读（[20-all_to_all](20-all_to_all.md)）与组合步骤
+（[21-putting_it_together](21-putting_it_together.md)）已按 PR 点名前两者。
+边界是明确的：这里不移植、不重述这些应用的任何内容。
+
 ## 参见（See also）
 
 - [00-model](00-model.md) — 快速入门与模型词汇
