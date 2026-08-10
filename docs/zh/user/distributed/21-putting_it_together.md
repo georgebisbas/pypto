@@ -102,4 +102,5 @@ Lowering 后的 IR 是你已熟悉的三个手工调度，按顺序：broadcast 
 - [01-collectives](../distributed/01-collectives.md) — 整个集合通信动物园
 - [17-broadcast](17-broadcast.md) / [18-allgather](18-allgather.md) / [20-all_to_all](20-all_to_all.md) — 本内核所组合的组件
 - 更高级的应用（此处不重述）：pypto-lib [#869](https://github.com/hw-native-sys/pypto-lib/pull/869)（AllGather-GEMM）与 DeepSeek-V4 分布式 MoE dispatch/combine——模型规模下的相同模式
+- [04-debugging](04-debugging.md) — 分布式程序的规范故障目录
 - 这是阶梯的终点——索引按顺序列出了全部内容。

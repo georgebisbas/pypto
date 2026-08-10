@@ -118,4 +118,5 @@ def hand_step(self, x, y, data, signal):
 - [05-tutorials](05-tutorials.md) — 教程索引（本步 = 第 13 行）
 - [01-collectives](../distributed/01-collectives.md) §AllGather — 完整 API
 - [14-allreduce_two_phase](14-allreduce_two_phase.md) — 本步隔离出的两相 all-reduce 的 gather 一半
+- [04-debugging](04-debugging.md) — 分布式程序的规范故障目录
 - 下一步：[19-reduce_scatter](19-reduce_scatter.md) — 归约一半

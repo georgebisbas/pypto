@@ -72,6 +72,10 @@
 每个 `pld` 抽象：一行用途、文档它的章节小节、教授它的教程步骤。
 教程的**覆盖契约**：代码中存在的任何内容都必须能由某个示例教授。
 
+> 此总览中*操作*行的机器级对应物是[操作目录](../ops/01-catalog.md) §分布式——
+> 集合通信、put/get、notify/wait 与 remote load/store 家族会 lower 为列在那里
+> 的操作；上面的 window、context 与装饰器辅助项是没有目录条目的语言抽象。
+
 ### 系统基座（System substrate）
 
 | 抽象 | 用途 | 章节小节 | 运行位置 | 教程步骤 |
@@ -133,6 +137,19 @@
 | `@pl.jit` / `@pl.jit.incore` | 每设备编排 / 设备端 kernel | [03-execution](03-execution.md) | 02 |
 | `device=r` | 从主机循环将一次分发固定到某个设备 | [00-model](00-model.md) | 01 |
 | `DistributedConfig` | 编译的设备列表与 worker 数量 | [03-execution](03-execution.md) | 01 |
+
+## 阅读路径（Reading path）
+
+本阶梯是更长路径上的一站。分层的单设备示例教授本阶梯所假设的 `pl` 语言——
+它只需要 `examples/beginner/` 与 `examples/intermediate/`。下面的阶段是推荐的
+推进顺序；只有前两个是本阶梯的前置，后面的阶段是可选的后续：
+
+- `pl` 语言：`examples/beginner/` → `examples/intermediate/`
+- 分布式阶梯：`examples/distributed/01 … 16`（本系列，P ≥ 2）
+- 更大规模：`examples/advanced/` → `examples/models/`
+- 应用：pypto-lib（分布式 MoE、模型 JIT decode）
+
+分布式阶梯是唯一需要多于一个设备的站点。
 
 ## 参见（See also）
 

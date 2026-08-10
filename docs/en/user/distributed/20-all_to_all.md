@@ -163,5 +163,6 @@ schedule: every pair exchanges distinct data.
   [#869](https://github.com/hw-native-sys/pypto-lib/pull/869) (AllGather-GEMM,
   an allgather pattern from step 13) and the DeepSeek-V4 distributed MoE
   dispatch/combine (an all-to-all pattern from this step)
+- [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - Next step: [21-putting_it_together](21-putting_it_together.md) — compose
   three collectives in one kernel

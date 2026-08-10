@@ -164,4 +164,5 @@ second half (allgather) you built in step 13.
 - [01-collectives](../distributed/01-collectives.md) §ReduceScatter — the full API
 - [14-allreduce_two_phase](14-allreduce_two_phase.md) — the two-phase all-reduce
   this step is the first half of
+- [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - Next step: [20-all_to_all](20-all_to_all.md) — a different slice for every peer

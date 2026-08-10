@@ -118,4 +118,5 @@ def hand_step(self, x, y, data, signal, root):
 - [05-tutorials](05-tutorials.md) — 教程索引（本步 = 第 12 行）
 - [01-collectives](../distributed/01-collectives.md) §Broadcast — 完整 API
 - [02-primitives](../distributed/02-primitives.md) §Tile-Level RMA — 手工版本所依赖的 `remote_load`
+- [04-debugging](04-debugging.md) — 分布式程序的规范故障目录
 - 下一步：[18-allgather](18-allgather.md) — 全对全切片

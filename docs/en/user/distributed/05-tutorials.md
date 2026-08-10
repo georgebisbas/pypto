@@ -80,6 +80,12 @@ Every `pld` abstraction: one-line purpose, the chapter section that documents
 it, and the tutorial step that teaches it. The **coverage contract** for the
 tutorials: nothing exists in code without being teachable from an example.
 
+> The machine-level counterpart of this map's *operation* rows is the
+> [operations catalog](../ops/01-catalog.md) §Distributed — the collectives,
+> put/get, notify/wait, and remote load/store families lower to the ops listed
+> there; the window, context, and decorator helpers above are language
+> abstractions without catalog rows.
+
 ### System substrate
 
 | Abstraction | Purpose | Chapter section | Runs on | Tutorial step |
@@ -141,6 +147,21 @@ tutorials: nothing exists in code without being teachable from an example.
 | `@pl.jit` / `@pl.jit.incore` | Per-device orchestration / device-side kernel | [03-execution](03-execution.md) | 02 |
 | `device=r` | Pin one dispatch to one device from the host loop | [00-model](00-model.md) | 01 |
 | `DistributedConfig` | Device list + worker count for compilation | [03-execution](03-execution.md) | 01 |
+
+## Reading path
+
+The ladder is one stop on a longer path. The tiered single-device examples
+teach the `pl` language this ladder assumes — it needs only
+`examples/beginner/` and `examples/intermediate/`. The stages below are a
+recommended progression; only the first two are prerequisites for the ladder,
+and the later stages are optional follow-ups:
+
+- the `pl` language: `examples/beginner/` → `examples/intermediate/`
+- the distributed ladder: `examples/distributed/01 … 16` (this series, P ≥ 2)
+- at scale: `examples/advanced/` → `examples/models/`
+- applications: pypto-lib (distributed MoE, model JIT decode)
+
+The distributed ladder is the only stop that needs more than one device.
 
 ## See also
 

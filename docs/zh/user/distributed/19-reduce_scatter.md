@@ -120,4 +120,5 @@ def hand_step(self, x, y, data, signal):
 - [05-tutorials](05-tutorials.md) — 教程索引（本步 = 第 14 行）
 - [01-collectives](../distributed/01-collectives.md) §ReduceScatter — 完整 API
 - [14-allreduce_two_phase](14-allreduce_two_phase.md) — 本步是其第一半的两相 all-reduce
+- [04-debugging](04-debugging.md) — 分布式程序的规范故障目录
 - 下一步：[20-all_to_all](20-all_to_all.md) — 给每个对端一个不同的 slice

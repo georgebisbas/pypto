@@ -117,4 +117,5 @@ def hand_step(self, x, y, data, signal):
 - `examples/runtime/distributed_callback.py` — 围绕 L3 分布式程序的宿主端运行时绑定回调
 - [11-put_get](11-put_get.md) — 本步所依赖的 `put`/`get` 底层
 - 更高级的应用（此处不重述）：pypto-lib [#869](https://github.com/hw-native-sys/pypto-lib/pull/869)（AllGather-GEMM，来自步骤 13 的 allgather 模式）与 DeepSeek-V4 分布式 MoE dispatch/combine（来自本步的 all-to-all 模式）
+- [04-debugging](04-debugging.md) — 分布式程序的规范故障目录
 - 下一步：[21-putting_it_together](21-putting_it_together.md) — 在一个内核中组合三种集合通信

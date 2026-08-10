@@ -151,4 +151,5 @@ because every rank wants the *same* bytes.
 - [01-collectives](../distributed/01-collectives.md) §Broadcast — the full API
 - [02-primitives](../distributed/02-primitives.md) §Tile-Level RMA — the
   `remote_load` the hand-rolled version builds on
+- [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - Next step: [18-allgather](18-allgather.md) — all-to-all slices

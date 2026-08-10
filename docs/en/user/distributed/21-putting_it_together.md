@@ -154,4 +154,5 @@ kernel.
   [#869](https://github.com/hw-native-sys/pypto-lib/pull/869) (AllGather-GEMM)
   and the DeepSeek-V4 distributed MoE dispatch/combine — the same patterns at
   model scale
+- [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - This is the end of the ladder — the index lists everything, in order.

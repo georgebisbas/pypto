@@ -161,4 +161,5 @@ rank receives `(P-1)/P · N` bytes — the gather half of two-phase all-reduce
 - [01-collectives](../distributed/01-collectives.md) §AllGather — the full API
 - [14-allreduce_two_phase](14-allreduce_two_phase.md) — the gather half of the
   two-phase all-reduce this step isolates
+- [04-debugging](04-debugging.md) — the canonical failure catalog for distributed programs
 - Next step: [19-reduce_scatter](19-reduce_scatter.md) — the reduce half
