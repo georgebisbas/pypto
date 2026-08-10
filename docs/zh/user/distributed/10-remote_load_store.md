@@ -112,5 +112,5 @@ barrier 也为 store 排序。
 - [02-primitives](../distributed/02-primitives.md) §Tile 级 RMA — 完整的
   `pld.tile.*` 表面
 - [01-collectives](../distributed/01-collectives.md) — all-reduce 就是这些
-  移动加一个 add（步骤 07–09）
+  移动加一个 add（步骤 08–10）
 - 下一步：[11-put_get](11-put_get.md) — tensor 级 push/pull

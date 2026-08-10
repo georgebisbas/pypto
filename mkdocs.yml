@@ -197,6 +197,7 @@ nav:
           - en/user/distributed/09-barrier.md
           - en/user/distributed/10-remote_load_store.md
           - en/user/distributed/11-put_get.md
+          - en/user/distributed/12-dynamic_rank_count.md
   - Reference:
       - en/reference/index.md
       - PTO ISA:

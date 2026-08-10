@@ -481,6 +481,13 @@ jobs:
           python examples/distributed/05_remote_load_store.py -p a2a3sim -d 0,1 --mode store
           echo "=== examples/distributed/06_put_get.py --mode get ==="
           python examples/distributed/06_put_get.py -p a2a3sim -d 0,1 --mode get
+          # Step 07 is rank-count-agnostic: the P=3 and P=4 legs are the
+          # committed >=3-rank coverage for the general ring pattern (P=2 ran
+          # in the default-mode loop above).
+          echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2 ==="
+          python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2
+          echo "=== examples/distributed/07_dynamic_rank_count.py -d 0,1,2,3 ==="
+          python examples/distributed/07_dynamic_rank_count.py -p a2a3sim -d 0,1,2,3
 
   codegen-tests:
     # Codegen-only: verifies IR → kernel/orch C++ generation without going

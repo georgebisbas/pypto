@@ -1,13 +1,14 @@
 # Distributed Tutorials
 
-The `pld` vocabulary taught step by step: a fifteen-step tutorial series, one
-concept per program. Six runnable examples ship now — from "hello rank"
-through point-to-point moves; steps 07–15 (the collectives) are planned.
+The `pld` vocabulary taught step by step: a sixteen-step tutorial series, one
+concept per program. Seven runnable examples ship now — from "hello rank"
+through point-to-point moves and the dynamic rank count; steps 08–16 (the
+collectives) are planned.
 
 > **Prerequisites:** the [Distributed Programming](../distributed/index.md)
 > chapter — read it once for the vocabulary, then come back here to build the
-> same ideas by hand. Hardware: two devices for steps 01–06, four for the
-> collective comparisons in steps 07–15.
+> same ideas by hand. Hardware: two devices for steps 01–06, three or more for
+> step 07 (any rank count), four for the collective comparisons in steps 08–16.
 
 ## The idea
 
@@ -22,9 +23,11 @@ idea from the primitives before a builtin replaces it:
   is revealed.
 - Steps 05–06 cover **point-to-point** moves (`remote_load`/`remote_store`,
   `put`/`get`).
-- Steps 07–10 build **all-reduce three ways** (mesh, two-phase, ring) and then
+- Step 07 makes the rank count **dynamic** (`pl.dynamic("NR")`): the same
+  source compiles for any P — the mechanism the P=4 collectives build on.
+- Steps 08–11 build **all-reduce three ways** (mesh, two-phase, ring) and then
   reveal `pld.tensor.allreduce`.
-- Steps 11–14 cover the remaining collectives; step 15 composes three of them.
+- Steps 12–15 cover the remaining collectives; step 16 composes three of them.
 
 > **Reveal discipline:** the walkthrough pages do not introduce a builtin
 > (`pld.tensor.barrier`, `pld.tensor.allreduce`, …) before the step that
@@ -35,8 +38,8 @@ idea from the primitives before a builtin replaces it:
 ## Suggested reading order
 
 Read the steps in order — **01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10 →
-11 → 12 → 13 → 14 → 15**. Every page repeats this block. Steps 07–15 are
-planned; 01–06 ship in the first PR (below).
+11 → 12 → 13 → 14 → 15 → 16**. Every page repeats this block. Steps 08–16 are
+planned; 01–07 ship in the first PR (below).
 
 ## The 15 steps
 
@@ -48,18 +51,19 @@ planned; 01–06 ship in the first PR (below).
 | 04 | `04_barrier.py` | Signals only: `notify(AtomicAdd)`/`wait(Ge)`; single-rendezvous N-rank barrier; reveal `pld.tensor.barrier` | ✅ shipped |
 | 05 | `05_remote_load_store.py` | Tile-level RMA: `remote_load`/`remote_store`; one-step ring shift | ✅ shipped |
 | 06 | `06_put_get.py` | Tensor-level p2p: `put`/`get`; push vs pull | ✅ shipped |
-| 07 | `07_allreduce_mesh.py` | All-reduce v1 (mesh): every rank reads every peer, sums locally | planned |
-| 08 | `08_allreduce_two_phase.py` | All-reduce v2: reduce-scatter + all-gather | planned |
-| 09 | `09_allreduce_ring.py` | All-reduce v3 (ring): chunked around the ring | planned |
-| 10 | `10_allreduce_reveal.py` | **The reveal**: `pld.tensor.allreduce` (mesh + ring); diff the IR | planned |
-| 11 | `11_broadcast.py` | One-to-all; reveal `pld.tensor.broadcast` | planned |
-| 12 | `12_allgather.py` | All-to-all slices; reveal `pld.tensor.allgather` | planned |
-| 13 | `13_reduce_scatter.py` | All-to-chunks; reveal `pld.tensor.reduce_scatter` | planned |
-| 14 | `14_all_to_all.py` | Personalized exchange; reveal `pld.tensor.all_to_all` | planned |
-| 15 | `15_putting_it_together.py` | Compose `broadcast` + `allreduce` + `allgather` in one kernel | planned |
+| 07 | `07_dynamic_rank_count.py` | Dynamic rank count: `pl.dynamic("NR")`; one source, any P | ✅ shipped |
+| 08 | `08_allreduce_mesh.py` | All-reduce v1 (mesh): every rank reads every peer, sums locally | planned |
+| 09 | `09_allreduce_two_phase.py` | All-reduce v2: reduce-scatter + all-gather | planned |
+| 10 | `10_allreduce_ring.py` | All-reduce v3 (ring): chunked around the ring | planned |
+| 11 | `11_allreduce_reveal.py` | **The reveal**: `pld.tensor.allreduce` (mesh + ring); diff the IR | planned |
+| 12 | `12_broadcast.py` | One-to-all; reveal `pld.tensor.broadcast` | planned |
+| 13 | `13_allgather.py` | All-to-all slices; reveal `pld.tensor.allgather` | planned |
+| 14 | `14_reduce_scatter.py` | All-to-chunks; reveal `pld.tensor.reduce_scatter` | planned |
+| 15 | `15_all_to_all.py` | Personalized exchange; reveal `pld.tensor.all_to_all` | planned |
+| 16 | `16_putting_it_together.py` | Compose `broadcast` + `allreduce` + `allgather` in one kernel | planned |
 
-Steps 07–15 are **planned** — they arrive in later PRs. The walkthroughs below
-(06–11) cover steps 01–06, which ship together.
+Steps 08–16 are **planned** — they arrive in later PRs. The walkthroughs below
+(06–12) cover steps 01–07, which ship together.
 
 ## The abstractions map
 
@@ -75,6 +79,7 @@ tutorials: nothing exists in code without being teachable from an example.
 | `pld.get_comm_ctx(dt)` | Resolve the comm context a `DistributedTensor` belongs to | [02-primitives](02-primitives.md) §System Substrate | Host / InCore | 04 |
 | `pld.rank(ctx)` | This rank's index in the context | [02-primitives](02-primitives.md) §System Substrate | InCore | 04 |
 | `pld.nranks(ctx)` | Rank count in the context | [02-primitives](02-primitives.md) §System Substrate | InCore | 04 |
+| `pl.dynamic("NR")` | Name a runtime-resolved dimension (e.g. the rank count) | [00-getting_started](../00-getting_started.md) | — | 07 |
 
 ### Memory
 
@@ -113,11 +118,11 @@ tutorials: nothing exists in code without being teachable from an example.
 | Abstraction | Purpose | Chapter section | Tutorial step |
 | ----------- | ------- | --------------- | ------------- |
 | `pld.tensor.barrier(...)` | Synchronize all ranks (revealed builtin) | [01-collectives](01-collectives.md) §Barrier | 04 |
-| `pld.tensor.allreduce(...)` | Reduce and broadcast the result (mesh/ring) | [01-collectives](01-collectives.md) §AllReduce | 10 |
-| `pld.tensor.broadcast(...)` | One rank's data to all | [01-collectives](01-collectives.md) §Broadcast | 11 |
-| `pld.tensor.allgather(...)` | All ranks' slices to all | [01-collectives](01-collectives.md) §AllGather | 12 |
-| `pld.tensor.reduce_scatter(...)` | Reduced result, one chunk per rank | [01-collectives](01-collectives.md) §ReduceScatter | 13 |
-| `pld.tensor.all_to_all(...)` | Personalized exchange | [01-collectives](01-collectives.md) §AllToAll | 14 |
+| `pld.tensor.allreduce(...)` | Reduce and broadcast the result (mesh/ring) | [01-collectives](01-collectives.md) §AllReduce | 11 |
+| `pld.tensor.broadcast(...)` | One rank's data to all | [01-collectives](01-collectives.md) §Broadcast | 12 |
+| `pld.tensor.allgather(...)` | All ranks' slices to all | [01-collectives](01-collectives.md) §AllGather | 13 |
+| `pld.tensor.reduce_scatter(...)` | Reduced result, one chunk per rank | [01-collectives](01-collectives.md) §ReduceScatter | 14 |
+| `pld.tensor.all_to_all(...)` | Personalized exchange | [01-collectives](01-collectives.md) §AllToAll | 15 |
 
 ### Composition
 
@@ -131,6 +136,6 @@ tutorials: nothing exists in code without being teachable from an example.
 ## See also
 
 - [00-model](00-model.md) — Quickstart and model vocabulary
-- [01-collectives](01-collectives.md) — The collectives (steps 07–15)
+- [01-collectives](01-collectives.md) — The collectives (steps 08–16)
 - [02-primitives](02-primitives.md) — The substrate beneath the collectives
 - Next step: [06-hello_rank](06-hello_rank.md) — run your first 2-rank program

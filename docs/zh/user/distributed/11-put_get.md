@@ -26,7 +26,7 @@ tensor 级点对点移动，push 与 pull。
 
 **成本卡片：** 一步，每个 rank 与一个对端交换一个 slice。小 slice 时为延迟
 受限；大 slice 时运行时的分块 + 流水线 staging 会重叠各轮，把延迟受限的
-移动变成带宽受限（与步骤 07–09 用于 all-reduce 的技巧相同）。
+移动变成带宽受限（与步骤 08–10 用于 all-reduce 的技巧相同）。
 
 ## 运行（Run it）
 
@@ -127,5 +127,5 @@ get 侧是接收方发起的镜像：
 - [02-primitives](../distributed/02-primitives.md) §Put 与 Get — 分块与流水线
   约束
 - [01-collectives](../distributed/01-collectives.md) — 集合通信如何组合这些
-  移动（步骤 07–15）
-- 下一步：[05-tutorials](05-tutorials.md) — 步骤 07–15（all-reduce）为规划中
+  移动（步骤 08–16）
+- 下一步：[12-dynamic_rank_count](12-dynamic_rank_count.md) — 同一个环，与 rank 数量无关

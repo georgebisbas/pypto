@@ -212,11 +212,11 @@ PyPTO 有三种方式运行集合通信——根据代码运行的位置以及�
 | 集合通信 | 教程步骤 | 先手工？ |
 | -------- | -------- | -------- |
 | barrier | [09-barrier](09-barrier.md) | 是（步骤 04，然后揭示） |
-| allreduce | 规划中——步骤 07–10 | 是（mesh、two-phase、ring，然后揭示） |
-| broadcast | 规划中——步骤 11 | 是 |
-| allgather | 规划中——步骤 12 | 是 |
-| reduce_scatter | 规划中——步骤 13 | 是 |
-| all_to_all | 规划中——步骤 14 | 是 |
+| allreduce | 规划中——步骤 08–11 | 是（mesh、two-phase、ring，然后揭示） |
+| broadcast | 规划中——步骤 12 | 是 |
+| allgather | 规划中——步骤 13 | 是 |
+| reduce_scatter | 规划中——步骤 14 | 是 |
+| all_to_all | 规划中——步骤 15 | 是 |
 
 | 集合通信 | InCore 手写 | InCore 组合调用 | HOST 内置 |
 | -------- | ----------- | --------------- | --------- |

@@ -29,7 +29,7 @@ into the next rank then reads its own `dst` back → `y[r] = x[(r-1) % N]`;
 **Cost card:** one step, one slice exchanged with one peer per rank. For small
 slices this is latency-bound; for large slices the runtime's chunked +
 pipelined staging overlaps the rounds and turns a latency-bound move into a
-bandwidth-bound one (the same trick steps 07–09 use for all-reduce).
+bandwidth-bound one (the same trick steps 08–10 use for all-reduce).
 
 ## Run it
 
@@ -135,5 +135,5 @@ full-slice form; the chapter reference documents the chunk-size rules.
 - [02-primitives](../distributed/02-primitives.md) §Put and Get — chunking and
   pipelining constraints
 - [01-collectives](../distributed/01-collectives.md) — how collectives compose
-  these moves (steps 07–15)
-- Next step: [05-tutorials](05-tutorials.md) — steps 07–15 (all-reduce) are planned
+  these moves (steps 08–16)
+- Next step: [12-dynamic_rank_count](12-dynamic_rank_count.md) — the same ring, rank-count-agnostic

@@ -118,5 +118,5 @@ structural: anything you want to share must flow through a
 - [02-primitives](../distributed/02-primitives.md) §Tile-Level RMA — the full
   `pld.tile.*` surface
 - [01-collectives](../distributed/01-collectives.md) — all-reduce is these
-  moves plus an add (steps 07–09)
+  moves plus an add (steps 08–10)
 - Next step: [11-put_get](11-put_get.md) — tensor-level push/pull
