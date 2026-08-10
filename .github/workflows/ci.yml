@@ -418,55 +418,57 @@ jobs:
   examples-tests:
     # The distributed examples ladder (doc-plan 02) — every example must compile
     # AND run with a passing golden on the simulator (a2a3sim), so the teaching
-    # material cannot silently rot. Runs in the same container as the system
-    # tests, with ptoas and the simpler runtime installed: the distributed
-    # execution path compiles via ptoas and imports the simpler runtime, which
-    # a bare pip install of the project alone does not provide.
+    # material cannot silently rot.
+    #
+    # No container: runs host-native on the shared CPU pool through the same
+    # setup-ci-job as codegen-tests / pypto-lib-model, so the ptoas / pto-isa /
+    # simpler builds reuse the persistent host caches (ccache, pip, ptoas)
+    # instead of rebuilding in an ephemeral container on every PR.
     needs: [changes, toolchain, pre-commit, clang-tidy]
     if: needs.changes.outputs.docs_only != 'true'
-    runs-on: ubuntu-latest
+    # Checkout + test only — no write scopes needed on GITHUB_TOKEN.
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, arm64, cpu]
+    defaults:
+      run:
+        working-directory: examples-checkout
     env:
-      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTOAS_ROOT: ${{ github.workspace }}/examples-checkout/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/examples-checkout/pto-isa
       PTOAS_VERSION: ${{ needs.toolchain.outputs.ptoas_version }}
-      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_x86_64 }}
-    container:
-      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+      PTOAS_SHA256: ${{ needs.toolchain.outputs.ptoas_sha256_aarch64 }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_MAXSIZE: 30G
+      # The cache *paths* (CCACHE_DIR / PIP_CACHE_DIR) and CCACHE_NAMESPACE are
+      # derived by setup-ci-job from the runner config's CI_CACHE_ROOT.
+      CCACHE_UMASK: '000'
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch composite action definitions
+        # Local `uses: ./.github/actions/...` resolves against $GITHUB_WORKSPACE,
+        # but this job checks the repo out into ./examples-checkout —
+        # sparse-fetch just the action defs at the workspace root first
+        # (clean: false leaves sibling subdir checkouts on this persistent
+        # runner untouched).
+        uses: actions/checkout@v4
         with:
-          submodules: true
+          sparse-checkout: .github/actions
+          clean: false
+          persist-credentials: false
 
-      - name: Install project and dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -v .[dev]
-
-      - name: Cache ptoas binary
-        id: cache-ptoas
-        uses: actions/cache@v4
+      - name: Setup CI job
+        uses: ./.github/actions/setup-ci-job
         with:
-          path: ${{ github.workspace }}/ptoas-bin
-          key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
-
-      - name: Install ptoas
-        if: steps.cache-ptoas.outputs.cache-hit != 'true'
-        run: |
-          curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-x86_64.tar.gz \
-             -o /tmp/ptoas-bin-x86_64.tar.gz
-          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
-          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-          tar -xzf /tmp/ptoas-bin-x86_64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
-
-      - name: Install simpler
-        run: |
-          rm -rf ./runtime/build
-          pip install -v ./runtime
+          checkout-path: examples-checkout
+          needs-device: 'false'
+          pip-cache-name: pip-examples
+          pto-isa-commit: ${{ needs.toolchain.outputs.pto_isa_commit }}
 
       - name: Run distributed examples on the simulator
         run: |
+          source activate.sh
           set -e
           for ex in examples/distributed/*.py; do
             case "$ex" in */__init__.py) continue ;; esac
