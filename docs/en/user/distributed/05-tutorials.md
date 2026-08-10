@@ -47,7 +47,7 @@ Read the steps in order — **01 → 02 → 03 → 04 → 05 → 06 → 07 → 0
 11 → 12 → 13 → 14 → 15 → 16**. Every page repeats this block. Steps 08–16 are
 planned; 01–07 ship in the first PR (below).
 
-## The 15 steps
+## The 16 steps
 
 | Step | Program | Teaches | Status |
 | ---- | ------- | ------- | ------ |
