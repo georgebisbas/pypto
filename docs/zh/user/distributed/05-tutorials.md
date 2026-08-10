@@ -28,6 +28,11 @@
 > 内置原语（`pld.tensor.barrier`、`pld.tensor.allreduce` 等）——本索引仅预告
 > 即将出现的内容。等到内置原语出现时，你已经写出手工版本，并知道它们 lower
 > 成什么。
+>
+> **知识递进（Progression）：** 每个步骤只使用更早步骤（或前置章节）引入的
+> 概念。当某个步骤提到较晚才讲解的内容——例如步骤 04 的 barrier 揭示中
+> 用了一行 `remote_load`——那只是指引，不是必需知识：你可以在后续步骤中
+> 正式认识它。
 
 ## 建议阅读顺序（Suggested reading order）
 

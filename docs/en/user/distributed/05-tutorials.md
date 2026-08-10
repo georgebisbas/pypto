@@ -34,6 +34,12 @@ idea from the primitives before a builtin replaces it:
 > reveals it — this index only previews what is coming. By the time a builtin
 > appears, you have already written the hand-rolled version and know what it
 > lowers to.
+>
+> **Progression:** every step uses only concepts introduced in earlier steps
+> (or in the prerequisite chapter). When a step mentions something taught
+> later — like step 04's one-line `remote_load` in the barrier reveal — it is
+> a pointer, not required knowledge: you can read the later step to meet the
+> idea properly.
 
 ## Suggested reading order
 

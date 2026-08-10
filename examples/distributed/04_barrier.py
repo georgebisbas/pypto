@@ -36,9 +36,10 @@ the counters are monotonic, so ``Ge(1)`` would already be satisfied.
 With ``--use-builtin`` the barrier is one ``pld.tensor.barrier`` call. The
 builtin synchronizes but does not leave a tally in the signal window, so the
 reveal instead proves correct ordering with data: every rank stages its slice,
-barriers, then remote-loads the next rank's slice. A missing barrier would let
-the load race the peer's store; the golden ``y[r] = x[(r+1) % N]`` holds only
-because the barrier ordered them.
+barriers, then reads the next rank's slice from its window (``remote_load`` --
+used here in one line to observe the ordering; step 05 teaches it properly). A
+missing barrier would let the load race the peer's store; the golden
+``y[r] = x[(r+1) % N]`` holds only because the barrier ordered them.
 
 Run + walkthrough: see docs/en/user/distributed/09-barrier.md
 """

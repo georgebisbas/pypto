@@ -121,9 +121,11 @@ def barrier_builtin(x, y, data, signal):
 `pld.tensor.barrier(signal)` is exactly the synchronization the hand-rolled
 loop performs — but it synchronizes *without leaving a tally* in the signal
 window, so the reveal proves the barrier a different way: with data. Every
-rank stages its slice, barriers, then remote-loads the next rank's slice. A
-missing barrier would let the load race the peer's store; the golden
-`y[r] = x[(r+1) % N]` holds only because the barrier ordered them. The same
+rank stages its slice, barriers, then reads the next rank's slice from its
+window (`pld.tile.remote_load` — used here in one line to observe the
+ordering; step 05 teaches remote memory access properly). A missing barrier
+would let the load race the peer's store; the golden `y[r] = x[(r+1) % N]`
+holds only because the barrier ordered them. The same
 `x`/`signal`/`data` host shape as before, one call instead of a loop.
 
 ## Edge cases

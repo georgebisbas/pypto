@@ -23,10 +23,11 @@ is written". The host signature becomes `x: pl.Tensor[[NR, 1, SIZE], pl.FP32]`,
 and the very same source now compiles for whatever `-d` you pass — the rank
 count is gone from the program.
 
-Why this matters now: the collective comparisons in steps 08+ **must** run at
-P=4 (at P=2, mesh, two-phase and ring all collapse to one exchange, so their
-cost models are unobservable). This step is the bridge — the mechanism that
-lets one program serve any world size.
+Why this matters now: the later steps compare collective algorithms against
+each other, and at two ranks several of those algorithms collapse into the
+same exchange — their differences are only observable at four ranks. This
+step is the bridge: the same source serving any world size is what those P=4
+comparisons build on, with no per-program rank-count edits.
 
 ## Run it
 

@@ -109,10 +109,11 @@ def barrier_builtin(x, y, data, signal):
 
 `pld.tensor.barrier(signal)` 执行手工循环的相同同步——但它同步时*不在信号
 window 中留下计数*，因此揭示改用数据来证明 barrier：每个 rank 先 staging
-自己的 slice，再 barrier，然后 remote-load 下一个 rank 的 slice。缺少 barrier
-会让 load 与对端的 store 竞争；golden `y[r] = x[(r+1) % N]` 只有靠 barrier
-排序才成立。主机侧的 `x`/`signal`/`data` 形态与之前相同，只是一个调用
-取代了一个循环。
+自己的 slice，再 barrier，然后从自己的 window 读取下一个 rank 的 slice
+（`pld.tile.remote_load`——这里用一行来观察排序；步骤 05 会正式讲解远程
+内存访问）。缺少 barrier 会让 load 与对端的 store 竞争；golden
+`y[r] = x[(r+1) % N]` 只有靠 barrier 排序才成立。主机侧的 `x`/`signal`/`data`
+形态与之前相同，只是一个调用取代了一个循环。
 
 ## 边界情况（Edge cases）
 
