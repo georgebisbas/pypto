@@ -97,18 +97,20 @@ structural: anything you want to share must flow through a
 
 ## Edge cases
 
-> **Fatal pitfall — remote-loading before staging.** `remote_load` reads
-> *window* memory. If a peer has not staged its slice yet, you read stale
-> (zero-filled) data. **Fix:** always put the data in the window *and* cross a
-> barrier before any remote load or store.
+> **Fatal pitfall — RMA before the ordering barrier.** `remote_load` reads
+> *window* memory, so the peer must have staged its slice first: **load** mode
+> = stage, then barrier, then `remote_load`. The **store** ordering is the
+> mirror: `remote_store` first, *then* barrier, so no receiver reads your
+> window slice before the write lands. A barrier before a store does not help —
+> the store still races the receiver's read.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| Remote read returns zeros | Load before the peer staged / no barrier | Stage first, then `pld.tensor.barrier`, then RMA |
+| Remote read returns zeros | `remote_load` before the peer staged / no barrier | Load mode: stage, barrier, then `remote_load` |
 | Shift goes the wrong direction | Pull vs push semantics confused | `load` mode: read `(r+1)`; `store` mode: write to `(r+1)` and read self |
 | Scalar `FP32` arithmetic error in `peer` math | Scalar float ops on the AI core | Keep index math in `INT32` (`(r+1) % n`), cast only for data ops |
 | Type mismatch on the window param | `DistributedTensor` used as `Tensor` | Annotate shared buffers as `pld.DistributedTensor[...]` |
-| One rank reads the previous rank's stale data | Barrier skipped or placed wrong | The barrier must sit between stage and RMA on every rank |
+| One rank reads the previous rank's stale data | Barrier skipped or placed wrong | Load mode: barrier between stage and load; store mode: barrier after the store, before reading |
 
 ## See also
 

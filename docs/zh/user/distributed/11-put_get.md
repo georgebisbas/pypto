@@ -83,19 +83,24 @@ get 侧是接收方发起的镜像：
     local = pl.load(x, [0, 0], [1, SIZE])
     src = pl.store(local, [0, 0], src)
 
-    peer = (my_rank + 1) % nranks
-    pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+    get_peer = (my_rank + 1) % nranks
+    # 通知读取我们的那个 rank（上一个 rank）；这样我们的 wait 恰好由我们要
+    # get 的那个 rank（下一个 rank）满足。先加 nranks 再减 1，确保被除数
+    # 永不为负。
+    pld.system.notify(signal, peer=(my_rank + nranks - 1) % nranks, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
     pld.system.wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
 
-    pld.tensor.get(dst, peer=peer, src=src)
+    pld.tensor.get(dst, peer=get_peer, src=src)
 
     recv = pl.load(dst, [0, 0], [1, SIZE])
     y = pl.store(recv, [0, 0], y)
 ```
 
 这里每个 rank 仍然 staging 自己的 `src` 并发送信号——但*移动*是
-`pld.tensor.get(dst, peer=peer, src=src)`：握手之后，接收方把对端的 `src`
-拉入自己的 `dst`。同一个环，发起方相反。
+`pld.tensor.get(dst, peer=get_peer, src=src)`：握手之后，接收方把对端的
+`src` 拉入自己的 `dst`。同一个环，发起方相反。握手目标与 `put` 相反：rank
+通知*上一个* rank（将读取它的那个），等待*下一个* rank（它要读取的那个），
+因此 wait 总能覆盖 get 的数据源——对任意 rank 数都成立。
 
 **分块与流水线。** 对大传输，运行时把 slice 分成块并流水线化移动，使下一
 块的 staging 与当前块的传输重叠。本示例中的小传输使用整 slice 形式；分块

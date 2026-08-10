@@ -40,13 +40,16 @@ OK
 The three functions, top to bottom.
 
 ```python
+ROWS = 8
+COLS = 8
+
 @pl.jit.incore
 def scale_by_rank(
-    x: pl.Tensor[[1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    x: pl.Tensor[[ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
     rank: pl.Scalar[pl.INT32],
 ):
-    tile = pl.load(x, [0, 0], [1, SIZE])
+    tile = pl.load(x, [0, 0], [ROWS, COLS])
     rank_f32 = pl.cast(rank, target_type=pl.FP32)
     scaled = pl.mul(tile, rank_f32)
     result = pl.add(scaled, tile)   # x * rank + x == x * (rank + 1)
@@ -55,13 +58,13 @@ def scale_by_rank(
 ```
 
 This is the **device kernel**. It runs on the AI cores of one device and sees
-only that device's slice of the problem — `x` here is `[1, SIZE]`, the rank-`r`
-slice. Note the same scalar discipline as step 01: `rank` is a scalar `INT32`
-that is cast to `FP32` and folded into vector ops.
+only that device's slice of the problem — `x` here is `[ROWS, COLS]`, the
+rank-`r` slice. Note the same scalar discipline as step 01: `rank` is a scalar
+`INT32` that is cast to `FP32` and folded into vector ops.
 
 ```python
 @pl.jit
-def per_rank(x, y, rank):
+def device_orch(x, y, rank):
     return scale_by_rank(x, y, rank)
 ```
 
@@ -72,22 +75,22 @@ steps it is where per-device staging and multi-call sequences live.
 
 ```python
 @pl.jit.host
-def scale_program(
-    x: pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32]],
+def host_orch(
+    x: pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32]],
 ):
     for r in pl.range(pld.world_size()):
-        per_rank(x[r], y[r], r, device=r)
+        device_orch(x[r], y[r], r, device=r)
 ```
 
 The **host orchestrator**. It runs on the host CPU, holds the world-shaped
-tensors `[N_RANKS, 1, SIZE]`, and is the only function that knows about all
-devices. It loops over the world and dispatches `per_rank` once per rank.
+tensors `[N_RANKS, ROWS, COLS]`, and is the only function that knows about all
+devices. It loops over the world and dispatches `device_orch` once per rank.
 
 The compile/run shape is identical to step 01:
 
 ```python
-compiled = scale_program.compile(
+compiled = host_orch.compile(
     x, y,
     config=RunConfig(
         platform=args.platform,
@@ -111,7 +114,7 @@ its own index.
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| All ranks compute the same slice | Rank index not threaded from the host loop | Pass `r` down through `per_rank(..., r, ...)` |
+| All ranks compute the same slice | Rank index not threaded from the host loop | Pass `r` down through `device_orch(..., r, ...)` |
 | Host function has no rank argument | Confusing the orchestrator with the kernel | The host *is* the loop; identity comes from `device=r` |
 | `@pl.jit.incore` never runs on host | Forgetting which decorator does what | Kernel = `@pl.jit.incore`; device wrapper = `@pl.jit`; orchestrator = `@pl.jit.host` |
 | Value computed twice per rank | Dispatching the kernel, not the wrapper | Host must call the `@pl.jit` wrapper, not the `@pl.jit.incore` directly |

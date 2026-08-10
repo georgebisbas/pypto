@@ -88,19 +88,25 @@ The get side is the receiver-initiated mirror:
     local = pl.load(x, [0, 0], [1, SIZE])
     src = pl.store(local, [0, 0], src)
 
-    peer = (my_rank + 1) % nranks
-    pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+    get_peer = (my_rank + 1) % nranks
+    # Notify the rank that reads from us (the previous rank); our wait is then
+    # satisfied by exactly the rank we get from (the next rank). nranks is
+    # added before the -1 so the dividend is never negative.
+    pld.system.notify(signal, peer=(my_rank + nranks - 1) % nranks, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
     pld.system.wait(signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
 
-    pld.tensor.get(dst, peer=peer, src=src)
+    pld.tensor.get(dst, peer=get_peer, src=src)
 
     recv = pl.load(dst, [0, 0], [1, SIZE])
     y = pl.store(recv, [0, 0], y)
 ```
 
 Here every rank still stages its `src` and signals — but the *move* is a
-`pld.tensor.get(dst, peer=peer, src=src)`: the receiver pulls the peer's `src`
-into its own `dst` after the handshake. Same ring, opposite initiator.
+`pld.tensor.get(dst, peer=get_peer, src=src)`: the receiver pulls the peer's
+`src` into its own `dst` after the handshake. Same ring, opposite initiator.
+The handshake targets are reversed from `put`: a rank notifies the *previous*
+rank (the one that will read from it) and waits for the *next* rank (the one
+it reads from), so the wait always covers the get source — for any rank count.
 
 **Chunking and pipelining.** For large transfers the runtime splits the slice
 into chunks and pipelines the moves so the next chunk's staging overlaps the

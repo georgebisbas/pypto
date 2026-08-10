@@ -92,18 +92,19 @@ barrier 也为 store 排序。
 
 ## 边界情况（Edge cases）
 
-> **致命陷阱——staging 之前就远程加载。** `remote_load` 读取 *window* 内存。
-> 如果对端尚未 staging 自己的 slice，你读到的是陈旧（零填充）数据。
-> **修复：** 任何远程 load/store 之前，务必先把数据放入 window *并*跨过
-> barrier。
+> **致命陷阱——排序 barrier 之前的 RMA。** `remote_load` 读取 *window* 内存，
+> 因此对端必须先 staging 好 slice：**load** 模式 = 先 staging，再 barrier，
+> 然后 `remote_load`。**store** 顺序正好相反：先 `remote_store`，*再*
+> barrier，这样任何接收方都不会在写入落定前读取你的 window slice。store
+> 之前的 barrier 没有帮助——store 仍会与接收方的读取竞争。
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| 远程读取返回零 | 对端 staging 之前就 load / 无 barrier | 先 staging，再 `pld.tensor.barrier`，然后 RMA |
+| 远程读取返回零 | 对端 staging 之前就 `remote_load` / 无 barrier | load 模式：先 staging，再 barrier，然后 `remote_load` |
 | 移位方向错误 | 混淆 pull 与 push 语义 | `load` 模式：读 `(r+1)`；`store` 模式：写 `(r+1)` 并读自己 |
 | `peer` 计算中出现标量 `FP32` 算术错误 | AI 核上的标量浮点运算 | 索引计算保持在 `INT32`（`(r+1) % n`），只为数据运算 cast |
 | window 参数类型不匹配 | `DistributedTensor` 被当作 `Tensor` | 共享 buffer 标注为 `pld.DistributedTensor[...]` |
-| 某个 rank 读到上一个 rank 的陈旧数据 | 跳过 barrier 或 barrier 位置错误 | barrier 必须位于每个 rank 的 stage 与 RMA 之间 |
+| 某个 rank 读到上一个 rank 的陈旧数据 | 跳过 barrier 或 barrier 位置错误 | load 模式：barrier 位于 stage 与 load 之间；store 模式：barrier 位于 store 之后、读取之前 |
 
 ## 参见（See also）
 

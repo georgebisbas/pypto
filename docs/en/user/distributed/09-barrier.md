@@ -24,12 +24,15 @@ rank `r`'s own row reads `[1, …, 0, …, 1]` — a `1` in every column except 
 own, because a rank never notifies itself. Surfacing that row is the proof
 that every peer arrived.
 
-**Why `AtomicAdd` + `Ge`.** N ranks write the same signal cell, so the
-contribution must accumulate: `AtomicAdd` grows the counter, `Ge(1)` passes
-when every peer has arrived, and a `Set` would silently clobber earlier
-arrivals. The example runs a single rendezvous — the counters are monotonic,
-so reusing the same window for a second barrier needs a cell reset or a
-generation-specific expected threshold.
+**Why `AtomicAdd` + `Ge`.** With `offsets=[my_rank, 0]` each rank owns a
+dedicated row: cell `[r, 0]` in every peer's window has exactly one writer —
+rank `r` itself — so a `Set` would work identically here. `AtomicAdd` is shown
+because it is the canonical notify call every barrier in the chapter uses, and
+it is what a *shared*-cell barrier (many ranks writing one slot) actually
+requires — see [02-primitives](02-primitives.md). `Ge(1)` passes when every
+row shows its writer's arrival. The example runs a single rendezvous — the
+counters are monotonic, so reusing the same window for a second barrier needs
+a cell reset or a generation-specific expected threshold.
 
 **Cost card:** one communication round, `P-1` notifications + `P-1` waits per
 rank, zero data bytes. This is the cheapest rendezvous in the language —
@@ -88,12 +91,13 @@ def barrier_handrolled(
   InCore kernel does not get rank as a scalar argument — it derives it from the
   window.
 - **The notify phase.** Every rank notifies every *other* rank, writing `1`
-  with `AtomicAdd` into row `my_rank` of the peer's signal window. Rank `r`
-  never notifies itself — that is why its own row ends with a `0` in column
-  `r`.
+  into row `my_rank` of the peer's signal window. Row `my_rank` is this rank's
+  own dedicated row — its only writer, so the write can be a plain `Set`; the
+  chapter's `AtomicAdd` form is the canonical notify call. Rank `r` never
+  notifies itself — that is why its own row ends with a `0` in column `r`.
 - **The wait phase.** Every rank waits on every other rank's row in its *own*
-  window, `expected=1, cmp=Ge`. Because peers use `AtomicAdd`, the cell only
-  needs to reach `1`.
+  window, `expected=1, cmp=Ge`. Each row has a single writer, so `1` is the
+  correct threshold.
 - **The observable.** Reading the signal row cell-by-cell with `pl.read`/
   `pl.write` surfaces the arrival pattern. (A *tile* load of the `[2,1] INT32`
   window would be rejected: its 8-byte column is below the 32-byte alignment
@@ -124,15 +128,17 @@ missing barrier would let the load race the peer's store; the golden
 
 ## Edge cases
 
-> **Fatal pitfall — `Set`/`Eq` barrier that never sees all arrivals.**
-> `NotifyOp.Set` + `WaitCmp.Eq` makes N ranks write the same cell with plain
-> overwrites, so earlier arrivals are silently clobbered and the barrier can
-> pass before every peer has arrived. **Fix:** use `AtomicAdd` + `Ge` so the
-> contributions accumulate.
+> **Fatal pitfall — `Set`/`Eq` on a *shared*-cell barrier.** A `Set` + `Eq`
+> barrier in which N ranks write the *same* cell with plain overwrites
+> silently clobbers earlier arrivals and can pass before every peer has
+> arrived. **Fix:** in the shared-cell layout use `AtomicAdd` + `Ge` so
+> contributions accumulate. This example's dedicated-row layout has one writer
+> per cell, so `Set` is safe there — the hazard is the many-writers-one-slot
+> barrier (see [02-primitives](02-primitives.md)).
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| Barrier passes before every peer arrived | `Set`/`Eq` — later writes clobber earlier ones | Use `AtomicAdd` + `Ge` so contributions accumulate |
+| Shared-cell barrier passes before every peer arrived | `Set`/`Eq` on the shared cell — later writes clobber earlier ones | Use `AtomicAdd` + `Ge` so contributions accumulate |
 | Second barrier passes before peers arrive | Reusing the same window — counters already satisfy `Ge(1)` | Reset the cells, or track a generation and raise `expected` per call |
 | Own signal row shows `0` where peers arrived | Forgot rank `r` skips itself in the notify loop | Skip `peer == my_rank` |
 | `pto.alloc_tile` … `32-byte aligned` | Tile-loading a narrow `INT32` window (e.g. `[2,1]` = 8 B column) | Read/write cells as scalars with `pl.read`/`pl.write`, or widen the window |

@@ -19,10 +19,13 @@ barrier 是纯粹的同步。本步骤手工用 `notify`/`wait` 编写 barrier�
 rank `r` 自己的行读作 `[1, …, 0, …, 1]`——除自身外每一列都是 `1`，因为
 rank 从不通知自己。将该行呈现出来，就是"每个对端都已到达"的证明。
 
-**为什么 `AtomicAdd` + `Ge`。** N 个 rank 写入同一个信号单元，因此贡献必须
-累加：`AtomicAdd` 增长计数器，`Ge(1)` 在每个对端都已到达时通过，而 `Set`
-会静默覆盖更早的到达。本示例只运行一次汇合——计数器是单调的，因此在同一
-window 上复用第二次 barrier 需要重置单元，或按代次提高 `expected` 阈值。
+**为什么 `AtomicAdd` + `Ge`。** 使用 `offsets=[my_rank, 0]` 时每个 rank 拥有
+专属的一行：每个对端 window 中的单元 `[r, 0]` 只有一个写入者——即 rank `r`
+自己——因此这里用 `Set` 结果相同。展示 `AtomicAdd` 是因为它是本章每个
+barrier 都使用的同一个 notify 调用，也是*共享*单元 barrier（多个 rank 写
+同一个槽位）所必需的——见 [02-primitives](02-primitives.md)。`Ge(1)` 在每行
+都出现其写入者的到达时通过。本示例只运行一次汇合——计数器是单调的，因此在
+同一 window 上复用第二次 barrier 需要重置单元，或按代次提高 `expected` 阈值。
 
 **成本卡片：** 一轮通信，每个 rank 发出 `P-1` 次 notify + `P-1` 次 wait，
 零数据字节。这是语言中最便宜的汇合——是每个集合通信的基准下限。
@@ -78,11 +81,13 @@ def barrier_handrolled(
 - **上下文。** `pld.get_comm_ctx(signal)` 解析 window 所属的通信上下文；
   `pld.rank(ctx)`（以及 `pld.nranks(ctx)`）由此而来。InCore kernel 不把 rank
   作为标量参数接收——它从 window 推导。
-- **notify 阶段。** 每个 rank 通知每个*其他* rank，用 `AtomicAdd` 把 `1`
-  写入对端信号 window 的第 `my_rank` 行。rank `r` 从不通知自己——这正是
-  它自己的行在第 `r` 列以 `0` 结尾的原因。
+- **notify 阶段。** 每个 rank 通知每个*其他* rank，把 `1` 写入对端信号
+  window 的第 `my_rank` 行。第 `my_rank` 行就是该 rank 自己的专属行——它是
+  唯一写入者，因此可以是普通 `Set` 写入；本章的 `AtomicAdd` 形式是规范的
+  notify 调用。rank `r` 从不通知自己——这正是它自己的行在第 `r` 列以 `0`
+  结尾的原因。
 - **wait 阶段。** 每个 rank 等待*自己* window 中其他每个 rank 的行，
-  `expected=1, cmp=Ge`。由于对端使用 `AtomicAdd`，单元只需达到 `1`。
+  `expected=1, cmp=Ge`。每行只有一个写入者，因此 `1` 就是正确阈值。
 - **可观测结果。** 用 `pl.read`/`pl.write` 逐单元读取信号行，呈现到达模式。
   （对 `[2,1]` 的 `INT32` window 做 *tile* load 会被拒绝：其 8 字节列低于
   ptoas 对列主序 tile 要求的 32 字节对齐——见边界情况。）
@@ -111,15 +116,15 @@ window 中留下计数*，因此揭示改用数据来证明 barrier：每个 ran
 
 ## 边界情况（Edge cases）
 
-> **致命陷阱——`Set`/`Eq` barrier 永远看不到全部到达。** `NotifyOp.Set` +
-> `WaitCmp.Eq` 让 N 个 rank 用普通覆盖写入同一个单元，更早的到达被静默
-> 覆盖，barrier 可能在任何对端到达之前就通过。**修复：** 使用 `AtomicAdd`
->
-> - `Ge`，让贡献累加。
+> **致命陷阱——*共享*单元 barrier 上的 `Set`/`Eq`。** 在 N 个 rank 用普通覆盖
+> 写入*同一个*单元的 `Set` + `Eq` barrier 中，更早的到达被静默覆盖，barrier
+> 可能在任何对端到达之前就通过。**修复：** 共享单元布局下使用 `AtomicAdd` +
+> `Ge`，让贡献累加。本示例的专属行布局每个单元只有一个写入者，`Set` 是安全
+> 的——风险特指“多写者单槽位”的 barrier（见 [02-primitives](02-primitives.md)）。
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| 在每个对端到达之前 barrier 就通过 | `Set`/`Eq`——后写覆盖先写 | 使用 `AtomicAdd` + `Ge`，让贡献累加 |
+| 共享单元 barrier 在每个对端到达之前就通过 | 共享单元上的 `Set`/`Eq`——后写覆盖先写 | 使用 `AtomicAdd` + `Ge`，让贡献累加 |
 | 第二次 barrier 在对端到达之前就通过 | 复用同一 window——计数器已满足 `Ge(1)` | 重置单元，或跟踪代次并在每次调用时提高 `expected` |
 | 自己的信号行在对端到达处显示 `0` | 忘记 rank `r` 在 notify 循环中跳过自己 | 跳过 `peer == my_rank` |
 | `pto.alloc_tile` … `32-byte aligned` | tile-load 一个窄的 `INT32` window（如 `[2,1]` = 8 B 列） | 用 `pl.read`/`pl.write` 逐单元读写，或加宽 window |

@@ -38,13 +38,16 @@ OK
 三个函数，自上而下。
 
 ```python
+ROWS = 8
+COLS = 8
+
 @pl.jit.incore
 def scale_by_rank(
-    x: pl.Tensor[[1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    x: pl.Tensor[[ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
     rank: pl.Scalar[pl.INT32],
 ):
-    tile = pl.load(x, [0, 0], [1, SIZE])
+    tile = pl.load(x, [0, 0], [ROWS, COLS])
     rank_f32 = pl.cast(rank, target_type=pl.FP32)
     scaled = pl.mul(tile, rank_f32)
     result = pl.add(scaled, tile)   # x * rank + x == x * (rank + 1)
@@ -53,12 +56,12 @@ def scale_by_rank(
 ```
 
 这是**设备 kernel**。它运行在某个设备的 AI 核上，只看到该设备的问题切片
-——此处的 `x` 是 `[1, SIZE]`，即 rank-`r` 的切片。注意与步骤 01 相同的标量
+——此处的 `x` 是 `[ROWS, COLS]`，即 rank-`r` 的切片。注意与步骤 01 相同的标量
 纪律：`rank` 是标量 `INT32`，先转成 `FP32` 再折入向量运算。
 
 ```python
 @pl.jit
-def per_rank(x, y, rank):
+def device_orch(x, y, rank):
     return scale_by_rank(x, y, rank)
 ```
 
@@ -68,22 +71,22 @@ def per_rank(x, y, rank):
 
 ```python
 @pl.jit.host
-def scale_program(
-    x: pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32]],
+def host_orch(
+    x: pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32]],
 ):
     for r in pl.range(pld.world_size()):
-        per_rank(x[r], y[r], r, device=r)
+        device_orch(x[r], y[r], r, device=r)
 ```
 
 **主机编排器**。它在主机 CPU 上运行，持有 world 形状的张量
-`[N_RANKS, 1, SIZE]`，是唯一知道所有设备的函数。它遍历 world，为每个 rank
-分发一次 `per_rank`。
+`[N_RANKS, ROWS, COLS]`，是唯一知道所有设备的函数。它遍历 world，为每个 rank
+分发一次 `device_orch`。
 
 编译/运行形态与步骤 01 相同：
 
 ```python
-compiled = scale_program.compile(
+compiled = host_orch.compile(
     x, y,
     config=RunConfig(
         platform=args.platform,
@@ -105,7 +108,7 @@ golden `y == x * (r+1)` 检查每个 rank 用*自己的*索引缩放*自己的*�
 
 | 症状 | 可能原因 | 修复 |
 | ---- | -------- | ---- |
-| 所有 rank 计算同一 slice | 未从主机循环传递 rank 索引 | 通过 `per_rank(..., r, ...)` 向下传 `r` |
+| 所有 rank 计算同一 slice | 未从主机循环传递 rank 索引 | 通过 `device_orch(..., r, ...)` 向下传 `r` |
 | 主机函数没有 rank 参数 | 混淆了编排器与 kernel | 主机*就是*循环；身份来自 `device=r` |
 | `@pl.jit.incore` 从未在主机上运行 | 忘记哪个装饰器做什么 | kernel = `@pl.jit.incore`；设备包装 = `@pl.jit`；编排器 = `@pl.jit.host` |
 | 每个 rank 计算了两次 | 分发的是 kernel 而非包装 | 主机必须调用 `@pl.jit` 包装，而非直接调用 `@pl.jit.incore` |

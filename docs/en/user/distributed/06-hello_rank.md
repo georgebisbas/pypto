@@ -49,18 +49,19 @@ The kernel — one concept at a time.
 
 ```python
 N_RANKS = 2
+ROWS = 8
+COLS = 8
 
 @pl.jit.incore
 def add_rank(
-    x: pl.Tensor[[1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    x: pl.Tensor[[ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
     rank: pl.Scalar[pl.INT32],
 ):
-    tile = pl.load(x, [0, 0], [1, SIZE])
+    tile = pl.load(x, [0, 0], [ROWS, COLS])
     rank_f32 = pl.cast(rank, target_type=pl.FP32)
-    scaled = pl.mul(tile, rank_f32)
-    result = pl.add(scaled, tile)
-    y = pl.store(result, [0, 0], y)
+    tile = pl.add(tile, rank_f32)
+    y = pl.store(tile, [0, 0], y)
     return y
 ```
 
@@ -68,9 +69,9 @@ def add_rank(
   `rank` comes *after* the tensor arguments. Reversing that order fails at
   runtime with `TaskArgs: cannot add tensor after scalar`.
 - **Scalars live on the AICPU.** `rank` arrives as an `INT32` scalar. The
-  kernel casts it to `FP32` and folds it into *vector* operations (`x*rank +
-  x`). Writing `rank_f32 + 1.0` as scalar arithmetic would be rejected by ptoas
-  (`arith.addf explicitly marked illegal`).
+  kernel casts it to `FP32` and folds it into a *vector* operation (`x +
+  rank`). Writing `rank_f32 + 1.0` as scalar arithmetic would be rejected by
+  ptoas (`arith.addf explicitly marked illegal`).
 - **Cast the parameter, not an expression.** `pl.cast(rank, ...)` on the
   `INT32` parameter is the supported path; casting an index-typed expression
   like `rank + 1` is not (`Cast between float and index types is not
@@ -84,16 +85,16 @@ def per_rank(x, y, rank):
     return add_rank(x, y, rank)
 
 @pl.jit.host
-def rank_program(
-    x: pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32],
-    y: pl.Out[pl.Tensor[[N_RANKS, 1, SIZE], pl.FP32]],
+def hello_rank(
+    x: pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32],
+    y: pl.Out[pl.Tensor[[N_RANKS, ROWS, COLS], pl.FP32]],
 ):
     for r in pl.range(pld.world_size()):
         per_rank(x[r], y[r], r, device=r)
 ```
 
-- `x` and `y` carry the **world shape** `[N_RANKS, 1, SIZE]` — rank `r`'s slice
-  is `x[r]` / `y[r]`.
+- `x` and `y` carry the **world shape** `[N_RANKS, ROWS, COLS]` — rank `r`'s
+  slice is `x[r]` / `y[r]`.
 - The host loop runs `pld.world_size()` times — once per rank — and slices the
   world tensors per rank. `device=r` pins dispatch `r` to device `r`.
 - The host function takes no `rank` argument; it *is* the loop. Rank identity
@@ -102,7 +103,7 @@ def rank_program(
 The harness:
 
 ```python
-compiled = rank_program.compile(
+compiled = hello_rank.compile(
     x, y,
     config=RunConfig(
         platform=args.platform,
@@ -132,7 +133,7 @@ differences; use exact equality if you need a strict guarantee.
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
 | `TaskArgs: cannot add tensor after scalar` | Scalar arg precedes a tensor arg in the child signature | Put all tensors first, scalars last |
-| `arith.addf explicitly marked illegal` | Scalar `FP32` arithmetic on the AI core | Fold constants into vector ops (`x*rank + x`) |
+| `arith.addf explicitly marked illegal` | Scalar `FP32` arithmetic on the AI core | Fold constants into vector ops (`x + rank`) |
 | `Cast between float and index types is not supported` | `pl.cast` on an index-typed expression | Cast the `INT32` parameter first, then do float math as vector ops |
 | Wrong result only on one rank's row | Rank index not used / wrong device mapping | Check the host loop uses `device=r` and slices `x[r]` |
 | Program hangs at dispatch | Device ids not all available | Confirm `-d 0,1` ids exist and are free (`npu-smi info`) |

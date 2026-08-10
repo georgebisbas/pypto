@@ -15,9 +15,10 @@ Concepts introduced:
     (``WaitCmp.Ge``): the cross-rank signal handshake
   - an N-rank barrier for one rendezvous: every rank notifies all peers, then
     waits on every peer -- no data moves
-  - why AtomicAdd + Ge: N ranks write the same signal cell, so the
-    contribution must accumulate (a Set would clobber earlier arrivals);
-    Ge(1) passes when every peer has arrived
+  - why AtomicAdd + Ge: each rank owns a dedicated row (offsets=[my_rank, 0]),
+    so every signal cell has a single writer and a Set would work identically;
+    AtomicAdd is the canonical notify that also generalizes to shared-cell
+    barriers; Ge(1) passes when every peer has arrived
   - ``pld.rank(ctx)`` / ``pld.nranks(ctx)`` derived from ``pld.get_comm_ctx``
   - the reveal: ``pld.tensor.barrier`` provides the same synchronization as
     one call (run with ``--use-builtin``)
@@ -64,10 +65,11 @@ def barrier_handrolled(
     my_rank = pld.rank(ctx)
 
     # Every rank notifies all peers (AtomicAdd), then waits on all peers (Ge).
-    # N ranks write the same cell, so the contribution must accumulate; a Set
-    # would clobber earlier arrivals. This is a single rendezvous -- reusing
-    # the window for another barrier needs a cell reset or a generation-
-    # specific expected threshold.
+    # Each rank owns a dedicated row (offsets=[my_rank, 0]), so every cell has
+    # one writer and a Set would work identically; AtomicAdd is the canonical
+    # notify that also generalizes to shared-cell barriers. This is a single
+    # rendezvous -- reusing the window for another barrier needs a cell reset
+    # or a generation-specific expected threshold.
     for peer in pl.range(N_RANKS):
         if peer != my_rank:
             pld.system.notify(

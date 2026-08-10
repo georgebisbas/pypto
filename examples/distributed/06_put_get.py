@@ -86,7 +86,12 @@ def get_step(
     dst: pld.DistributedTensor[[1, SIZE], pl.FP32],
     signal: pld.DistributedTensor[[1, 1], pl.INT32],
 ):
-    """Chip kernel: pull (get) the next rank's src slice into this rank's dst."""
+    """Chip kernel: pull (get) the next rank's src slice into this rank's dst.
+
+    Each rank notifies the rank that reads from it (the previous rank) and
+    waits for the rank it reads from (the next rank), so the wait covers the
+    get source for any rank count, not just the two-rank case.
+    """
     ctx = pld.get_comm_ctx(src)
     my_rank = pld.rank(ctx)
     nranks = pld.nranks(ctx)
@@ -94,10 +99,13 @@ def get_step(
     local = pl.load(x, [0, 0], [1, SIZE])
     src = pl.store(local, [0, 0], src)
 
-    peer = (my_rank + 1) % nranks
+    get_peer = (my_rank + 1) % nranks
+    # Notify the rank that reads from us (the previous rank); our wait is then
+    # satisfied by exactly the rank we get from (the next rank). nranks is
+    # added before the -1 so the dividend is never negative.
     pld.system.notify(
         signal,
-        peer=peer,
+        peer=(my_rank + nranks - 1) % nranks,
         offsets=[0, 0],
         value=1,
         op=pld.NotifyOp.AtomicAdd,
@@ -109,7 +117,7 @@ def get_step(
         cmp=pld.WaitCmp.Ge,
     )
 
-    pld.tensor.get(dst, peer=peer, src=src)
+    pld.tensor.get(dst, peer=get_peer, src=src)
 
     recv = pl.load(dst, [0, 0], [1, SIZE])
     y = pl.store(recv, [0, 0], y)
