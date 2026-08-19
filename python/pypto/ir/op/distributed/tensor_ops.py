@@ -240,7 +240,9 @@ def allreduce(
     may omit it; SynthesizeAllReduceSignals inserts a private signal before
     downstream lowering. The signal is self-clearing: the lowering restores
     its cells to zero after each call, so one buffer can be reused across
-    back-to-back calls (and, on the InCore rail, inside for/while loops). ``op``
+    back-to-back calls and inside for/while loops. Only an omitted signal is
+    loop-bound on the HOST rail: synthesis cannot allocate one per dynamic
+    iteration, so pass an explicit signal when calling inside a loop. ``op``
     (:class:`ir.ReduceOp`) selects the reduction operator, defaults to
     ``ReduceOp.Sum``, and is packed as an ``int`` attr. ``mode`` selects the
     lowering algorithm: ``"mesh"`` (direct exchange, O(P) windows) or

@@ -960,9 +960,8 @@ def test_explicit_allreduce_eval_stmt_keeps_user_signal():
 
 def test_implicit_allreduce_in_loop_is_rejected():
     """The HOST-rail signal synthesis cannot allocate a fresh signal per dynamic
-    iteration, so a synthesized-signal allreduce inside a loop is rejected.
-    (InCore composites are loop-safe via the self-clearing credit-barrier
-    protocol; lifting the HOST restriction is tracked separately.)
+    iteration, so an allreduce that omits its signal is rejected inside a loop.
+    Passing one explicitly is accepted - see the ``_is_accepted`` cases below.
     """
 
     @pl.program
@@ -981,7 +980,7 @@ def test_implicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="without an explicit signal is not supported inside a for/while"):
         _apply(P)
 
 
@@ -1002,11 +1001,13 @@ def test_implicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
+    with pytest.raises(ValueError, match="without an explicit signal is not supported inside a for/while"):
         _apply(P)
 
 
-def test_explicit_allreduce_in_loop_is_rejected():
+def test_explicit_allreduce_in_loop_is_accepted():
+    """An explicit signal is reusable across iterations, so a `for` loop is allowed."""
+
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -1025,11 +1026,14 @@ def test_explicit_allreduce_in_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    # An explicit signal needs no synthesis, and the lowered kernel restores its
+    # cells to zero before returning, so carrying it across iterations is safe.
+    _apply(P)
 
 
-def test_explicit_allreduce_in_while_loop_is_rejected():
+def test_explicit_allreduce_in_while_loop_is_accepted():
+    """Same as the `for` case: only a synthesized signal is loop-bound."""
+
     @pl.program
     class P:
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -1048,8 +1052,9 @@ def test_explicit_allreduce_in_while_loop_is_rejected():
                 data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
             return data
 
-    with pytest.raises(ValueError, match="allreduce is not supported inside a for/while loop"):
-        _apply(P)
+    # An explicit signal needs no synthesis, and the lowered kernel restores its
+    # cells to zero before returning, so carrying it across iterations is safe.
+    _apply(P)
 
 
 def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
