@@ -76,16 +76,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // a local self-notify restores every cell to 0 so the signal is reusable
   // across calls.
   //
-  // Use NotifyOp::Set(0) instead of AtomicAdd(-1): on non-coherent NPU silicon
-  // a new AIV task dispatch may read a stale cached value for the signal cell;
-  // AtomicAdd reads-modifies-writes that stale value, while Set unconditionally
-  // writes 0.  Set is safe here because the TWAIT above guarantees all peers'
-  // AtomicAdd credits have already landed — there is no in-flight write that
-  // Set could clobber.
+  // AtomicAdd(-1), not Set(0): the reset must stay commutative with a fast
+  // peer's next-call +1. A peer that has already cleared its own cells may
+  // re-enter this kernel and notify us again while we are still here; Set(0)
+  // would wipe that in-flight credit and deadlock the peer's following wait,
+  // whereas the subtraction commutes with it. Exactly one credit per peer cell
+  // arrives per call, so -1 restores zero.
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
-    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
+    pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
   }
   pipe_barrier(PIPE_ALL);
 }
