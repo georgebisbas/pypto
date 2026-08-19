@@ -84,13 +84,7 @@ static constexpr int kMaxSupportedRanks = 16;
 static constexpr uint64_t kAccTileAddr = 0x0;
 static constexpr uint64_t kRecvTileAddr = 0x10000;
 
-// A single i32 signal cell, and one UB-wide slice of one tensor row. Every
-// signal extent is 1, so its outer strides are never exercised; they mirror a
-// [rows, 1] DN view.
-using SignalShape = Shape<1, 1, 1, 1, 1>;
-using SignalStride = Stride<-1, -1, -1, -1, -1>;
-using SignalCell = GlobalTensor<int32_t, SignalShape, SignalStride, Layout::DN>;
-
+// One UB-wide slice of one tensor row.
 using RowShape = Shape<1, 1, 1, 1, -1>;
 using RowStride = Stride<-1, -1, -1, -1, -1>;
 using RowSlice = GlobalTensor<{{dtype_cpp}}, RowShape, RowStride, Layout::ND>;
@@ -152,14 +146,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // and wait until every peer's are too, before any remote read starts.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    SignalCell cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer), SignalShape(1, 1, 1, 1, 1),
-                    SignalStride(1, 1, 1, 1, rows));
+    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    SignalCell cell(signal_base + peer, SignalShape(1, 1, 1, 1, 1), SignalStride(1, 1, 1, 1, rows));
+    pto::comm::Signal cell(signal_base + peer);
     pto::comm::TWAIT(cell, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
     dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
   }
@@ -213,14 +206,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // this window, until every peer has finished reading from it.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    SignalCell cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer), SignalShape(1, 1, 1, 1, 1),
-                    SignalStride(1, 1, 1, 1, rows));
+    pto::comm::Signal cell(CommRemotePtr(comm_ctx, signal_base + my_rank, peer));
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    SignalCell cell(signal_base + peer, SignalShape(1, 1, 1, 1, 1), SignalStride(1, 1, 1, 1, rows));
+    pto::comm::Signal cell(signal_base + peer);
     pto::comm::TWAIT(cell, static_cast<int32_t>(2), pto::comm::WaitCmp::GE);
     dcci((__gm__ void *)0, cache_line_t::ENTIRE_DATA_CACHE);
   }
@@ -231,7 +223,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // Set(0) here would wipe it and deadlock that peer's following wait.
   for (int64_t peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    SignalCell cell(signal_base + peer, SignalShape(1, 1, 1, 1, 1), SignalStride(1, 1, 1, 1, rows));
+    pto::comm::Signal cell(signal_base + peer);
     pipe_barrier(PIPE_ALL);
     pto::comm::TNOTIFY(cell, static_cast<int32_t>(-2), pto::comm::NotifyOp::AtomicAdd);
   }
