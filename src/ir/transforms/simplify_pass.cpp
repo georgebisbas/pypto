@@ -601,10 +601,30 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
           new_tv = TensorView(std::move(new_stride), tv.layout, std::move(new_vs), tv.pad);
         }
       }
+      // Remap the window_buffer_ back-reference in lockstep with the
+      // CommDomainScopeStmt slots. Folding a WindowBuffer's size_ (e.g.
+      // `world_size * 1 * 4` -> `world_size * 4` on a synthesized signal)
+      // mints a FRESH WindowBuffer via VisitExpr_(WindowBufferPtr) and records
+      // it in var_remap_; the scope slots pick that up. If this rebuild left
+      // window_buffer_ pointing at the pre-fold object, the view var and its
+      // scope slot would diverge and DistributedCodegen's ScopeForWindowBuffer
+      // (pointer-identity scan) would fail with "not a slot of any open
+      // CommDomainScopeStmt".
+      std::optional<WindowBufferPtr> new_wb;
+      if (auto distributed = As<DistributedTensorType>(type)) {
+        new_wb = distributed->window_buffer_;
+        if (distributed->window_buffer_.has_value()) {
+          auto remapped = As<WindowBuffer>(VisitExpr(*distributed->window_buffer_));
+          INTERNAL_CHECK(remapped) << "Simplify: DistributedTensorType window_buffer_ mutated to "
+                                      "non-WindowBuffer";
+          if (remapped.get() != distributed->window_buffer_->get()) changed = true;
+          new_wb = std::move(remapped);
+        }
+      }
       if (!changed) return type;
       if (auto distributed = As<DistributedTensorType>(type)) {
         return std::make_shared<DistributedTensorType>(std::move(new_shape), t->dtype_, t->memref_,
-                                                       std::move(new_tv), distributed->window_buffer_);
+                                                       std::move(new_tv), std::move(new_wb));
       }
       return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
     }

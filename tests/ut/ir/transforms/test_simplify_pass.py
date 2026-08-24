@@ -26,6 +26,8 @@ import pypto.language.distributed as pld
 import pytest
 from pypto import ir, passes
 
+_OP_PLD_TENSOR_ALLREDUCE = ir.get_op("pld.tensor.allreduce").name
+
 # ============================================================================
 # Pass metadata
 # ============================================================================
@@ -1673,6 +1675,92 @@ class TestDeadIfReturnVarsDCE:
 
         assert has_tensor_write(then_stmts), "tensor.write side-effect in then branch must survive phi-prune"
         assert has_tensor_write(else_stmts), "tensor.write side-effect in else branch must survive phi-prune"
+
+
+class TestDistributedWindowBufferRemap:
+    def test_window_buffer_remapped_in_lockstep_with_scope_slot(self):
+        """Simplify folding a synthesized signal's window-buffer size
+        (``world_size * 1 * 4`` → ``world_size * 4``) must remap the
+        ``DistributedTensorType.window_buffer_`` back-reference in lockstep
+        with the ``CommDomainScopeStmt`` slot — both must point at the SAME
+        post-fold ``WindowBuffer``. Regression: the type rebuild left
+        ``window_buffer_`` on the pre-fold object, so
+        ``DistributedCodegen::ScopeForWindowBuffer``'s pointer-identity scan
+        failed with "not a slot of any open CommDomainScopeStmt".
+        """
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+                return data
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+                data = pld.window(data_buf, [256], dtype=pl.FP32)
+                for r in pl.range(pld.world_size()):
+                    self.chip_orch(data, device=r)
+                data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+                return data
+
+        # NOTE: run under a BEFORE_AND_AFTER-only context (no print/parse
+        # roundtrip) — the materialize pass's output wraps the body in
+        # CommDomainScopeStmt and stamps window_buffer_ back-references on
+        # view Vars, neither of which the printer/parser pair roundtrips
+        # (same override the materialize test file applies to all its passes).
+        # The in-memory structural check below is the point of this test.
+        instruments: list[passes.PassInstrument] = [
+            passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with passes.PassContext(instruments):
+            materialized = passes.materialize_comm_domain_scopes()(passes.synthesize_allreduce_signals()(P))
+            simplified = passes.simplify()(materialized)
+        host = next(f for f in simplified.functions.values() if f.name == "host_orch")
+
+        # `ir.flatten_to_stmts` does not descend into CommDomainScopeStmt
+        # bodies, so walk recursively (the materialize test file uses the same
+        # shape for the same reason).
+        def walk(stmt):
+            out = [stmt]
+            if isinstance(stmt, ir.SeqStmts):
+                for child in stmt.stmts:
+                    out.extend(walk(child))
+            if isinstance(stmt, ir.ScopeStmt):
+                out.extend(walk(stmt.body))
+            if isinstance(stmt, ir.ForStmt):
+                out.extend(walk(stmt.body))
+            if isinstance(stmt, ir.WhileStmt):
+                out.extend(walk(stmt.body))
+            return out
+
+        stmts = walk(host.body)
+
+        scopes = [s for s in stmts if isinstance(s, ir.CommDomainScopeStmt)]
+        assert len(scopes) == 1
+        signal_slots = [
+            slot for slot in scopes[0].slots if slot.base.name_hint.startswith("__allreduce_signal_buf_")
+        ]
+        assert len(signal_slots) == 1
+
+        allreduce_assigns = [
+            s
+            for s in stmts
+            if isinstance(s, ir.AssignStmt)
+            and isinstance(s.value, ir.Call)
+            and s.value.op.name == _OP_PLD_TENSOR_ALLREDUCE
+        ]
+        assert len(allreduce_assigns) == 1
+        allreduce_call = allreduce_assigns[0].value
+        assert isinstance(allreduce_call, ir.Call)
+        signal_var = allreduce_call.args[1]
+        assert isinstance(signal_var, ir.Var)
+        signal_type = signal_var.type
+        assert isinstance(signal_type, ir.DistributedTensorType)
+
+        # The view Var's window_buffer back-reference must be the SAME object
+        # as the scope slot (both post-fold).
+        assert signal_type.window_buffer is signal_slots[0]
 
 
 if __name__ == "__main__":

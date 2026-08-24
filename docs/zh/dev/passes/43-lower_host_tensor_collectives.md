@@ -142,6 +142,10 @@ notify 与 count 发布竞争。`LowerHostTensorCollectives` 在生成 builtin d
 它必须满足 `root < participating device count`。完全动态的 "all device" 域在编译期无法
 校验（那里没有可用的设备数）——与 signal 容量检查存在相同的已记录限制。
 
+signal 可复用（对自清理的 host builtin 而言）：这些 kernel 会在每次调用后
+自清理屏障 cell（信用屏障尾声），因此一个合成或用户分配的 signal 可以支撑
+任意数量的连续调用或循环迭代，无需重新分配。
+
 `all_to_all_v` 的单次使用 Set(1)/wait≥1 信号无法在 `host_orch` 的
 `for`/`while` 循环中复用——本 pass 之前紧邻运行的
 [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md) 会提前

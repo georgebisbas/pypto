@@ -164,6 +164,11 @@ subset it must satisfy `root < participating device count`. The fully-dynamic
 "all device" domain cannot be checked at compile time (no device count is
 known there) — the same documented limitation as the signal-capacity check.
 
+Signals are reusable for the self-clearing host builtins: those kernels clear
+their barrier cells after every call (credit-barrier epilogue), so one
+synthesized or user-allocated signal can back any number of consecutive or
+loop-carried collective calls without re-allocation.
+
 `all_to_all_v`'s single-use Set(1)/wait≥1 signal cannot be reused across a
 `for`/`while` loop in `host_orch` — [`MaterializeCommDomainScopes`](42-materialize_comm_domain_scopes.md),
 which runs immediately before this pass, rejects that case up front (the same

@@ -29,26 +29,41 @@ allocation 处理，并放入 allreduce data buffer 所属的通信域。
 对每个 host-orchestration 函数：
 
 1. 收集当前 program 中已有变量名。
-2. 访问直接出现在 `AssignStmt`、`EvalStmt`、`ReturnStmt` 中的
-   `pld.tensor.allreduce`。
-3. 已经传入显式 signal 的调用保持不变。
-4. 对只传入 target tensor 的调用，生成 fresh 的私有 signal buffer 和
-   signal view 名字。
-5. 在 allreduce 之前插入普通 statement-level binding：
+2. 预扫描函数体：是否携带 `pld.tensor.allreduce` 调用，其中是否有省略
+   signal 参数的调用。
+3. 若函数存在隐式 signal（单参数）调用，则按数据 buffer 的血缘（lineage，
+   沿 `pld.tensor.window` 回溯到 `pld.tensor.alloc_window_buffer` 的 LHS）将
+   调用分组，并为每个分组把一个共享 signal binding（world_size /
+   alloc_window_buffer / window）提升到函数体顶部：
 
-```python
-__allreduce_signal_world_size_0 = pld.system.world_size()
-__allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * core_num * pl.INT32.get_byte())
-__allreduce_signal_0 = pld.tensor.window(
-    __allreduce_signal_buf_0,
-    [__allreduce_signal_world_size_0, core_num],
-    dtype=pl.INT32,
-)
-data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
-```
+    ```python
+    __allreduce_signal_world_size_0 = pld.system.world_size()
+    __allreduce_signal_buf_0: pl.Ptr = pld.tensor.alloc_window_buffer(__allreduce_signal_world_size_0 * core_num * pl.INT32.get_byte())
+    __allreduce_signal_0 = pld.tensor.window(
+        __allreduce_signal_buf_0,
+        [__allreduce_signal_world_size_0, core_num],
+        dtype=pl.INT32,
+    )
+    ```
 
-合成 signal 使用 rank-2 `[world_size, core_num]`，buffer 字节数也使用相同的
-lane 数。默认 `core_num=1`，因此保留原有表示和行为。
+4. 把每个隐式 signal 的 `pld.tensor.allreduce` 调用 —— 包括 `for` / `while`
+   循环内的调用 —— 改写为使用该共享 signal：
+
+    ```python
+    data = pld.tensor.allreduce(data, __allreduce_signal_0, op=pld.ReduceOp.Sum)
+    ```
+
+5. 已经传入显式 signal 的调用保持不变；return 位置的调用仍然提升为
+   赋值语句，以便 host lowering 派发。
+
+合成 signal 使用 rank-2 `[world_size, core_num]`，其中 `core_num` 是该血缘
+分组内所有隐式 signal 调用请求的最大 lane 数（默认 `core_num=1` 保留原有的
+单 lane 表示），buffer 字节数也使用相同的 lane 数。每个数据 buffer 血缘
+（设备覆盖范围）分组共享一个 binding，并被该 buffer 上所有隐式 signal 调用
+复用 —— 这是正确的，因为 host builtin kernel 会在每次调用后自清理屏障 cell，
+因此共享 signal 在连续调用与循环迭代之间都可以安全复用。不同的数据 buffer
+会得到不同的 signal，因此一个函数内针对不同设备子集的隐式 allreduce 不会被
+合并进同一个 comm-domain scope。
 
 ## Print / Parse Round Trip
 
@@ -65,10 +80,14 @@ alloc / window / allreduce 链路。
 以下情况会抛出 `pypto::ValueError`：
 
 - allreduce 位置参数数量不是 `target` 或 `target, signal`；
-- allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value；
-- **省略 signal 的** allreduce 出现在 `for` / `while` 循环内。
+- allreduce 作为嵌套表达式出现，而不是直接赋值、表达式语句或 return value。
 
-该循环限制只针对 HOST 通道上*被合成*的 signal：`SynthesizeAllReduceSignals` 把分配插入到 allreduce 语句之前，无法放入动态循环内部（每次迭代在同一名字下重新分配，且每个 rank 必须落在同一个对称 window 上）。显式传入 signal 时无需合成，且 lower 后的 kernel 会在返回前把信号槽恢复为零，因此显式 signal 可以跨迭代复用。由 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议) lower 的 InCore 组合算子则因该 pass 会发出自清理信用屏障尾声而具备循环安全性。
+`for` / `while` 循环内的隐式 signal 调用会被接受：该调用所属数据 buffer 血缘
+的共享 signal 会在每次迭代中被复用，这是正确的，因为 host builtin kernel
+（`builtin.tensor.allreduce` / `builtin.tensor.allreduce_ring`，由
+`LowerHostTensorCollectives` lower）通过信用屏障尾声在每次调用后自清理屏障
+cell。由 [`LowerCompositeOps`](12-lower_composite_ops.md#屏障-信号协议) lower
+的 InCore 组合算子同样具备循环安全性 —— 该 pass 会发出自清理尾声。
 
 ## Pass 属性
 

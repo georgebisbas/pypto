@@ -40,6 +40,12 @@ inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::
 //    and wraps the host_orch body in nested CommDomainScopeStmts (one per
 //    inferred comm domain).
 
+// SynthesizeAllReduceSignals assumes SSA-form input: ResolveLineageKey walks
+// each data Var's single defining AssignStmt RHS (var_defs is single-assignment,
+// def-dominates-use). IRProperty::SSAForm is deliberately NOT declared required
+// — kInitMemRefProperties invalidates it and nothing re-produces it before this
+// pass runs — so multi-assignment robustness is a tracked follow-up together
+// with MaterializeCommDomainScopes (same gap).
 inline const PassProperties kSynthesizeAllReduceSignalsProperties{};
 
 inline const PassProperties kMaterializeCommDomainScopesProperties{
