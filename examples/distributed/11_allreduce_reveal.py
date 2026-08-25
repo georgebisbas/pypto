@@ -44,12 +44,18 @@ SIZE = 64
 
 
 def build_reveal_allreduce(nr: int, mode: str):
-    """Build the builtin allreduce program for a compile-time rank count ``nr``.
+    """Build the builtin allreduce program for a rank count ``nr`` and ``mode``.
 
-    A rank-count factory (as in steps 08-10) because the signal shape depends
-    on both ``nr`` and the mode: mesh is ``[nr, 1]``, ring is ``[2*(nr-1), nr]``
-    (row per round). The mode is folded in as a closure constant, so one
-    source builds either variant.
+    A factory over ``(nr, mode)``, and for a different reason than steps 09/10:
+    the builtin owns the chunking, so no **tile shape** here depends on the
+    rank count — ``nr`` need not be compile-time at all (the ring layout, the
+    more constrained of the two, compiles and passes its golden with a
+    ``pl.dynamic`` rank count). What must be fixed when the kernel is traced is
+    ``mode``: it picks both the lowering ``pld.tensor.allreduce`` emits and the
+    signal layout the kernel is annotated with, and those are two different
+    shapes, not two extents of one — mesh ``[nr, 1]``, ring ``[2*(nr-1), nr]``
+    (row per round). Folding ``nr`` in beside it lets one source spell both
+    layouts and build either variant (pick it with ``--mode``).
     """
     total_rounds = 2 * (nr - 1)
     if mode == "ring":

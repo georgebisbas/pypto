@@ -44,11 +44,14 @@ SIZE = 64
 def build_two_phase_allreduce(nr: int):
     """Build the two-phase allreduce program for a compile-time rank count ``nr``.
 
-    A rank-count factory (as in step 08) because the window shapes depend on
-    ``nr``: the signal is a ``[2, nr]`` per-rank-row matrix and chunk offsets
-    are ``nr``-sized — window shapes must be statically known, so ``nr`` is a
-    compile-time closure constant and the same source serves any P where
-    ``SIZE`` divides evenly (pick it with ``-d``).
+    A rank-count factory — the first step that needs one. Step 08 has none: its
+    signal row count stays ``pl.dynamic``. What forces a compile-time ``nr``
+    here is ``chunk = SIZE // nr``, used as a **tile shape** (the ``[1, chunk]``
+    on every ``pl.load`` / ``remote_load`` below), and tile shapes must be known
+    when the kernel is compiled. The ``[2, nr]`` signal then falls out of the
+    same constant for free — but a signal shape on its own would not have
+    required it. One source still serves any P that divides ``SIZE`` evenly
+    (pick it with ``-d``).
     """
     if SIZE % nr != 0:
         raise ValueError(f"SIZE={SIZE} must be divisible by the rank count, got {nr}")

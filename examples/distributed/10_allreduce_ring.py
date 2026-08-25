@@ -45,9 +45,12 @@ SIZE = 64
 def build_ring_allreduce(nr: int):
     """Build the ring allreduce program for a compile-time rank count ``nr``.
 
-    A rank-count factory because the signal is ``[2*(nr-1), nr]`` (row per
-    round) and the chunk size is ``SIZE // nr`` — both must be statically
-    known, so ``nr`` is a compile-time closure constant (as in steps 08/09).
+    A rank-count factory for the same single reason as step 09:
+    ``chunk = SIZE // nr`` is a **tile shape** (the ``[1, chunk]`` on every load
+    below), and tile shapes must be known when the kernel is compiled. The
+    ``[2*(nr-1), nr]`` signal is then written from the same constant, but a
+    signal row count alone does not force it — step 08 keeps its rows dynamic
+    and needs no factory at all.
     """
     if SIZE % nr != 0:
         raise ValueError(f"SIZE={SIZE} must be divisible by the rank count, got {nr}")

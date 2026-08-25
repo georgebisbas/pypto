@@ -59,6 +59,13 @@ y = pl.store(recv, [0, 0], y)
   takes `[nr, 1]`; ring takes `[2*(nr-1), nr]` — exactly the row-per-round
   signal step 10 taught. The factory folds both `nr` and `mode` in, so one
   source builds either variant (the class-form pattern from steps 08-10).
+- **Why a factory here is not the steps 09/10 story.** Those two need a
+  compile-time `nr` because their chunk size `SIZE // nr` is a **tile shape**.
+  Here the builtin owns the chunking, so nothing is a tile shape sized by the
+  rank count, and `nr` could stay dynamic. What has to be fixed when the kernel
+  is traced is `mode`: it picks the lowering *and* the signal layout, and mesh
+  and ring are two different shapes rather than two extents of one. `nr` is
+  folded in beside it so a single source can spell both layouts.
 - **What the builtin accepts (read this twice):** `pld.tensor.allreduce` — the
   **InCore composite** lowering used here — takes the full `ReduceOp` family
   (`Sum`/`Max`/`Min`/`Prod`) and `FP16`/`FP32` in **both** modes — the mesh and

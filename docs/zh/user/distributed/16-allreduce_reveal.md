@@ -55,6 +55,12 @@ y = pl.store(recv, [0, 0], y)
 - **信号是你的，其形状告诉你处于哪种模式。** mesh 用 `[nr, 1]`；ring 用
   `[2*(nr-1), nr]`——正是步骤 10 教过的每轮一行信号。工厂把 `nr` 与 `mode`
   都折叠进来，于是一份源码可构建任一变体（步骤 08-10 的 class-form 模式）。
+- **这里用工厂的理由与步骤 09/10 不同。** 那两步需要编译期 `nr`，是因为其分块
+  大小 `SIZE // nr` 是 **tile 形状**。而这里分块由内置原语自己负责，没有任何
+  形状是按 rank 数量确定的 tile 形状，`nr` 完全可以保持动态。真正必须在 kernel
+  被 trace 时确定的是 `mode`：它同时决定展开出哪条 lowering 以及 kernel 上标注
+  的信号布局，而 mesh 与 ring 是两种不同的形状，并非同一形状的两种尺寸。把
+  `nr` 一并折叠进来，只是为了让一份源码能写出这两种布局。
 - **内置原语接受什么（请读两遍）：** `pld.tensor.allreduce`——这里用到的
   **InCore composite** lowering——在**两种模式**下都接受完整 `ReduceOp`
   家族（`Sum`/`Max`/`Min`/`Prod`）与 `FP16`/`FP32`——mesh 与 ring 的 ST 套件
