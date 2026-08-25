@@ -143,7 +143,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     // row-major [NR*max_recv, SIZE] layout, so it is flattened into one
     // 1D-chunked TPUT loop (same tiling shape as symmetric all_to_all's
     // single-row loop, generalized to max_recv*row_numel elements).
-    int64_t block_numel = max_recv * row_numel;
+    // SPIKE (#2524, throwaway): bound the pushed block by the runtime row
+    // count instead of the full max_recv capacity, so only the payload
+    // crosses the wire. rows64 is already clamped above at max_recv.
+    // NOT production-ready: no zero floor on rows64 (see plan Phase 1); a
+    // negative send_counts yields block_numel < 0 and the loop simply does
+    // not execute, which happens to be safe here but is not by design.
+    int64_t block_numel = rows64 * row_numel;
     for (int64_t base = 0; base < block_numel; base += tile_cols) {
       int64_t chunk64 = block_numel - base;
       if (chunk64 > tile_cols) chunk64 = tile_cols;

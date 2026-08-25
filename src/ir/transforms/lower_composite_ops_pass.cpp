@@ -2154,10 +2154,13 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
         // 2D target offsets: target[my_rank * MAX_RECV, :]
         auto dst_offsets = std::make_shared<MakeTuple>(
             std::vector<ExprPtr>{my_base, std::make_shared<ConstInt>(0, DataType::INDEX, span)}, span);
-        // Static transfer shape: [MAX_RECV, SIZE] — required by PTOAS
-        // (pto.comm.tput partition-view dims must be static).
-        auto transfer_shape =
-            std::make_shared<MakeTuple>(std::vector<ExprPtr>{max_recv_expr, size_expr}, span);
+        // SPIKE (#2524, throwaway): dynamic transfer shape [rows, SIZE] so only
+        // the runtime row count crosses the wire. PTOAS accepts dynamic
+        // partition-view dims (TPutOp::verify -> AllowDynamicPartitionView);
+        // pld.tile.put takes an explicit [1, SIZE] stage and its
+        // ValidateStageFitsTransfer skips dynamic dims, so no chunk_rows attr.
+        // NOT production-ready: `rows` has no zero floor here (see plan Phase 1).
+        auto transfer_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows, size_expr}, span);
         body.Bind("aav_put",
                   reg.Create("pld.tile.put",
                              {target, dest_var, input, put_stage, dst_offsets, src_offsets, transfer_shape},
