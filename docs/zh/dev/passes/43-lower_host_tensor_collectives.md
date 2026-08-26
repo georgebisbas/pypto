@@ -140,6 +140,12 @@ Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `NeighborBarrier`（只通知/等待左右两个 ring 邻居）——在 NPU 上安全是因为 TPUT
 写流水线保证数据先于信号可见，而旧的拉取（pull）模型（TLOAD/TSTORE）不具备该保证。
 
+ring 内核是**自清零（self-clearing）**的：最终屏障之后，尾声（epilogue）把每个已使用的
+barrier 行恢复为 0（对每个带信用的单元做本地 `TNOTIFY(-1, AtomicAdd)`——
+`NeighborBarrier` 每轮是两个邻居单元，`RoundBarrier` 回退路径是所有 P−1 个单元），
+因此单个 signal buffer 可以像其它 host builtin（#2279）一样在连续调用间复用。
+`nranks == 2` 时两个邻居收敛到同一个 peer，该唯一信用单元携带两个 +1，用两个 −1 恢复。
+
 HOST collective 的所有 window 操作数——data 与 signal 都是如此——必须解析为两两不同的
 `WindowBuffer` 分配。同一个 `alloc_window_buffer` 上的两个 `pld.window()` view
 在 in-kernel TPUT/notify 下是跨进程数据竞争：data 对 data 是 reduce 覆盖，

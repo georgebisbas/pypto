@@ -161,6 +161,14 @@ synchronisation uses the O(1) `NeighborBarrier` (notify/wait the two ring
 neighbours only) — safe on NPU because the TPUT write pipeline orders the data
 ahead of the signal, which the old pull model (TLOAD/TSTORE) did not.
 
+The ring kernel is **self-clearing**: after the final barrier its epilogue
+restores every used barrier row to zero (a local `TNOTIFY(-1, AtomicAdd)` on
+each credited cell — the two neighbour cells per round for `NeighborBarrier`,
+all P−1 cells for the `RoundBarrier` fallback), so a single signal buffer can
+be reused across back-to-back calls exactly like the other host builtins
+(#2279).  For `nranks == 2` both neighbours collapse onto one peer, so that
+single credited cell carries two +1s and is restored with two −1s.
+
 All window operands of a HOST collective — data and signal alike — must
 resolve to pairwise distinct `WindowBuffer` allocations. Two `pld.window()`
 views over the same `alloc_window_buffer` are a cross-process data race under
