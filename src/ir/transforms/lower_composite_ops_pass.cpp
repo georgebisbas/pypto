@@ -1534,10 +1534,12 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
   // nothing locally; the push performs the store.  The transfer extent is the
   // exact (possibly ragged) valid_cols with the staging tile narrowed to it
   // (PTOAS >= v0.55 dynamic partition-view shapes).  The ready barrier
-  // (generation 2k+1) guarantees the pushed slot's data is valid (the
-  // cumulative generation count includes the previous step's push-done
-  // notifies); the push-done barrier (generation 2k+2) guarantees the copy is
-  // visible before any rank reads it at the next step.
+  // (generation 2k+1) guarantees the slot being forwarded holds valid data —
+  // not because the counters carry credit across rounds (each round uses its
+  // own signal row, so row k starts at zero), but because every rank must pass
+  // the previous round's push-done barrier before it enters round k.  The
+  // push-done barrier (generation 2k+2) then guarantees the copy is visible
+  // before any rank reads it at the next step.
   b.EmitFor(
       "ag_step", zero_idx, nr_minus_one, one_idx,
       [&](LoweringBuilder& body, const VarPtr& ag_step_var) {
@@ -1571,9 +1573,11 @@ ExprPtr LowerTensorRingAllReduceRule(const CallPtr& call, const std::vector<Expr
 
               auto chunk_id = MakeFloorDiv(subcol, chunk_cols, span);
 
-              // ---- Ready barrier: all ranks' previous-step pushes have landed
-              // (the cumulative generation includes them), so the slot being
-              // forwarded holds valid data.
+              // ---- Ready barrier: every rank passes the previous round's
+              // push-done barrier before entering this round, so the round-k-1
+              // push into the slot being forwarded has landed and is visible —
+              // the slot holds valid data.  (Counters are per-round: row k
+              // starts at zero and carries no credit from row k-1.)
               auto ready_epoch_idx = MakeAdd(MakeMul(chunk_id, two_idx, span), one_idx, span);
               auto ready_epoch = chunk_body.Bind(
                   "ag_ready_epoch", std::make_shared<ir::Cast>(ready_epoch_idx, DataType::INT32, span), span);

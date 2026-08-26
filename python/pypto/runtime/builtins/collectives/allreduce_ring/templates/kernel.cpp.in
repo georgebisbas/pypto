@@ -118,6 +118,13 @@ AICORE inline void RoundBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_
 // pull-model NeighborBarrier failed on silicon (TSTORE + TLOAD do not order);
 // with TPUT the write pipeline provides the ordering — the canonical pattern
 // verified in simpler #1383 at P=2/4.
+//
+// For nranks == 2 both neighbours resolve to the same peer (left == right,
+// e.g. rank 0's neighbours are both rank 1), so each signal cell receives two
+// AtomicAdd notifies and is observed twice through the same GE 1 waits.  This
+// is safe because the signal buffer is freshly zeroed per allreduce call — the
+// two waits simply observe the shared cell again once the peer's pushed data
+// is visible.
 AICORE inline void NeighborBarrier(__gm__ CommContext *ctx, __gm__ int32_t *signal_row, int my_rank,
                                    int nranks) {
   const int left = (my_rank - 1 + nranks) % nranks;
