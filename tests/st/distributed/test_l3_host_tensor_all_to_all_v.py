@@ -30,11 +30,13 @@ push-based TPUT pattern with FIVE window-bound resources:
      window-bound ``DistributedTensor`` — ``EmitBuiltinWindowCollectiveDispatch``
      has no dispatch path for a plain ``Tensor`` arg. A real ergonomic cost of
      the narrowing, not a test artifact.
-  3. **All-to-all-v** (``builtin.tensor.all_to_all_v``): the kernel pushes the
-     full ``MAX_RECV``-row capacity block per destination into ``data_buf``,
-     publishes the clamped ``min(send_counts[dest], MAX_RECV)`` into peer
-     ``recv_counts[my_rank, 0]`` via TNOTIFY, and synchronises with one
-     barrier.
+  3. **All-to-all-v** (``builtin.tensor.all_to_all_v``): the kernel pushes only
+     ``rows = clamp(send_counts[dest], 0, MAX_RECV)`` rows per destination into
+     ``data_buf`` — the padding up to ``MAX_RECV`` never crosses the wire —
+     publishes that same clamped count into peer ``recv_counts[my_rank, 0]``
+     via TNOTIFY, and synchronises with one barrier. The clamp is two-sided and
+     identical to ``LowerTensorAllToAllVRule``'s, keeping the HOST and InCore
+     rails bit-for-bit identical on the wire for every input.
   4. **Consume** (``consume_step``): each rank reads ``recv_counts`` to learn
      how many rows each source actually sent, then reads back only those valid
      rows from ``data_buf``.
@@ -216,10 +218,9 @@ class TestL3HostTensorAllToAllV:
 
         # Rank r sends to dest d: rows dest*mr+k for k=0..n_rows-1.
         # Value = r*1000 + d*100 + k*10 + j%10 (same formula as the InCore ST).
-        # The TPUT transfers the full per-destination capacity block (max_recv
-        # rows, derived at kernel entry from the runtime nranks); rows beyond
-        # n_rows are sent as well — the receiver uses recv_counts to skip the
-        # unwritten window holes.
+        # The TPUT transfers only [n_rows, SIZE] per destination — rows beyond
+        # n_rows are never pushed. The receiver uses recv_counts to identify the
+        # valid rows; the rest of its capacity slot stays unwritten.
         inputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         send_counts = torch.zeros((nr, nr, 1), dtype=torch.int32)
         for r in range(nr):
@@ -251,6 +252,117 @@ class TestL3HostTensorAllToAllV:
                     assert torch.allclose(got_row, expected_row, atol=1e-5), (
                         f"P={nr} rank={rank} src={src} row={k}: "
                         f"max diff = {(got_row - expected_row).abs().max().item()}"
+                    )
+
+
+def _effective_rows(count: int, max_recv: int) -> int:
+    """Rows actually transferred and published: ``clamp(count, 0, MAX_RECV)``."""
+    return max(0, min(count, max_recv))
+
+
+# Deliberately duplicated from the InCore ST
+# (``collectives/test_l3_tensor_all_to_all_v_intrinsic.py``) rather than
+# imported: the point is to drive BOTH lowering rails independently with the
+# same counts against the same golden. If the rails ever diverge on the wire,
+# one of the two files fails. Keep the two case tables in sync.
+_SKEW_CASES = {
+    "zero_and_full": lambda nr, mr: [[0 if d % 2 == 0 else mr for d in range(nr)] for _ in range(nr)],
+    "one_and_full": lambda nr, mr: [[1 if d % 2 == 0 else mr for d in range(nr)] for _ in range(nr)],
+    "over_capacity": lambda nr, mr: [[mr + 3 for _ in range(nr)] for _ in range(nr)],
+    "negative": lambda nr, mr: [[-2 if d % 2 == 0 else mr for d in range(nr)] for _ in range(nr)],
+}
+
+
+class TestL3HostTensorAllToAllVSkew:
+    """HOST-rail boundary coverage: 0, 1, capacity, over-capacity, negative counts."""
+
+    @pytest.mark.parametrize("case", sorted(_SKEW_CASES))
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_host_all_to_all_v_skewed_counts(self, test_config, device_ids, n_ranks, case):
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"host all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr = n_ranks
+        mr = MAX_RECV
+        total = nr * mr
+        raw = _SKEW_CASES[case](nr, mr)
+
+        compiled = ir.compile(
+            _build_host_all_to_all_v_program(nr, mr),
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
+        )
+
+        # Fill every destination's FULL capacity slot so an over-send would be
+        # visible as written padding rows below. ``salt`` keeps each
+        # (case, n_ranks) payload unique: window memory is not zero-initialised
+        # and persists across tests in the same process, so an unwritten row can
+        # otherwise hold the identical pattern an earlier test wrote — which is
+        # indistinguishable from a real over-send and fails spuriously.
+        salt = (sorted(_SKEW_CASES).index(case) + 1) * 100000 + nr * 10000
+        inputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        send_counts = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        for r in range(nr):
+            for d in range(nr):
+                send_counts[r, d, 0] = raw[r][d]
+                base = d * mr
+                for k in range(mr):
+                    for j in range(SIZE):
+                        inputs[r, base + k, j] = float(salt + r * 1000 + d * 100 + k * 10 + j % 10)
+
+        outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        compiled(inputs, send_counts, outputs, recv_outputs)
+
+        for rank in range(nr):
+            for src in range(nr):
+                n_rows = _effective_rows(raw[src][rank], mr)
+
+                got_count = int(recv_outputs[rank, src, 0].item())
+                assert got_count == n_rows, (
+                    f"P={nr} case={case} rank={rank} src={src}: recv_counts={got_count} "
+                    f"!= clamped({raw[src][rank]}) = {n_rows}"
+                )
+
+                base = src * mr
+                for k in range(n_rows):
+                    expected_row = inputs[src, rank * mr + k, :]
+                    got_row = outputs[rank, base + k, :]
+                    assert torch.allclose(got_row, expected_row, atol=1e-5), (
+                        f"P={nr} case={case} rank={rank} src={src} row={k}: "
+                        f"max diff = {(got_row - expected_row).abs().max().item()}"
+                    )
+
+                # The sender's surplus rows must never arrive. Not asserted as
+                # zero: window memory is not guaranteed zeroed and can persist
+                # across tests in one process, so an unwritten row holds
+                # undefined bytes rather than 0.
+                #
+                # The self slot (src == rank) is excluded, and the reason is not
+                # cosmetic. On NPU this rank's own staged input is observable in
+                # its receive window even when NO transfer occurs at all — for
+                # send_counts <= 0 the kernel computes block_numel = 0 and the
+                # TPUT loop body never executes, yet the row is present. So on
+                # this slot "surplus arrived" and "local staged data was already
+                # there" are the same bytes, and the check cannot separate them.
+                # It is not evidence of an over-send.
+                #
+                # A window-overlap probe (pypto-3.0-notes issues/mfe/
+                # window_overlap_probe.py) rules out input_buf and data_buf
+                # sharing storage — they are distinct on both sim and NPU — so
+                # the mechanism is still unexplained. Tracked separately; it is
+                # a property of the HOST staging path, not of this change. The
+                # InCore rail passes this same check on its self slot, including
+                # on NPU, because it takes its input as a plain Tensor rather
+                # than through a staged window.
+                if src == rank:
+                    continue
+                for k in range(n_rows, mr):
+                    would_have_been_sent = inputs[src, rank * mr + k, :]
+                    got_row = outputs[rank, base + k, :]
+                    assert not torch.allclose(got_row, would_have_been_sent, atol=1e-5), (
+                        f"P={nr} case={case} rank={rank} src={src} row={k}: the receiver got the "
+                        f"sender's surplus row — the HOST transfer is not bounded by the runtime count"
                     )
 
 
