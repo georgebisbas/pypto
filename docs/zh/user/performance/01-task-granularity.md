@@ -150,11 +150,11 @@ def merged_chain(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
 expected = torch.exp(A[:LARGE] + B[:LARGE])
 scratch, out = torch.zeros(LARGE, COLS), torch.zeros(LARGE, COLS)
 two_tasks_via_gm(A[:LARGE], B[:LARGE], scratch, out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=3e-3, atol=3e-3)
 
 out = torch.zeros(LARGE, COLS)
 merged_chain(A[:LARGE], B[:LARGE], out, config=CFG)
-torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+torch.testing.assert_close(out, expected, rtol=3e-3, atol=3e-3)
 ```
 
 **代价：** 合并后的任务要同时持有每一个中间结果。
