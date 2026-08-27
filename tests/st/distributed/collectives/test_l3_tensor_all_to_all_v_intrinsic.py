@@ -86,6 +86,17 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
             # (PTOAS accepts dynamic partition-view dims on pto.comm.tput); a
             # [1, SIZE] staging tile feeds the engine. The receiver uses
             # recv_counts to skip unwritten window holes.
+            # The two outputs partition the window — no row is copied twice, so
+            # the device-side cost is exactly `total` row copies:
+            #   out        <- rows [base, base + recv_counts[src])   valid
+            #   window_out <- rows [base + recv_counts[src], base + mr)  tail
+            # The host reconstructs the full window by reading the valid rows
+            # from `out` and the tail from `window_out`. Keeping the valid-row
+            # loop bounded by the published recv_counts (not a hardcoded formula
+            # / MAX_RECV) is the point: it exercises the intended device-side
+            # consumer pattern. The tail copy is what makes the bounded-transfer
+            # assertion non-vacuous — a padded full-capacity transfer would
+            # deposit the sender's surplus there and be visible host-side.
             for src in pl.range(nr):
                 n_rows_i32 = pl.read(recv_counts, [src, 0])
                 # Scalar read/write — a [1,1] INT32 tile.load fails ptoas
@@ -97,13 +108,10 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
                     flat_row = base + r
                     chunk = pl.load(result, [flat_row, 0], [1, SIZE])
                     pl.store(chunk, [flat_row, 0], out)
-            # Full-window probe: copy every row of the receive window (not just
-            # the recv_counts-valid rows) so host-side tests can assert the
-            # unwritten tail really holds no sender surplus — a padded
-            # full-capacity transfer would be visible here.
-            for flat_row in pl.range(total):
-                chunk = pl.load(result, [flat_row, 0], [1, SIZE])
-                pl.store(chunk, [flat_row, 0], window_out)
+                for r in pl.range(n_rows, mr):
+                    flat_row = base + r
+                    chunk = pl.load(result, [flat_row, 0], [1, SIZE])
+                    pl.store(chunk, [flat_row, 0], window_out)
             return out, window_out, recv_out
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -349,10 +357,12 @@ class TestL3TensorAllToAllVSkew:
                 # surplus data — that is the observable signature of a bounded
                 # transfer, since the padded version pushed exactly those rows.
                 #
-                # The check reads ``window_outputs`` — a copy of the FULL receive
-                # window (every MAX_RECV slot), not just the recv_counts-valid
-                # rows the consume loop writes into ``outputs`` — so a padded
-                # full-capacity transfer would actually be visible here.
+                # The check reads ``window_outputs``, which the kernel fills with
+                # exactly the tail rows — ``[recv_counts[src], MAX_RECV)`` of each
+                # sender's slot — the rows the consume loop does *not* copy into
+                # ``outputs``. So a padded full-capacity transfer would deposit
+                # the sender's surplus right here and be visible. The two outputs
+                # partition the window, so no row is read back twice.
                 #
                 # NOT asserted as zero: window memory is not *guaranteed* zeroed
                 # and can carry over within a process, so an unwritten row holds
