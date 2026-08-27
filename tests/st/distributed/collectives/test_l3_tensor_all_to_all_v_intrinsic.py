@@ -269,6 +269,18 @@ class TestL3TensorAllToAllVSkew:
     ``test_l3_host_tensor_all_to_all_v.py``, this is the wire-parity gate: both
     lowering paths are driven with the same counts and checked against the same
     golden, so a divergence in either shows up as a golden mismatch.
+
+    **The two rails are not coverage-identical.** This file checks the
+    surplus-row tail on every ``(rank, src)`` pair including the self slot; the
+    HOST file skips ``src == rank`` (see #2546 — on that slot the rank's own
+    staged data is indistinguishable from an arrival, so the check cannot
+    separate them). Parity therefore holds on payload rows and ``recv_counts``
+    for all pairs, and on the tail for every pair *except* HOST self.
+
+    That exclusion is a ``continue`` inside the per-pair loop rather than an
+    ``xfail``: the uncovered slot is one iteration of a loop within a test that
+    otherwise passes, so it cannot be surfaced as a separate test outcome
+    without splitting the parametrisation per ``(rank, src)``.
     """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))

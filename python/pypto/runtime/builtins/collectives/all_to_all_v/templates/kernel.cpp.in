@@ -127,7 +127,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // (a freshly allocated window has been seen reading zero, and a reused one
   // reading values like -1.2e+32).
   // Previously the full-capacity push filled them with the sender's surplus
-  // rows, which were equally meaningless but happened to look structured.
+  // rows, which were equally meaningless but were always FINITE FP32. The tail
+  // has therefore changed in KIND, not just in value: uninitialised bytes may
+  // decode as NaN/Inf. A consumer that reduces over the dense capacity block
+  // and masks by recv_counts afterwards - the natural MoE dispatch shape - was
+  // correct before and would now propagate NaN into valid rows. Trim to
+  // recv_counts BEFORE computing.
   // recv_counts is what makes either correct, and always was: only code reading
   // past recv_counts can tell the difference, and it was already reading data
   // it had no right to.

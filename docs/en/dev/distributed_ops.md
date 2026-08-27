@@ -419,8 +419,17 @@ the compile-time capacity — so padding rows never cross the wire. After the
 barrier the receiver uses `recv_counts[src, 0]` to identify the valid rows; the
 remainder of its capacity slot is never written at all. Window memory is not
 *guaranteed* zeroed and can carry over within a process, so those untouched
-bytes are undefined — only code reading past `recv_counts` can observe them,
-and that was always reading data it had no claim to.
+bytes are undefined.
+
+> [!WARNING]
+> **Trim to `recv_counts` before doing arithmetic over the capacity block.**
+> The untouched tail is *uninitialised*, so it can decode as **NaN or Inf** —
+> not merely as a wrong-but-finite value. This is a change in kind, not just in
+> value: the previous full-capacity push left the sender's surplus rows there,
+> which were always finite FP32. Code that reduces or otherwise computes across
+> the dense `[NR*MAX_RECV, SIZE]` block and masks by `recv_counts` *afterwards*
+> — the natural MoE-dispatch shape — was correct before and will now propagate
+> NaN into otherwise-valid rows. Mask first, then compute.
 
 The clamp is two-sided, and the lower bound is load-bearing in two places: it
 keeps a negative `send_counts` from becoming a negative transfer extent, and —

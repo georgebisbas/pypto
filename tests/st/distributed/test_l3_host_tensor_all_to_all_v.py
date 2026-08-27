@@ -274,7 +274,18 @@ _SKEW_CASES = {
 
 
 class TestL3HostTensorAllToAllVSkew:
-    """HOST-rail boundary coverage: 0, 1, capacity, over-capacity, negative counts."""
+    """HOST-rail boundary coverage: 0, 1, capacity, over-capacity, negative counts.
+
+    Mirrors the InCore cases in
+    ``collectives/test_l3_tensor_all_to_all_v_intrinsic.py`` — same counts, same
+    golden — so a wire divergence between the rails surfaces as a golden
+    mismatch in one file or the other.
+
+    **Coverage caveat:** the surplus-row tail check below skips ``src == rank``
+    on this rail only (see #2546). Payload rows and ``recv_counts`` are still
+    checked for every ``(rank, src)`` pair; the InCore file checks the tail on
+    all pairs including its self slot.
+    """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))
     @pytest.mark.parametrize("n_ranks", [2, 4])
@@ -347,14 +358,17 @@ class TestL3HostTensorAllToAllVSkew:
                 # there" are the same bytes, and the check cannot separate them.
                 # It is not evidence of an over-send.
                 #
-                # A window-overlap probe (pypto-3.0-notes issues/mfe/
-                # window_overlap_probe.py) rules out input_buf and data_buf
-                # sharing storage — they are distinct on both sim and NPU — so
-                # the mechanism is still unexplained. Tracked separately; it is
-                # a property of the HOST staging path, not of this change. The
-                # InCore rail passes this same check on its self slot, including
-                # on NPU, because it takes its input as a plain Tensor rather
-                # than through a staged window.
+                # Window aliasing is ruled out: a probe that writes a sentinel
+                # into one alloc_window_buffer and reads a second, never-written
+                # one finds no sentinel bytes on either a2a3sim or a2a3 — so
+                # input_buf and data_buf do not share storage and the mechanism
+                # is unexplained. Tracked in #2546, which carries the probe and
+                # the full analysis.
+                #
+                # This is a property of the HOST staging path, not of the
+                # transfer change: the InCore rail passes this same check on its
+                # self slot, including on NPU, because it takes its input as a
+                # plain Tensor rather than through a staged window.
                 if src == rank:
                     continue
                 for k in range(n_rows, mr):
