@@ -9,10 +9,11 @@
 
 """Does an InCore composite collective partition its work across ``pl.spmd`` blocks?
 
-``pld.tensor.allreduce``'s docstring tells InCore callers to keep ``core_num=1``
-and *"use an enclosing pl.spmd(...) for multi-core InCore execution"*, and
-``LowerTensorAllReduceRule`` enforces that with a ``CHECK_SPAN``.  This file
-tests what the lowering actually does under such an enclosing scope.
+``pld.tensor.allreduce`` requires InCore callers to keep ``core_num=1``, and
+``LowerTensorAllReduceRule`` enforces that with a ``CHECK_SPAN``.  Until
+2026-08-28 both the docstring and that message pointed users at an enclosing
+``pl.spmd(...)`` as the multi-core InCore path.  It is not one, and this file
+tests what the lowering actually does under such a scope.
 
 The claim under test: ``lower_composite_ops_pass.cpp`` never reads the block
 index, so every block of an enclosing ``pl.spmd(N)`` runs the *whole* peer loop
@@ -304,3 +305,38 @@ def test_allreduce_emitted_work_is_independent_of_spmd_width(mode):
                 f'mode="{mode}": {key} count changed under pl.spmd({width}) '
                 f"({bare[key]} -> {wrapped[key]}); this schedule may already partition"
             )
+
+
+# ============================================================================
+# Q6 — the guidance itself
+# ============================================================================
+
+
+def test_incore_core_num_rejection_does_not_recommend_spmd():
+    """The ``core_num > 1`` rejection must not point InCore users at ``pl.spmd``.
+
+    Until 2026-08-28 both this message and the ``core_num`` docstring offered an
+    enclosing ``pl.spmd(...)`` as the multi-core InCore path.  Every other test
+    in this file shows it is not one: the work is duplicated rather than
+    divided, and the barrier releases early.  Following that advice silently
+    multiplied traffic by the spmd width, so the guidance is pinned here
+    against reintroduction.
+    """
+
+    @pl.program
+    class MultiCoreInCore:
+        @pl.function(type=pl.FunctionType.InCore)
+        def ar_step(
+            self,
+            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[NRANKS, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, SIZE], pl.FP32]:
+            return pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, core_num=2)
+
+    with pytest.raises(ValueError, match=r"NOT a multi-core InCore path") as excinfo:
+        passes.lower_composite_ops()(MultiCoreInCore)
+
+    message = str(excinfo.value)
+    assert "HOST orchestrator" in message, (
+        f"rejection should name the HOST rail as the multi-core path, got: {message}"
+    )
