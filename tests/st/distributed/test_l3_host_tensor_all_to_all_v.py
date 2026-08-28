@@ -126,12 +126,25 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
+            # Two loops whose row ranges partition each sender's slot, so every
+            # row of the window reaches `out` exactly once and `out` ends up
+            # FULLY written. That matters: a `pl.Out` tensor is write-only on
+            # the device (the host buffer is never uploaded), so a row the
+            # kernel skipped would come back as undefined memory rather than as
+            # window content — and the host-side tail check would be inspecting
+            # that, not the window.
+            #   [base, base + recv_counts[src])       valid -- checked vs golden
+            #   [base + recv_counts[src], base + mr)  tail  -- bounded-transfer check
             for src in pl.range(nr):
                 n_rows_i32 = pl.read(recv_counts, [src, 0])
                 pl.write(recv_out, [src, 0], n_rows_i32)
                 n_rows = pl.cast(n_rows_i32, pl.INDEX)
                 base = src * mr
                 for r in pl.range(n_rows):
+                    flat_row = base + r
+                    chunk = pl.load(data, [flat_row, 0], [1, SIZE])
+                    out = pl.store(chunk, [flat_row, 0], out)
+                for r in pl.range(n_rows, mr):
                     flat_row = base + r
                     chunk = pl.load(data, [flat_row, 0], [1, SIZE])
                     out = pl.store(chunk, [flat_row, 0], out)
@@ -344,39 +357,28 @@ class TestL3HostTensorAllToAllVSkew:
                         f"max diff = {(got_row - expected_row).abs().max().item()}"
                     )
 
-                # The sender's surplus rows must never arrive. Not asserted as
-                # zero: window memory is not guaranteed zeroed and can persist
-                # across tests in one process, so an unwritten row holds
-                # undefined bytes rather than 0.
+                # The sender's surplus rows must never arrive. `outputs` now
+                # mirrors the whole window (the consume loop copies the tail
+                # rows too), so this inspects window content rather than an
+                # unwritten region of a write-only `pl.Out` buffer.
                 #
-                # The self slot (src == rank) is excluded, and the reason is not
-                # cosmetic. On NPU this rank's own staged input is observable in
-                # its receive window even when NO transfer occurs at all — for
-                # send_counts <= 0 the kernel computes block_numel = 0 and the
-                # TPUT loop body never executes, yet the row is present. So on
-                # this slot "surplus arrived" and "local staged data was already
-                # there" are the same bytes, and the check cannot separate them.
-                # It is not evidence of an over-send.
+                # Asserted as exactly zero: the runtime zeroes a comm-domain
+                # window at allocation, before the handle is published to peers
+                # (``aclrtMemset`` in ``comm_hccl.cpp``'s ``alloc_domain``), so
+                # a row no TPUT ever wrote must still read 0. Every payload is
+                # ``salt + ...`` with ``salt > 0``, so a transferred row can
+                # never be mistaken for an untouched one.
                 #
-                # Window aliasing is ruled out: a probe that writes a sentinel
-                # into one alloc_window_buffer and reads a second, never-written
-                # one finds no sentinel bytes on either a2a3sim or a2a3 — so
-                # input_buf and data_buf do not share storage and the mechanism
-                # is unexplained. Tracked in #2546, which carries the probe and
-                # the full analysis.
-                #
-                # This is a property of the HOST staging path, not of the
-                # transfer change: the InCore rail passes this same check on its
-                # self slot, including on NPU, because it takes its input as a
-                # plain Tensor rather than through a staged window.
-                if src == rank:
-                    continue
+                # The self slot is no longer skipped. It was excluded because
+                # the rank's own staged input showed up here even when nothing
+                # was transferred (#2546) — but that was the undefined `out`
+                # tail, not the window.
                 for k in range(n_rows, mr):
-                    would_have_been_sent = inputs[src, rank * mr + k, :]
                     got_row = outputs[rank, base + k, :]
-                    assert not torch.allclose(got_row, would_have_been_sent, atol=1e-5), (
-                        f"P={nr} case={case} rank={rank} src={src} row={k}: the receiver got the "
-                        f"sender's surplus row — the HOST transfer is not bounded by the runtime count"
+                    assert torch.all(got_row == 0.0), (
+                        f"P={nr} case={case} rank={rank} src={src} row={k}: an untransferred row is "
+                        f"not zero — the HOST transfer is not bounded by the runtime count "
+                        f"(got {got_row[:4].tolist()}...)"
                     )
 
 

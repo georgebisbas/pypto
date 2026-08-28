@@ -67,14 +67,11 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
             inp: pl.Tensor[[total, SIZE], pl.FP32],
             counts: pl.Tensor[[nr, 1], pl.INT32],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
-            window_out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> tuple[
-            pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]
-        ]:
+        ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
             """InCore kernel: push variable rows per peer, barrier, read back via recv_counts."""
             # Push-based all_to_all_v — intrinsic pushes counts[dest] rows to
             # each peer, publishes counts into recv_counts, and returns data
@@ -86,17 +83,19 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
             # (PTOAS accepts dynamic partition-view dims on pto.comm.tput); a
             # [1, SIZE] staging tile feeds the engine. The receiver uses
             # recv_counts to skip unwritten window holes.
-            # The two outputs partition the window — no row is copied twice, so
-            # the device-side cost is exactly `total` row copies:
-            #   out        <- rows [base, base + recv_counts[src])   valid
-            #   window_out <- rows [base + recv_counts[src], base + mr)  tail
-            # The host reconstructs the full window by reading the valid rows
-            # from `out` and the tail from `window_out`. Keeping the valid-row
-            # loop bounded by the published recv_counts (not a hardcoded formula
-            # / MAX_RECV) is the point: it exercises the intended device-side
-            # consumer pattern. The tail copy is what makes the bounded-transfer
-            # assertion non-vacuous — a padded full-capacity transfer would
-            # deposit the sender's surplus there and be visible host-side.
+            # Both loops target `out`, and their row ranges partition each
+            # sender's slot, so every row of the window is copied exactly once
+            # and `out` ends up FULLY written. That last part matters: a
+            # `pl.Out` tensor is write-only on the device (the host buffer is
+            # never uploaded), so any row the kernel skipped would come back as
+            # undefined memory rather than as window content.
+            #   [base, base + recv_counts[src])       valid -- checked vs golden
+            #   [base + recv_counts[src], base + mr)  tail  -- bounded-transfer check
+            # Keeping the valid-row loop bounded by the published recv_counts
+            # (not a hardcoded formula / MAX_RECV) exercises the intended
+            # device-side consumer pattern; the tail loop is what makes the
+            # bounded-transfer assertion non-vacuous — a padded full-capacity
+            # transfer would deposit the sender's surplus there.
             for src in pl.range(nr):
                 n_rows_i32 = pl.read(recv_counts, [src, 0])
                 # Scalar read/write — a [1,1] INT32 tile.load fails ptoas
@@ -111,8 +110,8 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
                 for r in pl.range(n_rows, mr):
                     flat_row = base + r
                     chunk = pl.load(result, [flat_row, 0], [1, SIZE])
-                    pl.store(chunk, [flat_row, 0], window_out)
-            return out, window_out, recv_out
+                    pl.store(chunk, [flat_row, 0], out)
+            return out, recv_out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
@@ -120,16 +119,13 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
             inp: pl.Tensor[[total, SIZE], pl.FP32],
             counts: pl.Tensor[[nr, 1], pl.INT32],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
-            window_out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> tuple[
-            pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]
-        ]:
+        ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
             """Chip orchestration: dispatch to exchange_step with bound windows."""
-            return self.exchange_step(inp, counts, out, window_out, recv_out, data, signal, recv_counts)
+            return self.exchange_step(inp, counts, out, recv_out, data, signal, recv_counts)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
@@ -137,13 +133,8 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
             inputs: pl.Tensor[[nr, total, SIZE], pl.FP32],
             send_counts: pl.Tensor[[nr, nr, 1], pl.INT32],
             outputs: pl.Out[pl.Tensor[[nr, total, SIZE], pl.FP32]],
-            window_outputs: pl.Out[pl.Tensor[[nr, total, SIZE], pl.FP32]],
             recv_outputs: pl.Out[pl.Tensor[[nr, nr, 1], pl.INT32]],
-        ) -> tuple[
-            pl.Tensor[[nr, total, SIZE], pl.FP32],
-            pl.Tensor[[nr, total, SIZE], pl.FP32],
-            pl.Tensor[[nr, nr, 1], pl.INT32],
-        ]:
+        ) -> tuple[pl.Tensor[[nr, total, SIZE], pl.FP32], pl.Tensor[[nr, nr, 1], pl.INT32]]:
             """HOST orchestrator: allocate windows once, loop over ranks calling chip_orch."""
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
@@ -157,14 +148,13 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int):
                     inputs[r],
                     send_counts[r],
                     outputs[r],
-                    window_outputs[r],
                     recv_outputs[r],
                     data,
                     sig,
                     recv,
                     device=r,
                 )
-            return outputs, window_outputs, recv_outputs
+            return outputs, recv_outputs
 
     return AllToAllVIntrinsicNRank
 
@@ -217,10 +207,9 @@ class TestL3TensorAllToAllVIntrinsic:
                         inputs[r, base + k, j] = float(r * 1000 + d * 100 + k * 10 + j % 10)
 
         outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
-        window_outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
 
-        compiled(inputs, send_counts, outputs, window_outputs, recv_outputs)
+        compiled(inputs, send_counts, outputs, recv_outputs)
 
         # Golden validation:
         # Rank rank receives from src the chunk that src sent to dest=rank.
@@ -329,9 +318,8 @@ class TestL3TensorAllToAllVSkew:
                         inputs[r, base + k, j] = float(salt + r * 1000 + d * 100 + k * 10 + j % 10)
 
         outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
-        window_outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
-        compiled(inputs, send_counts, outputs, window_outputs, recv_outputs)
+        compiled(inputs, send_counts, outputs, recv_outputs)
 
         for rank in range(nr):
             for src in range(nr):
@@ -357,24 +345,24 @@ class TestL3TensorAllToAllVSkew:
                 # surplus data — that is the observable signature of a bounded
                 # transfer, since the padded version pushed exactly those rows.
                 #
-                # The check reads ``window_outputs``, which the kernel fills with
-                # exactly the tail rows — ``[recv_counts[src], MAX_RECV)`` of each
-                # sender's slot — the rows the consume loop does *not* copy into
-                # ``outputs``. So a padded full-capacity transfer would deposit
-                # the sender's surplus right here and be visible. The two outputs
-                # partition the window, so no row is read back twice.
+                # ``outputs`` mirrors the whole window: the consume loop copies
+                # the valid rows and the tail rows into it, partitioned, so a
+                # padded full-capacity transfer would deposit the sender's
+                # surplus right here and be visible.
                 #
-                # NOT asserted as zero: window memory is not *guaranteed* zeroed
-                # and can carry over within a process, so an unwritten row holds
-                # undefined bytes (a fresh window has read zero; a reused one has
-                # read -1.2e+32, 4.2e-41, ...). ``recv_counts`` is what tells the
-                # receiver to ignore them, and it always has.
+                # Asserted as exactly zero, which is stronger than "not equal
+                # to the surplus": the runtime zeroes a comm-domain window at
+                # allocation, before the handle is published to peers
+                # (``aclrtMemset`` in ``comm_hccl.cpp``'s ``alloc_domain``), so
+                # a row no TPUT ever wrote must still read 0. Every payload here
+                # is ``salt + ...`` with ``salt > 0``, so a transferred row can
+                # never be mistaken for an untouched one.
                 for k in range(n_rows, mr):
-                    would_have_been_sent = inputs[src, rank * mr + k, :]
-                    got_row = window_outputs[rank, base + k, :]
-                    assert not torch.allclose(got_row, would_have_been_sent, atol=1e-5), (
-                        f"P={nr} case={case} rank={rank} src={src} row={k}: the receiver got the "
-                        f"sender's surplus row — the transfer is not bounded by the runtime count"
+                    got_row = outputs[rank, base + k, :]
+                    assert torch.all(got_row == 0.0), (
+                        f"P={nr} case={case} rank={rank} src={src} row={k}: an untransferred row is "
+                        f"not zero — the transfer is not bounded by the runtime count "
+                        f"(got {got_row[:4].tolist()}...)"
                     )
 
 
