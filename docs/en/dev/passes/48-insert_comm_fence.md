@@ -167,22 +167,32 @@ A `remote_load` (result is a tile, no GM write) and a `tile.store` / `tensor.wri
 / `get` whose destination is a plain `Tensor` rather than a window-bound
 `DistributedTensor` are **not** publishing writes — no marker at all.
 
-## Algorithm — one structural traversal, no flow state
+## Algorithm — one structural traversal, with consume-side batching
 
-The pass carries **no** control-flow state (no `pending` bool, no `if`/loop
-analysis, no notify classification):
+The pass carries one piece of control-flow state — a flag that suppresses the
+per-wait invalidate while visiting the body of a **pure wait-loop** (a `for`/`while`
+whose body contains only `pld.system.wait` through seq/if nesting, with memory-inert
+control expressions):
 
 - at each **local publishing write**, append `region cacheinvalid; fence`;
 - at each **remote publishing write** (`remote_store` / `put`), append `fence`
   only (the peer-region cacheinvalid is codegen's — see below);
-- at each **wait**, append `cacheinvalid()`;
+- at each **wait**, append `cacheinvalid()` — **batched**: a pure wait-loop shares
+  ONE whole-GM `cacheinvalid()` after the loop, and a run of consecutive waits
+  shares ONE after the run. No memory access occurs between the waits, so an
+  invalidate after the last is equivalent to one after every wait — `(P-1)`
+  whole-cache flushes per barrier generation become 1 in the mesh composite.
 - **notify** is left untouched.
 
 `if`/`for`/`while` bodies are visited normally; the only special handling is
 wrapping a bare single-statement body (a write/wait that is the sole body of an
-`if`/`for` without an enclosing `SeqStmts`) so its marker still lands. Because the
-rules are local and append-only, control flow is irrelevant: a write inside one
-loop is correctly marked whether or not its notify lives in another.
+`if`/`for` without an enclosing `SeqStmts`) so its marker still lands — a bare
+pure wait-loop body gets the same suppression and one `cacheinvalid()` after the
+loop. Because the rules are otherwise local and append-only, control flow is
+irrelevant: a write inside one loop is correctly marked whether or not its notify
+lives in another. A control expression that reads GM (`tensor.read` lowers to a
+cached load) disqualifies a loop from being pure, so the invalidate is never
+deferred past a read that could observe stale peer data.
 
 ```text
 store(win); notify                   -> store(win); cacheinvalid(win); fence; notify
