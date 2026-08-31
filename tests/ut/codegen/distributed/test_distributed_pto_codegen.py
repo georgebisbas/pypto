@@ -1166,8 +1166,9 @@ def test_notify_emits_comm_tnotify_with_attr():
     assert "#pto<notify_op set>" in mlir
     lines = mlir.splitlines()
     notify_idx = next(i for i, line in enumerate(lines) if "pto.comm.tnotify(" in line)
-    assert "pto.barrier <PIPE_ALL>" in lines[notify_idx - 1], (
-        f"expected a PIPE_ALL drain immediately before tnotify, got: {lines[notify_idx - 1]}"
+    assert "pto.barrier <PIPE_V>" in lines[notify_idx - 1], (
+        f"expected a PIPE_V drain immediately before tnotify (TNOTIFY already drains "
+        f"MTE2/MTE3), got: {lines[notify_idx - 1]}"
     )
     # AtomicAdd variant should also lower correctly.
 

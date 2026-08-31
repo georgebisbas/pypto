@@ -41,7 +41,12 @@
 - **每个不透明发布写之后** —— 一个 `Submit`，或对未注册用户函数（其函数体不在本 pass 内分析,
   没有单一可寻址区域）的调用：保守地插一条**全 GM** `system.cacheinvalid()` + `system.fence`；
 - **每个 wait 之后** —— 一条**全 GM** `system.cacheinvalid`（消费侧在下一次可缓存读之前
-  的失效）；
+  的失效）。**会做批量合并**：连续的一段 wait，或一个**纯 wait 循环**（`for`/`while` 的循环体
+  经 `if`/`seq` 嵌套后只含 wait，例如 mesh composite 的 `for src: if src != me: wait(...)`），
+  在 wait 之间不会有任何内存访问，因此只在循环/序列**之后**发**一条**全 GM `cacheinvalid`，
+  而不是每个 wait 一条——每个屏障代次从 `(P-1)` 次整缓存刷新降为 1 次。遍历仍保持结构化
+  （无数据流分析），用一个局部的纯 wait 循环判定；同时含 load 的循环（如 ring 逐 step 的
+  `wait; load`）不算纯循环，仍保留逐 wait 失效；
 - **notify** —— 什么都不插。
 
 区域 `system.cacheinvalid(target)` 寻址的是 `target` 的**本地** base，这对本地窗口写是对的。

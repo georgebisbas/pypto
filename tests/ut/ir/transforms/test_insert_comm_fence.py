@@ -598,6 +598,80 @@ def test_notify_wait_read_handshake():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
+def test_pure_wait_loop_gets_single_whole_gm_cacheinvalid():
+    # A wait-all loop (`for src: if src != me: wait(...)`, the mesh composite's
+    # per-barrier wait loop) performs no memory access between the waits, so ONE
+    # whole-GM cacheinvalid after the loop is equivalent to one after every wait
+    # — and (P-1) whole-cache flushes become 1 per barrier generation.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, N], pl.INT32],
+            nranks: pl.Scalar[pl.INT32],
+            me: pl.Scalar[pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            for src in pl.range(nranks):
+                if src != me:
+                    pld.system.wait(signal=signal, offsets=[0, src], expected=1, cmp=pld.WaitCmp.Ge)
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
+def test_consecutive_waits_share_one_whole_gm_cacheinvalid():
+    # Two consecutive waits with no intervening memory access share ONE
+    # whole-GM cacheinvalid after the run.
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+            pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            signal: pld.DistributedTensor[[1, 2], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ):
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+            pld.system.wait(signal=signal, offsets=[0, 1], expected=1, cmp=pld.WaitCmp.Ge)
+            pl.system.cacheinvalid()
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_bare_barrier_notify_no_marker():
     # A pure barrier notify (no data) needs nothing.
     @pl.program

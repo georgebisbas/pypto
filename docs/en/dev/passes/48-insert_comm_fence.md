@@ -50,7 +50,15 @@ rules** — the *notify* itself needs no marker. A single structural traversal
   addressable region): a conservative **whole-GM** `system.cacheinvalid()` +
   `system.fence`;
 - **after each wait** — a **whole-GM** `system.cacheinvalid` (the consume-side
-  invalidate before the next cacheable read);
+  invalidate before the next cacheable read). **Batched**: a run of consecutive
+  waits, or a *pure wait-loop* (a `for`/`while` whose body — through `if`/`seq`
+  nesting — contains only waits, e.g. the mesh composite's
+  `for src: if src != me: wait(...)`), performs no memory access between the
+  waits, so ONE whole-GM `cacheinvalid` is emitted after the run/loop instead
+  of one per wait — `(P-1)` whole-cache flushes become 1 per barrier generation.
+  The traversal stays structural (no dataflow), using a local pure-wait-loop
+  check; loops that also load (e.g. ring's per-step `wait; load`) are not pure
+  and keep the per-wait invalidate;
 - **notify** — nothing.
 
 A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which

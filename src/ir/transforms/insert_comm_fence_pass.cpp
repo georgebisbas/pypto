@@ -197,6 +197,28 @@ bool IsCacheInvalidAll(const StmtPtr& stmt) {
   return call && IsOp(call, "system.cacheinvalid") && call->args_.empty();
 }
 
+// True if `stmt`'s leaves are all `pld.system.wait` (through seq/if/for/while
+// nesting only) — no read or write can occur between the waits. Used to batch
+// the consume-side whole-GM cacheinvalid to once per pure wait-loop: after the
+// loop's last wait is equivalent to after every wait, because nothing memory-
+// touching happens between them.
+bool ContainsOnlyWaits(const StmtPtr& stmt) {
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (auto& s : seq->stmts_) {
+      if (!ContainsOnlyWaits(s)) return false;
+    }
+    return true;
+  }
+  if (auto iff = As<IfStmt>(stmt)) {
+    if (!ContainsOnlyWaits(iff->then_body_)) return false;
+    if (iff->else_body_.has_value() && !ContainsOnlyWaits(iff->else_body_.value())) return false;
+    return true;
+  }
+  if (auto for_ = As<ForStmt>(stmt)) return ContainsOnlyWaits(for_->body_);
+  if (auto while_ = As<WhileStmt>(stmt)) return ContainsOnlyWaits(while_->body_);
+  return IsLeafOp(stmt, "pld.system.wait");
+}
+
 // Whole-tensor cacheinvalid for `target`: region = the target's full shape at
 // all-zero offsets. Reuses the tensor type's dim exprs (in scope — the target
 // was just written), so no per-write offset SSA is needed.
@@ -245,7 +267,15 @@ class InsertCommMarkers : public IRMutator {
     for (size_t i = 0; i < stmts.size(); ++i) {
       const StmtPtr& child = stmts[i];
       const Effect eff = StmtEffect(child);
+      // A pure wait-loop (the mesh composite's `for src: if src != me: wait`)
+      // performs no memory access between the waits, so ONE whole-GM
+      // cacheinvalid after the loop replaces the per-wait invalidates inside
+      // it. Suppress the per-wait insertion while visiting such a loop's body.
+      const bool pure_wait_loop = IsPureWaitLoop(child);
+      const bool saved_pwl = in_pure_wait_loop_;
+      if (pure_wait_loop) in_pure_wait_loop_ = true;
       auto new_child = VisitStmt(child);
+      in_pure_wait_loop_ = saved_pwl;
       if (new_child.get() != child.get()) changed = true;
       out.push_back(std::move(new_child));
       // Publish side, local write: a region cacheinvalid + fence after it.
@@ -276,10 +306,21 @@ class InsertCommMarkers : public IRMutator {
           changed = true;
         }
       }
-      // Consume side: a whole-GM cacheinvalid after each wait.
-      if (eff == Effect::kWait && !(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
-        out.push_back(MakeCacheInvalidAll(child->span_));
-        changed = true;
+      // Consume side: a whole-GM cacheinvalid after waits, batched. A pure
+      // wait-loop gets one after the loop; a run of consecutive waits shares
+      // one after the run (no memory access between the waits in either case).
+      if (pure_wait_loop) {
+        if (!(i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]))) {
+          out.push_back(MakeCacheInvalidAll(child->span_));
+          changed = true;
+        }
+      } else if (eff == Effect::kWait && !in_pure_wait_loop_) {
+        const bool next_is_wait = i + 1 < stmts.size() && StmtEffect(stmts[i + 1]) == Effect::kWait;
+        const bool already = i + 1 < stmts.size() && IsCacheInvalidAll(stmts[i + 1]);
+        if (!next_is_wait && !already) {
+          out.push_back(MakeCacheInvalidAll(child->span_));
+          changed = true;
+        }
       }
     }
     if (!changed) return op;
@@ -322,7 +363,10 @@ class InsertCommMarkers : public IRMutator {
       out.push_back(MakeCacheInvalidAll(body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
     }
-    if (eff == Effect::kWait) out.push_back(MakeCacheInvalidAll(body->span_));
+    if (eff == Effect::kWait && !in_pure_wait_loop_) out.push_back(MakeCacheInvalidAll(body->span_));
+    // A bare body that is itself a pure wait-loop (e.g. a single-loop function
+    // or if/for body): one whole-GM cacheinvalid after the loop.
+    if (!in_pure_wait_loop_ && IsPureWaitLoop(body)) out.push_back(MakeCacheInvalidAll(body->span_));
     if (out.size() == 1) return visited;
     return SeqStmts::Flatten(std::move(out), body->span_);
   }
@@ -335,6 +379,22 @@ class InsertCommMarkers : public IRMutator {
     result->body_ = std::move(new_body);
     return result;
   }
+
+  // True if `stmt` is a for/while whose body (through seq/if/for/while nesting)
+  // contains only `pld.system.wait` leaves. No read or write can occur between
+  // the waits, so a single consume-side whole-GM cacheinvalid after the loop is
+  // equivalent to one after every wait — turning (P-1) whole-cache flushes into
+  // 1 per barrier generation in the mesh composite.
+  static bool IsPureWaitLoop(const StmtPtr& stmt) {
+    if (auto for_ = As<ForStmt>(stmt)) return ContainsOnlyWaits(for_->body_);
+    if (auto while_ = As<WhileStmt>(stmt)) return ContainsOnlyWaits(while_->body_);
+    return false;
+  }
+
+  /// Set while visiting a pure wait-loop's body: suppresses the per-wait
+  /// consume-side cacheinvalid (the loop's containing sequence emits one
+  /// whole-GM cacheinvalid after the loop instead).
+  bool in_pure_wait_loop_ = false;
 };
 
 }  // namespace
