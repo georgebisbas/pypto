@@ -477,17 +477,62 @@ class LoweringBuilder {
   /// barriers must emit notify/wait by hand with a call-local expected value
   /// (see the ring / mesh-chunked rules below).
   int64_t EmitBarrier(const ExprPtr& signal, const CommSetup& comm, const std::string& suffix,
-                      const Span& span) {
+                      const Span& span, const ExprPtr& participants = nullptr) {
+    const int64_t generation = EmitBarrierNotify(signal, comm, suffix, span);
+    EmitBarrierWait(signal, comm, generation, suffix, span, participants);
+    return generation;
+  }
+
+  /// Notify half of :func:`EmitBarrier`: ``AtomicAdd(1)`` into every peer's cell.
+  /// Returns the generation it consumed, which the matching ``EmitBarrierWait``
+  /// must be given.
+  ///
+  /// Split out so a caller can put the wait in a *different* task scope than the
+  /// push — the ``push -> defer_wait -> consume`` shape every pypto-lib rail is
+  /// written in. A fused caller should keep using ``EmitBarrier``.
+  int64_t EmitBarrierNotify(const ExprPtr& signal, const CommSetup& comm, const std::string& suffix,
+                            const Span& span) {
     INTERNAL_CHECK_SPAN(!nested_, span)
-        << "Internal error: EmitBarrier must only be called from a top-level lowering rule, not from inside "
-        << "EmitFor / EmitIf / EmitIfExpr bodies. Loop- or condition-resident barriers must "
-        << "emit notify/wait by hand with a call-local expected value.";
+        << "Internal error: EmitBarrierNotify must only be called from a top-level lowering rule, not "
+        << "from inside EmitFor / EmitIf / EmitIfExpr bodies. Loop- or condition-resident barriers "
+        << "must emit notify/wait by hand with a call-local expected value.";
     const int64_t generation = ++barrier_count_;
     auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
-    auto expected_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
     EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, suffix, span);
-    EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected_i32, suffix, span);
     return generation;
+  }
+
+  /// Wait half of :func:`EmitBarrier`: block until every peer's cell reaches
+  /// this call's generation.
+  ///
+  /// ``participants`` is the number of *local* executors that will each run the
+  /// matching notify — the width of an enclosing ``pl.spmd``, or null (the
+  /// default) for the single-executor case. It must be **INT32**, matching the
+  /// signal's element type; cast at the call site if it is not. Only the wait scales by it: N
+  /// executors each ``AtomicAdd(1)``, so a peer's cell reaches
+  /// ``generation * N``, and waiting for ``generation`` alone would release
+  /// after that peer's *first* executor rather than its last.
+  ///
+  /// The epilogue needs no such scaling — those same N executors each subtract
+  /// the call's total back out, so the added and subtracted credit already
+  /// balance (see ``EmitEpilogueReset``).
+  void EmitBarrierWait(const ExprPtr& signal, const CommSetup& comm, int64_t generation,
+                       const std::string& suffix, const Span& span, const ExprPtr& participants = nullptr) {
+    INTERNAL_CHECK_SPAN(!nested_, span)
+        << "Internal error: EmitBarrierWait must only be called from a top-level lowering rule, not "
+        << "from inside EmitFor / EmitIf / EmitIfExpr bodies. Loop- or condition-resident barriers "
+        << "must emit notify/wait by hand with a call-local expected value.";
+    ExprPtr expected = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+    if (participants) {
+      INTERNAL_CHECK_SPAN(participants->GetType() == nullptr ||
+                              As<ScalarType>(participants->GetType()) == nullptr ||
+                              As<ScalarType>(participants->GetType())->dtype_ == DataType::INT32,
+                          span)
+          << "EmitBarrierWait participants must be INT32 to match the signal's element type; "
+             "cast it at the call site.";
+      expected = Mul(expected, participants, span);
+    }
+    EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected, suffix, span);
   }
 
   /// Self-clearing epilogue: subtract ``total`` from every non-self peer's
