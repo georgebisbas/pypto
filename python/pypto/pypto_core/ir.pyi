@@ -2362,9 +2362,9 @@ class ReduceOp(enum.IntEnum):
     .. note::
 
        **Per-operation support:** ``pld.tensor.allreduce`` (both the InCore
-       composite and the HOST builtin) accepts all four values. Other
-       reducing collectives are narrower — ``pld.tensor.reduce_scatter``
-       accepts only :attr:`Sum` and rejects the rest at the deducer.
+       composite and the HOST builtin) accepts all four values. On the
+       InCore rail ``pld.tensor.reduce_scatter`` also accepts all four
+       values; the HOST builtin rail lowers ``Sum`` only.
     """
 
     Sum = 0

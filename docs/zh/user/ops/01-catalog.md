@@ -197,7 +197,7 @@ push 与 pop 必须**配对**，且每次 pop 都必须有对应的 `tfree`。�
 | ---- | --- | ---- | -------- | ------ | ------------ | ---- |
 | AllReduce | `pld.tensor.allreduce` | `mesh`（InCore + HOST），`ring`（InCore + HOST） | `Sum`、`Max`、`Min`、`Prod`（mesh）；仅 `Sum`（HOST ring） | — | FP16、FP32（mesh；编译期硬性检查）；HOST ring：仅 FP32（4 字节） | Mesh: 每步 O(N) 远程流量。Ring: 每步 O(N/P) 远程流量，2(P-1) 步。 |
 | AllGather | `pld.tensor.allgather` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 推式。输入和 target 必须是不同的 buffer。 |
-| ReduceScatter | `pld.tensor.reduce_scatter` | — | 仅 `Sum` | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
+| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum`、`Max`、`Min`、`Prod`（InCore）；仅 `Sum`（HOST builtin） | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 每个 rank 在调用前将全部 NR 个数据块写入。 |
 | Broadcast | `pld.tensor.broadcast` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | Root 在调用前将数据写入。 |
 | All-to-All | `pld.tensor.all_to_all` | — | — | — | 仅 FP32（HOST builtin）；任意 GM dtype（InCore） | 个性化交换。输入和 target 必须是不同的 buffer。 |
 | Barrier | `pld.tensor.barrier` | — | — | — | — | Signal 为 INT32，每次调用单次使用。 |

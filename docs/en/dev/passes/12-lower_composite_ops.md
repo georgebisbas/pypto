@@ -200,7 +200,7 @@ The `tile.tquant_mx` rule emits the non-composite `tile.tquant_mx_raw` and `tile
 
 ## `pld.tensor.*` distributed collectives
 
-The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait + data-movement recipe, plus a self-clearing epilogue. The data-movement primitive differs by op: `allgather` and ring `allreduce` use `pld.tile.put` (TPUT-based push, auto-chunking through a VEC staging tile), `broadcast` relocates window data with `pld.tile.get` (GM→GM copy), while mesh `allreduce` and `reduce_scatter` pull peer chunks into a UB tile with `pld.tile.remote_load`. Allreduce selects `tile.add`, `tile.maximum`, `tile.minimum`, or `tile.mul`; reduce-scatter currently accumulates with `tile.add`. All seven rules share the same **self-clearing credit-barrier protocol** (`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`) — see [Barrier-signal protocol](#barrier-signal-protocol) below — so a `signal` buffer is reusable across back-to-back calls, and even inside `for` / `while` / `if`.
+The pass also lowers the `pld.tensor.*` family of window-bound distributed collectives. Each collective is a single composite `Call` that expands into a notify / wait + data-movement recipe, plus a self-clearing epilogue. The data-movement primitive differs by op: `allgather` and ring `allreduce` use `pld.tile.put` (TPUT-based push, auto-chunking through a VEC staging tile), `broadcast` relocates window data with `pld.tile.get` (GM→GM copy), while mesh `allreduce` and `reduce_scatter` pull peer chunks into a UB tile with `pld.tile.remote_load`. Allreduce and reduce-scatter select `tile.add`, `tile.maximum`, `tile.minimum`, or `tile.mul` by `ReduceOp`. All seven rules share the same **self-clearing credit-barrier protocol** (`LoweringBuilder::EmitBarrier` + `EmitEpilogueReset`) — see [Barrier-signal protocol](#barrier-signal-protocol) below — so a `signal` buffer is reusable across back-to-back calls, and even inside `for` / `while` / `if`.
 
 ### Barrier-signal protocol
 
@@ -243,14 +243,14 @@ Compared to the original pull-based allgather (4-arg with a separate `out` tenso
 Decomposes into the same phase shape as `allreduce`'s rectangle path:
 
 - Phase 2a/2b: ready barrier (generation 1)
-- Phase 3: for each peer, `remote_load` chunk `r` from peer `p` and accumulate into a local scratch with `tile.add`
+- Phase 3: for each peer, `remote_load` chunk `r` from peer `p` and accumulate into a local scratch with the `ReduceOp`-matching tile op (`tile.add` / `tile.maximum` / `tile.minimum` / `tile.mul`)
 - Phase 3.5a/3.5b: post-reduce barrier (generation 2)
 - Phase 4: `tile.store` the reduced chunk `r` back into `target[r, 0:SIZE]`
 - Epilogue: subtract 2 from every non-self cell
 
-`target` has shape `[NR, SIZE]`; each rank stages all `NR` chunks before the call. After the call, rank `r`'s row `[r, 0:SIZE]` holds the element-wise sum of chunk `r` across all ranks. The post-reduce barrier is required for the same WAR reason as `allreduce`.
+`target` has shape `[NR, SIZE]`; each rank stages all `NR` chunks before the call. After the call, rank `r`'s row `[r, 0:SIZE]` holds the element-wise reduction of chunk `r` across all ranks (Sum/Max/Min/Prod by `ReduceOp`). The post-reduce barrier is required for the same WAR reason as `allreduce`.
 
-Only `ReduceOp::kSum` is supported in the first version; the C++ deducer rejects `Max` / `Min` / `Prod`.
+All four `ReduceOp`s are supported — `kSum`, `kMax`, `kMin`, and `kProd` — routed through the shared `Reduce()` helper, the same dispatch the allreduce rules use.
 
 ### `pld.tensor.broadcast`
 

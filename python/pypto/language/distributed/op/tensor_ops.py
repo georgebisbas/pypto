@@ -923,8 +923,9 @@ def reduce_scatter(
             ``[world_size, 1]``.  Reusable across calls (2 credits per
             call — ready + post-reduce) — see :func:`allreduce` for the
             shared barrier protocol.
-        op: :class:`pld.ReduceOp` (keyword-only).  ``Sum`` only in
-            first version; ``Max`` / ``Min`` / ``Prod`` reserved.
+        op: :class:`pld.ReduceOp` (keyword-only).  ``Sum``, ``Max``, ``Min``,
+            or ``Prod`` on the InCore rail; the HOST builtin rail lowers
+            ``Sum`` only.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` — rank r's row

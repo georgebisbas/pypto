@@ -211,7 +211,7 @@ tutorial at [distributed/00-model.md](../distributed/00-model.md).
 | --------- | --- | ----- | -------- | ------ | ---------------- | ----- |
 | AllReduce | `pld.tensor.allreduce` | `mesh` (InCore + HOST), `ring` (InCore + HOST) | `Sum`, `Max`, `Min`, `Prod` (mesh); `Sum` only (HOST ring) | — | FP16, FP32 (mesh; hard compile-time check); HOST ring: FP32 only (4-byte) | Mesh: O(N) remote traffic per step. Ring: O(N/P) remote traffic per step, 2(P-1) steps. |
 | AllGather | `pld.tensor.allgather` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Push-based. Input and target must be different buffers. |
-| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum` only | — | FP32 only (HOST builtin); any GM dtype (InCore) | Every rank stages all NR chunks before the call. |
+| ReduceScatter | `pld.tensor.reduce_scatter` | — | `Sum`, `Max`, `Min`, `Prod` (InCore); `Sum` only (HOST builtin) | — | FP32 only (HOST builtin); any GM dtype (InCore) | Every rank stages all NR chunks before the call. |
 | Broadcast | `pld.tensor.broadcast` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Root stages data before the call. |
 | All-to-All | `pld.tensor.all_to_all` | — | — | — | FP32 only (HOST builtin); any GM dtype (InCore) | Personalized exchange. Input and target must be different buffers. |
 | Barrier | `pld.tensor.barrier` | — | — | — | — | Signal is INT32, single-shot per call. |

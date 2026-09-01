@@ -1997,11 +1997,12 @@ ExprPtr LowerTensorAllGatherRule(const CallPtr& call, const std::vector<ExprPtr>
 //   Phase 3:   acc = load(target, [my_rank, 0], [1, SIZE])
 //              for peer != my_rank:
 //                  recv = remote_load(target, peer, [my_rank, 0], [1, SIZE])
-//                  acc = add(acc, recv)
+//                  acc = Reduce(op, acc, recv)
 //   Phase 3.5: post-reduce barrier (AtomicAdd 1 -> wait Ge generation + 1)
 //              — WAR prevention
 //   Phase 4:   tile.store(acc, [my_rank, 0], target)
-// Returns target (in-place rebind).  kSum only (first version).
+// Returns target (in-place rebind).  All four ReduceOps (kSum/kMax/kMin/kProd)
+// supported — the same dispatch the allreduce rules use.
 // ============================================================================
 
 ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<ExprPtr>& args,
@@ -2020,8 +2021,10 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
   ValidateMeshSignalShape(signal_type, "pld.tensor.reduce_scatter", span);
 
   auto op_value = GetRequiredKwarg<int>(call->kwargs_, "op", "pld.tensor.reduce_scatter");
-  INTERNAL_CHECK_SPAN(op_value == static_cast<int>(ReduceOp::kSum), span)
-      << "pld.tensor.reduce_scatter lowering supports ReduceOp::kSum only (got int " << op_value << ")";
+  INTERNAL_CHECK_SPAN(
+      op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd), span)
+      << "pld.tensor.reduce_scatter lowering received unknown ReduceOp " << op_value;
+  const auto reduce_op = static_cast<ReduceOp>(op_value);
 
   auto& reg = OpRegistry::GetInstance();
   auto comm = b.EmitCommSetup(target, span);
@@ -2058,7 +2061,7 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
                   OpRegistry::GetInstance().Create("pld.tile.remote_load",
                                                    {target, peer, my_data_offsets, chunk_shape}, {}, span),
                   span);
-              return then_body.Bind("acc_next", then_body.Add(acc, recv, span), span);
+              return then_body.Bind("acc_next", then_body.Reduce(reduce_op, acc, recv, span), span);
             },
             [&](LoweringBuilder&) -> ExprPtr { return acc; }, span);
       },

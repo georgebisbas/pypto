@@ -425,7 +425,8 @@ def reduce_scatter(
 
     Reduce-scatter: element-wise reduce chunks across all ranks, scatter
     one reduced chunk per rank.  ``op`` (:class:`ir.ReduceOp`) selects the
-    reduction operator (Sum only in first version).  Result type is
+    reduction operator — Sum, Max, Min, or Prod on the InCore rail; the
+    HOST builtin rail lowers Sum only.  Result type is
     ``target``'s :class:`ir.DistributedTensorType` (in-place rebind).
 
     LowerCompositeOps expands this into a 5-phase decomposition matching
