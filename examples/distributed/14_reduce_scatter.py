@@ -17,7 +17,8 @@ Concepts introduced:
   - the hand-rolled pattern: stage every chunk -> notify/wait barrier ->
     sum your chunk across every peer
   - the reveal: ``pld.tensor.reduce_scatter(data, signal, op=Sum)`` is the
-    stage + barrier + reduce in one call
+    barrier + reduce in one call — the stage stays yours (every rank must
+    write all ``P`` chunks into the window before the call)
   - this is the **reduce-scatter half of two-phase all-reduce** (step 09):
     the two-phase all-reduce is reduce-scatter followed by allgather
 
@@ -27,7 +28,8 @@ row ``c`` and reduces row ``my_rank``.
 Two modes, one step:
   - ``--mode hand`` (default): stage all chunks, barrier, sum your chunk
     across peers -> ``y[r] = sum_k inputs[k][chunk r]``
-  - ``--mode builtin``: ``pld.tensor.reduce_scatter`` -> same golden
+  - ``--mode builtin``: stage all chunks, ``pld.tensor.reduce_scatter`` ->
+    same golden
 
 The cost card: the first half of two-phase all-reduce — each rank ends with
 ``N/P`` elements reduced, ``(P-1)/P * N`` bytes received.
@@ -122,8 +124,8 @@ def build_reduce_scatter(nr: int, use_builtin: bool):
                 chunk = pl.load(x, [0, c * SIZE], [1, SIZE])
                 data = pl.store(chunk, [c, 0], data)
 
-            # Stage + barrier + reduce in one call: row my_rank of the window
-            # now holds this rank's reduced chunk.
+            # Barrier + reduce in one call (the staging above stays yours):
+            # row my_rank of the window now holds this rank's reduced chunk.
             data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
 
             acc = pl.load(data, [my_rank, 0], [1, SIZE])

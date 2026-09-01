@@ -91,7 +91,7 @@ def hand_step(self, x, y, data, signal):
     return pl.store(acc, [0, 0], y)
 ```
 
-- **`op=` 选择归约方式，但目前只实现了 `Sum`。** 该参数存在且默认为 `pld.ReduceOp.Sum`；`Max`、`Min`、`Prod` 在本集合通信上属于*预留*，并且在类型推导阶段就会被直接拒绝：`pld.tensor.reduce_scatter op must be ReduceOp.Sum (got int N); Max / Min / Prod lowerings are not yet implemented`。这比 `pld.tensor.allreduce` 更窄——后者确实接受完整家族，不要把那个假设带到这里。
+- **`op=` 选择归约方式，但目前只实现了 `Sum`。** 该参数存在且默认为 `pld.ReduceOp.Sum`；`Max`、`Min`、`Prod` 在本集合通信上属于*预留*，并且在类型推导阶段就会被直接拒绝：`pld.tensor.reduce_scatter op must be ReduceOp.Sum (got int N); Max / Min / Prod lowerings are not yet implemented`。这比 `pld.tensor.allreduce` 更窄——后者确实接受完整家族，不要把步骤 11（[16-allreduce_reveal](16-allreduce_reveal.md)）的那个假设带到这里。
 - **window 的行 `my_rank` 就是你的归约分块**——与手工版本相同的行-分块布局。
 
 ### IR 对比（教学工件）

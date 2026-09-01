@@ -16,7 +16,8 @@ Concepts introduced:
   - the hand-rolled three-phase pattern: root stage-in -> notify/wait
     barrier -> every rank ``remote_load``s root's slice
   - the reveal: ``pld.tensor.broadcast(data, signal, root=...)`` is the
-    stage + barrier + read in one call
+    barrier + read in one call — the stage stays yours (root must write its
+    slice into the window before the call)
   - non-root inputs are ignored: only root's data may appear in the output
 
 Two modes, one step:

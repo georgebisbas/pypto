@@ -113,7 +113,8 @@ The reveal replaces phases 2–3 with one call:
   `pld.tensor.reduce_scatter op must be ReduceOp.Sum (got int N); Max / Min /
   Prod lowerings are not yet implemented`. This is
   narrower than `pld.tensor.allreduce`, which does take the whole family —
-  don't carry that assumption across from step 16.
+  don't carry that assumption across from step 11
+  ([16-allreduce_reveal](16-allreduce_reveal.md)).
 - **Row `my_rank` of the window is your reduced chunk** — the same
   row-per-chunk layout the hand-rolled version used.
 

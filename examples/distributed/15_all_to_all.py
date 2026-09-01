@@ -166,12 +166,14 @@ def build_all_to_all(nr: int, use_builtin: bool):
 
 
 def expected_all_to_all(inputs: torch.Tensor) -> torch.Tensor:
-    """Golden: output[rank, src, j] = the chunk rank src intended for rank."""
-    nranks = inputs.shape[0]
-    src_idx = torch.arange(nranks, dtype=torch.float32).view(1, -1, 1)
-    rank_idx = torch.arange(nranks, dtype=torch.float32).view(-1, 1, 1)
-    j = torch.arange(SIZE, dtype=torch.float32).view(1, 1, -1)
-    return src_idx * 1000 + rank_idx * 100 + j
+    """Golden: ``output[rank, src] = inputs[src, rank]`` — the chunk src sent rank.
+
+    All-to-all transposes the (sender, receiver) matrix: ``inputs`` is indexed
+    ``[sender, receiver]`` and the result is indexed ``[receiver, sender]``.
+    Deriving it from ``inputs`` rather than restating the input formula keeps
+    the golden tied to the data the kernel actually consumed.
+    """
+    return inputs.transpose(0, 1).contiguous()
 
 
 def main() -> int:
