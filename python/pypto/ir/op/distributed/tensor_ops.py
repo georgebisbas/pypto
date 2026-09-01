@@ -501,9 +501,42 @@ def all_to_all_v(
     return _ir_core.create_op_call("pld.tensor.all_to_all_v", _args, {}, actual_span)
 
 
+def allgather_v(
+    local_data: Expr,
+    target: Expr,
+    signal: Expr,
+    send_count: Expr,
+    recv_counts: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.allgather_v(...)`` Call.
+
+    5-arg window-as-result intrinsic: 2D ``local_data`` [MAX_ROWS, SIZE] holding
+    this rank's rows, DistributedTensor ``target`` [NR*MAX_ROWS, SIZE] that
+    receives the gathered result, INT32 barrier ``signal`` [NR, 1], INT32
+    ``send_count`` [1] / [1, 1] holding this rank's row count, and window-bound
+    INT32 ``recv_counts`` [NR, 1] that receives per-source valid-row counts.
+
+    Unlike ``all_to_all_v`` there is a single count, not a per-destination
+    vector: every peer receives the same rows, so the clamp is applied once.
+
+    .. warning::
+
+       Rows past a source's count are never written, and window memory is not
+       guaranteed zeroed — those bytes are *uninitialised* and may decode as
+       **NaN or Inf**. Trim to ``recv_counts`` **before** computing over the
+       dense ``[NR*MAX_ROWS, SIZE]`` block, or NaN propagates into valid rows.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    _args: list[Expr] = [local_data, target, signal, send_count, recv_counts]
+    return _ir_core.create_op_call("pld.tensor.allgather_v", _args, {}, actual_span)
+
+
 __all__ = [
     "all_to_all",
     "all_to_all_v",
+    "allgather_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",

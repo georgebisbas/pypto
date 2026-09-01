@@ -741,6 +741,124 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     .f_deduce_type(DeduceTensorAllToAllVType);
 
 // ============================================================================
+// pld.tensor.allgather_v — all-gather with a runtime per-rank row count
+// ============================================================================
+
+namespace {
+
+TypePtr DeduceTensorAllGatherVType(const std::vector<ExprPtr>& args,
+                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  (void)kwargs;
+  constexpr const char* kOpName = "pld.tensor.allgather_v";
+  CHECK(args.size() == 5) << kOpName
+                          << " requires exactly 5 positional arguments "
+                             "(local_data, target, signal, send_count, recv_counts), but got "
+                          << args.size();
+  for (size_t i = 0; i < args.size(); ++i) {
+    CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
+  }
+  // local_data and target must be different buffers — aliasing them is a
+  // cross-process data race (same constraint as allgather / all_to_all).
+  CHECK(args[0].get() != args[1].get())
+      << kOpName
+      << " local_data and target must be different buffers, but the same expression was passed for both";
+
+  // local_data: this rank's rows, [MAX_ROWS, SIZE]. Unlike `allgather`'s fixed
+  // [1, SIZE], the *valid* row count is a runtime value; MAX_ROWS is the
+  // compile-time capacity that fixes the row arithmetic.
+  auto input_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(input_type) << kOpName << " local_data must be a Tensor or DistributedTensor, got "
+                    << args[0]->GetType()->TypeName();
+  CHECK(input_type->shape_.size() == 2)
+      << kOpName << " local_data must be 2D [MAX_ROWS, SIZE], got " << input_type->shape_.size() << " dims";
+
+  // target: flat 2D [NR*MAX_ROWS, SIZE] window; rank `src`'s rows land at src*MAX_ROWS.
+  auto target_type = As<DistributedTensorType>(args[1]->GetType());
+  CHECK(target_type) << kOpName << " target must be a DistributedTensor (window-bound), got "
+                     << args[1]->GetType()->TypeName();
+  CHECK(target_type->shape_.size() == 2)
+      << kOpName << " target must be 2D [NR*MAX_ROWS, SIZE], got " << target_type->shape_.size() << " dims";
+  CHECK(AreExprsEqual(target_type->shape_[1], input_type->shape_[1]))
+      << kOpName << " target SIZE must equal local_data SIZE";
+  CHECK(target_type->dtype_ == input_type->dtype_)
+      << kOpName << " target dtype " << target_type->dtype_.ToString() << " must match local_data dtype "
+      << input_type->dtype_.ToString();
+
+  auto signal_type = As<DistributedTensorType>(args[2]->GetType());
+  CHECK(signal_type) << kOpName << " signal must be a DistributedTensor (window-bound), got "
+                     << args[2]->GetType()->TypeName();
+  CHECK(signal_type->dtype_ == DataType::INT32)
+      << kOpName << " signal must have INT32 element type, got dtype " << signal_type->dtype_.ToString();
+  CHECK(signal_type->shape_.size() == 2)
+      << kOpName << " signal must be 2D [NR, 1], got " << signal_type->shape_.size() << " dims";
+  auto signal_dim0 = As<ConstInt>(signal_type->shape_[0]);
+  CHECK(signal_dim0) << kOpName << " signal dim 0 (NR) must be a compile-time constant";
+
+  // send_count: this rank's row count. One value, not a per-peer vector — every
+  // peer receives the same rows, which is what separates this from all_to_all_v.
+  auto count_type = AsTensorTypeLike(args[3]->GetType());
+  CHECK(count_type) << kOpName << " send_count must be a Tensor or DistributedTensor, got "
+                    << args[3]->GetType()->TypeName();
+  CHECK(count_type->dtype_ == DataType::INT32)
+      << kOpName << " send_count must have INT32 element type, got dtype " << count_type->dtype_.ToString();
+  CHECK(count_type->shape_.size() == 1 || count_type->shape_.size() == 2)
+      << kOpName << " send_count must be 1D [1] or 2D [1, 1], got " << count_type->shape_.size() << " dims";
+  if (auto count_dim0 = As<ConstInt>(count_type->shape_[0])) {
+    CHECK(count_dim0->value_ == 1) << kOpName
+                                   << " send_count first dimension must be 1 (this rank's own count), got "
+                                   << count_dim0->value_;
+  }
+
+  auto recv_type = As<DistributedTensorType>(args[4]->GetType());
+  CHECK(recv_type) << kOpName << " recv_counts must be a DistributedTensor (window-bound), got "
+                   << args[4]->GetType()->TypeName();
+  CHECK(recv_type->dtype_ == DataType::INT32)
+      << kOpName << " recv_counts must have INT32 element type, got dtype " << recv_type->dtype_.ToString();
+  CHECK(recv_type->shape_.size() == 2)
+      << kOpName << " recv_counts must be 2D [NR, 1], got " << recv_type->shape_.size() << " dims";
+  auto recv_dim0 = As<ConstInt>(recv_type->shape_[0]);
+  CHECK(recv_dim0) << kOpName << " recv_counts dim 0 (NR) must be a compile-time constant";
+  CHECK(recv_dim0->value_ == signal_dim0->value_)
+      << kOpName << " recv_counts dim 0 (" << recv_dim0->value_
+      << ") must equal signal dim 0 (NR = " << signal_dim0->value_ << ")";
+
+  // Window-as-result: return target.
+  return target_type;
+}
+
+}  // namespace
+
+REGISTER_OP("pld.tensor.allgather_v")
+    .set_description(
+        "All-gather with a runtime per-rank row count (push-based, window-as-result). Each rank "
+        "pushes `rows = clamp(send_count, 0, MAX_ROWS)` of its own rows into every peer's `target` "
+        "at `my_rank*MAX_ROWS`, where `MAX_ROWS = target.shape[0] / NR` is the compile-time per-rank "
+        "capacity. The transfer extent is the runtime `[rows, SIZE]`, so only the payload crosses "
+        "the wire. During the same push each rank publishes that clamped count into every peer's "
+        "`recv_counts[my_rank, 0]` via `pld.system.notify` (Set), so a receiver knows how many rows "
+        "each source actually sent. Rows past a source's count are NOT written and are "
+        "UNINITIALISED -- they may decode as NaN/Inf; trim to `recv_counts` before computing over "
+        "the capacity block. Differs from `all_to_all_v` in that every peer receives the same rows, "
+        "so there is one count rather than a per-destination vector.")
+    .set_op_category("DistributedOp")
+    .add_argument("local_data", "Tensor or DistributedTensor [MAX_ROWS, SIZE] — this rank's rows (Input)")
+    .add_argument("target", "Window-bound DistributedTensor [NR*MAX_ROWS, SIZE] — gathered result (InOut)")
+    .add_argument("signal", "Window-bound INT32 DistributedTensor [NR, 1] — self-clearing barrier (InOut)")
+    .add_argument("send_count",
+                  "INT32 Tensor [1] or [1, 1] — this rank's row count, clamped to MAX_ROWS (Input)")
+    .add_argument("recv_counts",
+                  "Window-bound INT32 DistributedTensor [NR, 1] — after the call, recv_counts[src, 0] "
+                  "holds how many rows src sent (InOut)")
+    .no_memory_spec()
+    // Same effects as all_to_all_v: the data destination is overwritten, never
+    // read, so declaring it Write keeps the enclosing parameter from becoming
+    // InOut and staging the buffer host->device. The signal is genuinely both.
+    .set_arg_effect(1, ArgEffect::Write)
+    .set_arg_effect(2, ArgEffect::ReadWrite)
+    .set_arg_effect(4, ArgEffect::Write)
+    .f_deduce_type(DeduceTensorAllGatherVType);
+
+// ============================================================================
 // pld.tensor.reduce_scatter — reduce + scatter chunks across ranks
 // ============================================================================
 

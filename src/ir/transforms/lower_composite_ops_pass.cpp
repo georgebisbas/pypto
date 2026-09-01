@@ -2443,6 +2443,128 @@ ExprPtr LowerTensorAllToAllVRule(const CallPtr& call, const std::vector<ExprPtr>
   return target;
 }
 
+// ============================================================================
+// LowerTensorAllGatherVRule — pld.tensor.allgather_v (runtime per-rank count)
+//
+// The all_to_all_v protocol with one simplification: every peer receives the
+// *same* rows, so there is a single count rather than a per-destination vector,
+// and the clamp happens once outside the peer loop.
+//
+//   rows = clamp(send_count, 0, MAX_ROWS)          MAX_ROWS = target.rows / NR
+//   for peer in 0..NR:
+//     notify(recv_counts @ peer, [my_rank, 0], rows, Set)   // unconditional
+//     if rows > 0:
+//       pld.tile.put(target @ peer, local_data, [my_rank*MAX_ROWS, 0], [0, 0], [rows, SIZE])
+//   barrier; epilogue
+// ============================================================================
+
+ExprPtr LowerTensorAllGatherVRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b) {
+  const Span& span = call->span_;
+  INTERNAL_CHECK_SPAN(args.size() == 5, span)
+      << "pld.tensor.allgather_v lowering expects 5 args (deducer-rejected otherwise)";
+  const auto& input = args[0];
+  const auto& target = args[1];
+  const auto& signal = args[2];
+  const auto& send_count = args[3];
+  const auto& recv_counts = args[4];
+
+  auto target_type = As<DistributedTensorType>(target->GetType());
+  INTERNAL_CHECK_SPAN(target_type, span)
+      << "pld.tensor.allgather_v target must be DistributedTensorType (deducer-rejected otherwise)";
+  auto signal_type = As<DistributedTensorType>(signal->GetType());
+  ValidateMeshSignalShape(signal_type, "pld.tensor.allgather_v", span);
+
+  auto& reg = OpRegistry::GetInstance();
+  auto comm = b.EmitCommSetup(target, span);
+
+  auto size_expr = target_type->shape_[1];
+  auto zero_idx = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto one_idx = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+  // MAX_ROWS is the compile-time per-rank capacity: it fixes the row arithmetic
+  // so a receiver can locate each source's block without knowing its count.
+  auto total_rows_c = As<ConstInt>(target_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(total_rows_c, span)
+      << "pld.tensor.allgather_v target dim 0 must be a compile-time constant";
+  auto nr_c = As<ConstInt>(signal_type->shape_[0]);
+  INTERNAL_CHECK_SPAN(nr_c && nr_c->value_ > 0, span)
+      << "pld.tensor.allgather_v signal dim 0 (NR) must be a positive compile-time constant";
+  INTERNAL_CHECK_SPAN(total_rows_c->value_ % nr_c->value_ == 0, span)
+      << "pld.tensor.allgather_v target dim 0 (" << total_rows_c->value_ << ") must be divisible by NR ("
+      << nr_c->value_ << ")";
+  auto max_rows_expr = std::make_shared<ConstInt>(total_rows_c->value_ / nr_c->value_, DataType::INDEX, span);
+
+  // Static [1, SIZE] staging tile; pld.tile.put 2-D-slides the runtime transfer
+  // through it, so the stage stays statically sized while the extent is dynamic.
+  auto stage_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{one_idx, size_expr}, span);
+  auto put_stage =
+      b.Bind("agv_stage",
+             reg.Create("tile.create", {stage_shape},
+                        {{"dtype", target_type->dtype_}, {"target_memory", MemorySpace::Vec}}, span),
+             span);
+
+  // One count for every peer — read once, clamped once, outside the loop.
+  // The deducer accepts [1] or [1, 1], so the index tuple must match its rank.
+  auto count_type = AsTensorTypeLike(send_count->GetType());
+  INTERNAL_CHECK_SPAN(count_type, span)
+      << "pld.tensor.allgather_v send_count must be Tensor-like (deducer-rejected otherwise)";
+  const size_t count_rank = count_type->shape_.size();
+  INTERNAL_CHECK_SPAN(count_rank == 1 || count_rank == 2, span)
+      << "pld.tensor.allgather_v send_count must be 1D [1] or 2D [1, 1] (deducer-rejected otherwise)";
+  std::vector<ExprPtr> count_indices{zero_idx};
+  if (count_rank == 2) count_indices.push_back(zero_idx);
+  auto count_offsets = std::make_shared<MakeTuple>(count_indices, span);
+  auto count_value =
+      b.Bind("agv_count", reg.Create("tensor.read", {send_count, count_offsets}, {}, span), span);
+  // Two-sided clamp: an over-large count would push into the next rank's slice;
+  // a negative one would publish a negative recv_count. Both are floored here,
+  // and the published value is the clamped one, matching all_to_all_v.
+  auto rows = b.Bind(
+      "agv_rows",
+      MakeMax(MakeMin(MakeCast(count_value, DataType::INDEX, span), max_rows_expr, span), zero_idx, span),
+      span);
+  auto rows_i32 = b.Bind("agv_rows_i32", MakeCast(rows, DataType::INT32, span), span);
+
+  auto my_base = MakeMul(comm.my_rank, max_rows_expr, span);
+  auto dst_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{my_base, zero_idx}, span);
+  auto src_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero_idx, zero_idx}, span);
+  auto transfer_shape = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows, size_expr}, span);
+  auto my_recv_offsets = tile_conversion_utils::MakeSignalOffsets(comm.my_rank, span);
+
+  b.EmitFor(
+      "peer", zero_idx, comm.nranks_idx, one_idx,
+      [&](LoweringBuilder& body, const VarPtr& peer) {
+        // Published unconditionally, outside the rows > 0 guard: a peer must
+        // still learn recv_counts = 0 from a rank that sent nothing.
+        body.Bind("agv_count_notify",
+                  reg.Create("pld.system.notify", {recv_counts, peer, my_recv_offsets, rows_i32},
+                             {{"op", static_cast<int>(NotifyOp::kSet)}}, span),
+                  span);
+        // Skip the push when there is nothing to send — a zero-extent transfer
+        // is not a meaningful TPUT.
+        body.EmitIf(
+            body.Gt(rows, zero_idx, span),
+            [&](LoweringBuilder& then_body) {
+              then_body.Bind(
+                  "agv_push",
+                  reg.Create("pld.tile.put",
+                             {target, peer, input, put_stage, dst_offsets, src_offsets, transfer_shape},
+                             {{"atomic", static_cast<int>(AtomicType::kNone)}}, span),
+                  span);
+            },
+            /*else_fn=*/nullptr, span);
+      },
+      span);
+
+  const int64_t generation = b.EmitBarrier(signal, comm, "", span);
+  auto total_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+  b.EmitEpilogueReset(signal, comm, total_i32, span);
+
+  // Window-as-result: the caller reads back from target, using recv_counts[src]
+  // to find each source's valid rows and skip the capacity holes.
+  return target;
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -2481,6 +2603,7 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
       {"pld.tensor.broadcast", &LowerTensorBroadcastRule},
       {"pld.tensor.all_to_all", &LowerTensorAllToAllRule},
       {"pld.tensor.all_to_all_v", &LowerTensorAllToAllVRule},
+      {"pld.tensor.allgather_v", &LowerTensorAllGatherVRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;
@@ -2646,7 +2769,7 @@ class LowerCompositeOpsMutator : public IRMutator {
     return IsOp(call, "pld.tensor.allgather") || IsOp(call, "pld.tensor.allreduce") ||
            IsOp(call, "pld.tensor.barrier") || IsOp(call, "pld.tensor.broadcast") ||
            IsOp(call, "pld.tensor.reduce_scatter") || IsOp(call, "pld.tensor.all_to_all") ||
-           IsOp(call, "pld.tensor.all_to_all_v");
+           IsOp(call, "pld.tensor.all_to_all_v") || IsOp(call, "pld.tensor.allgather_v");
   }
 
   [[nodiscard]] static bool ShouldSkipHostCollective(const CallPtr& call) {

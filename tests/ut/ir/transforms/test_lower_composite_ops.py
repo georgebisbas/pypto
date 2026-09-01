@@ -2051,6 +2051,141 @@ def test_allgather_lowering_is_idempotent():
 
 
 # ============================================================================
+# pld.tensor.allgather_v lowering (runtime per-rank row count)
+# ============================================================================
+
+_AGV_SIZE = 16
+_AGV_NRANKS = 2
+_AGV_MAX_ROWS = 4
+_AGV_REQUIRED_OPS = {
+    ir.get_op("pld.system.get_comm_ctx").name,
+    ir.get_op("pld.system.nranks").name,
+    ir.get_op("pld.system.rank").name,
+    ir.get_op("pld.system.notify").name,
+    ir.get_op("pld.system.wait").name,
+    ir.get_op("pld.tile.put").name,
+    ir.get_op("tile.create").name,
+    ir.get_op("tensor.read").name,
+}
+
+
+def _build_allgather_v_before(max_rows=_AGV_MAX_ROWS, count_shape=(1,)):
+    """Minimal Before program calling ``pld.tensor.allgather_v``."""
+    SIZE = _AGV_SIZE
+    nr = _AGV_NRANKS
+    total = nr * max_rows
+    cshape = list(count_shape)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def gather_v_step(
+            self,
+            inp: pl.Tensor[[max_rows, SIZE], pl.FP32],
+            count: pl.Tensor[cshape, pl.INT32],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
+            return pld.tensor.allgather_v(inp, data, signal, count, recv_counts)
+
+    return Before
+
+
+def test_allgather_v_is_decomposed_to_primitives():
+    """The composite Call is replaced by its decomposition; none survives."""
+    After = passes.lower_composite_ops()(_build_allgather_v_before())
+    op_names = set(_collect_op_names(After))
+
+    assert "pld.tensor.allgather_v" not in op_names, (
+        "lower_composite_ops must remove the composite allgather_v call entirely"
+    )
+    missing = _AGV_REQUIRED_OPS - op_names
+    assert not missing, f"lowered IR missing expected ops: {missing}"
+
+
+def test_allgather_v_reads_the_count_once_outside_the_peer_loop():
+    """One count, not a per-destination vector — that is what separates this
+    from all_to_all_v, and it must show up as a single scalar read."""
+    After = passes.lower_composite_ops()(_build_allgather_v_before())
+    reads = _collect_op_names(After).count(ir.get_op("tensor.read").name)
+    assert reads == 1, f"expected exactly one send_count read hoisted out of the peer loop, got {reads}"
+
+
+def test_allgather_v_accepts_2d_count_shape():
+    """``send_count`` may be [1] or [1, 1]; both are this rank's single count."""
+    After = passes.lower_composite_ops()(_build_allgather_v_before(count_shape=(1, 1)))
+    assert "pld.tensor.allgather_v" not in set(_collect_op_names(After))
+
+
+def test_allgather_v_lowering_is_idempotent():
+    """Running the pass on already-lowered IR is a no-op."""
+    once = passes.lower_composite_ops()(_build_allgather_v_before())
+    twice = passes.lower_composite_ops()(once)
+    ir.assert_structural_equal(twice, once)
+
+
+class TestAllGatherVDeducerRejections:
+    """The deducer must reject shapes the lowering cannot honour."""
+
+    def test_aliased_local_data_and_target_rejected(self):
+        """Pushing from and into the same window is a cross-process data race."""
+        SIZE, nr, mr = _AGV_SIZE, _AGV_NRANKS, _AGV_MAX_ROWS
+
+        with pytest.raises((ValueError, TypeError, ParserError), match=r"must be different buffers"):
+
+            @pl.program
+            class Aliased:
+                @pl.function(type=pl.FunctionType.InCore)
+                def step(
+                    self,
+                    count: pl.Tensor[[1], pl.INT32],
+                    data: pl.InOut[pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]],
+                    signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                    recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                ) -> pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]:
+                    return pld.tensor.allgather_v(data, data, signal, count, recv_counts)
+
+    def test_non_int32_count_rejected(self):
+        """A float count would silently truncate at the clamp."""
+        SIZE, nr, mr = _AGV_SIZE, _AGV_NRANKS, _AGV_MAX_ROWS
+
+        with pytest.raises((ValueError, TypeError, ParserError), match=r"send_count must have INT32"):
+
+            @pl.program
+            class BadCount:
+                @pl.function(type=pl.FunctionType.InCore)
+                def step(
+                    self,
+                    inp: pl.Tensor[[mr, SIZE], pl.FP32],
+                    count: pl.Tensor[[1], pl.FP32],
+                    data: pl.InOut[pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]],
+                    signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                    recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                ) -> pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]:
+                    return pld.tensor.allgather_v(inp, data, signal, count, recv_counts)
+
+    def test_recv_counts_nr_mismatch_rejected(self):
+        """recv_counts is indexed per rank; its NR must match the signal's."""
+        SIZE, nr, mr = _AGV_SIZE, _AGV_NRANKS, _AGV_MAX_ROWS
+
+        with pytest.raises((ValueError, TypeError, ParserError), match=r"recv_counts dim 0"):
+
+            @pl.program
+            class BadRecv:
+                @pl.function(type=pl.FunctionType.InCore)
+                def step(
+                    self,
+                    inp: pl.Tensor[[mr, SIZE], pl.FP32],
+                    count: pl.Tensor[[1], pl.INT32],
+                    data: pl.InOut[pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]],
+                    signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+                    recv_counts: pl.InOut[pld.DistributedTensor[[nr + 1, 1], pl.INT32]],
+                ) -> pld.DistributedTensor[[nr * mr, SIZE], pl.FP32]:
+                    return pld.tensor.allgather_v(inp, data, signal, count, recv_counts)
+
+
+# ============================================================================
 # pld.tensor.reduce_scatter lowering
 # ============================================================================
 

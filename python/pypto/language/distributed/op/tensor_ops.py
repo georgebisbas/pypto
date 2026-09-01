@@ -1077,9 +1077,93 @@ def all_to_all_v(
     return DistributedTensor(expr=call)
 
 
+def allgather_v(
+    local_data: Tensor | DistributedTensor,
+    target: DistributedTensor,
+    signal: DistributedTensor,
+    send_count: Tensor | DistributedTensor,
+    recv_counts: DistributedTensor,
+) -> DistributedTensor:
+    """All-gather with a runtime per-rank row count (push-based, window-as-result).
+
+    ``pld.tensor.allgather_v(local_data, target, signal, send_count, recv_counts)``.
+
+    The variable-size counterpart of :func:`allgather`, which fixes every rank's
+    contribution at a compile-time ``[1, SIZE]``. Here each rank contributes
+    ``rows = clamp(send_count, 0, MAX_ROWS)`` rows, read at runtime, so the
+    contribution may be data-dependent — a context-parallel rank's token count,
+    for example.
+
+    ``MAX_ROWS = target.shape[0] // NR`` is the compile-time per-rank
+    **capacity**: it fixes the row arithmetic so a receiver can locate each
+    source's block without knowing that source's count. It is **not** the
+    transfer size — the extent is the runtime ``[rows, SIZE]``, so padding up to
+    the capacity never crosses the wire.
+
+    The clamp is two-sided. A count above ``MAX_ROWS`` is capped so it cannot
+    push into the next rank's slice; a negative count is floored at ``0``, and
+    since the published value is that same clamped count, a negative
+    ``send_count`` publishes ``recv_counts = 0`` rather than the negative number.
+
+    During the same push each rank publishes its clamped count into every peer's
+    ``recv_counts[my_rank, 0]`` via :func:`pld.system.notify` (Set). After the
+    barrier, ``recv_counts[src, 0]`` says how many rows ``src`` sent — which is
+    also exactly how many were transferred.
+
+    **Relation to** :func:`all_to_all_v`: that op sends *different* rows to each
+    destination, so it takes a per-destination count vector ``[NR]``. Here every
+    peer receives the *same* rows, so there is a single count.
+
+    .. warning::
+
+       Trim to ``recv_counts`` **before** doing arithmetic over the capacity
+       block. Rows beyond a source's count are **not written at all** — those
+       bytes are *uninitialised* and may decode as **NaN or Inf**, not merely as
+       a wrong-but-finite value. Mask first, then compute.
+
+    .. code-block:: python
+
+        target = pld.tensor.allgather_v(local, target, sig, count, recv_counts)
+        for src in pl.range(NR):
+            n = pl.read(recv_counts, [src, 0])      # rows this source sent
+            for r in pl.range(n):                    # never read past n
+                row = pl.load(target, [src * MAX_ROWS + r, 0], [1, SIZE])
+
+    Args:
+        local_data: ``[MAX_ROWS, SIZE]`` :class:`pl.Tensor` or
+            :class:`pld.DistributedTensor` holding this rank's rows. Must differ
+            from ``target``.
+        target: Window-bound :class:`pld.DistributedTensor`
+            ``[NR*MAX_ROWS, SIZE]`` (InOut); returned as the result. Rank
+            ``src``'s rows land at ``src*MAX_ROWS``.
+        signal: Window-bound INT32 :class:`pld.DistributedTensor` ``[NR, 1]``
+            barrier (InOut). Self-clearing — reusable across calls, including
+            inside ``for`` / ``while``.
+        send_count: INT32 ``[1]`` or ``[1, 1]`` — this rank's row count, read at
+            runtime and clamped to ``MAX_ROWS`` (Input).
+        recv_counts: Window-bound INT32 :class:`pld.DistributedTensor`
+            ``[NR, 1]`` — after the call, ``recv_counts[src, 0]`` holds how many
+            rows ``src`` sent here (InOut).
+
+    Returns:
+        The ``target`` :class:`pld.DistributedTensor` with the gathered rows.
+    """
+    target_expr, signal_expr, recv_expr = _unwrap_distributed_tensors(
+        "pld.tensor.allgather_v",
+        target=target,
+        signal=signal,
+        recv_counts=recv_counts,
+    )
+    input_expr = _unwrap(local_data)
+    count_expr = _unwrap(send_count)
+    call = _ir_tensor.allgather_v(input_expr, target_expr, signal_expr, count_expr, recv_expr)
+    return DistributedTensor(expr=call)
+
+
 __all__ = [
     "all_to_all",
     "all_to_all_v",
+    "allgather_v",
     "alloc_window_buffer",
     "allgather",
     "allreduce",
