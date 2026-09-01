@@ -167,7 +167,6 @@ PropertyVerifierPtr CreateAccStorePhaseValidPropertyVerifier();
  */
 PropertyVerifierPtr CreateCompositeInSpmdScopeWarningVerifier();
 
-
 /**
  * @brief Factory function for creating NormalizedStmtStructure property verifier
  * @return Shared pointer to NormalizedStmtStructure PropertyVerifier

@@ -21,6 +21,7 @@ Behaviour is pinned by ``tests/ut/ir/transforms/test_composite_in_spmd_partition
 
 import pypto.language as pl
 import pypto.language.distributed as pld
+import pytest
 from pypto.pypto_core import passes
 
 SIZE = 16
@@ -116,9 +117,17 @@ class TestNoFalsePositives:
 
         assert _messages(SpmdOnly) == []
 
+    def test_spmd_width_one_is_silent(self):
+        """pl.spmd(1) runs the collective exactly once — no duplication, no warning."""
+        assert _messages(_allgather_in_spmd(1)) == []
+
 
 class TestRegistryWiring:
     def test_check_is_selectable(self):
         checks = passes.DiagnosticCheckSet()
         checks.insert(passes.DiagnosticCheck.CompositeInSpmdScope)
         assert checks.contains(passes.DiagnosticCheck.CompositeInSpmdScope)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

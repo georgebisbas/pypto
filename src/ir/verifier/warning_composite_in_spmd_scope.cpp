@@ -46,12 +46,14 @@
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/verifier/diagnostic_check_registry.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -93,6 +95,15 @@ class CompositeInSpmdScopeChecker : public IRVisitor {
 
   void VisitExpr_(const CallPtr& op) override {
     if (!enclosing_widths_.empty() && IsCompositeCollective(op)) {
+      // A statically-known width of 1 executes exactly once — one block, one
+      // transfer, one barrier notifier — so none of the duplication this check
+      // exists to surface applies. Emitting here would be a false positive on
+      // the very single-block pattern the message recommends.
+      if (auto width_const = As<ConstInt>(enclosing_widths_.back());
+          width_const && width_const->value_ == 1) {
+        IRVisitor::VisitExpr_(op);
+        return;
+      }
       // Innermost enclosing scope decides how many blocks run this call.
       const std::string width = DescribeWidth(enclosing_widths_.back());
       std::ostringstream msg;

@@ -50,6 +50,7 @@ NRANKS = 2
 _OP_PUT = ir.get_op("pld.tile.put").name
 _OP_NOTIFY = ir.get_op("pld.system.notify").name
 _OP_WAIT = ir.get_op("pld.system.wait").name
+_OP_REMOTE_LOAD = ir.get_op("pld.tile.remote_load").name
 
 # A partitioned lowering has to read the block index under one of these names.
 # Resolved through the registry rather than compared as bare literals, per
@@ -86,8 +87,17 @@ def _counts(prog) -> dict[str, int]:
         "put": names.count(_OP_PUT),
         "notify": names.count(_OP_NOTIFY),
         "wait": names.count(_OP_WAIT),
+        "remote_load": names.count(_OP_REMOTE_LOAD),
         "block_idx": sum(names.count(b) for b in _BLOCK_INDEX_OPS),
     }
+
+
+# Width-independence is asserted on every communication op the schedules can
+# emit — mesh allreduce also transfers peer data via ``pld.tile.remote_load``
+# (see the allreduce rule in lower_composite_ops_pass.cpp), so a width-dependent
+# lowering that switches put/notify/wait totals for remote_loads would otherwise
+# slip through the count comparison.
+_COMMUNICATION_KEYS = ("put", "notify", "wait", "remote_load")
 
 
 def _build_allgather_in_spmd(width: int | None):
@@ -179,7 +189,7 @@ def test_composite_ignores_the_enclosing_block_index(width):
         f"expected exactly 1 block-index read (pl.spmd's loop variable), got "
         f"{wrapped['block_idx']} — if the composite started reading it, plan 92's premise is void"
     )
-    for key in ("put", "notify", "wait"):
+    for key in _COMMUNICATION_KEYS:
         assert bare[key] == wrapped[key], (
             f"{key} count changed when wrapped in pl.spmd({width}) "
             f"({bare[key]} -> {wrapped[key]}); the composite is spmd-aware after all"
@@ -300,7 +310,7 @@ def test_allreduce_emitted_work_is_independent_of_spmd_width(mode):
     bare = _counts(passes.lower_composite_ops()(_build_allreduce_in_spmd(None, mode)))
     for width in (2, 8):
         wrapped = _counts(passes.lower_composite_ops()(_build_allreduce_in_spmd(width, mode)))
-        for key in ("put", "notify", "wait"):
+        for key in _COMMUNICATION_KEYS:
             assert bare[key] == wrapped[key], (
                 f'mode="{mode}": {key} count changed under pl.spmd({width}) '
                 f"({bare[key]} -> {wrapped[key]}); this schedule may already partition"
@@ -340,3 +350,7 @@ def test_incore_core_num_rejection_does_not_recommend_spmd():
     assert "HOST orchestrator" in message, (
         f"rejection should name the HOST rail as the multi-core path, got: {message}"
     )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
