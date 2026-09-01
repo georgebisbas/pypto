@@ -124,7 +124,7 @@ Ring allreduce（`mode="ring"`）
 的 signal 为 rank-2，形状为 `[2 * (NR - 1) + 1, NR]`，其
 `shape[0]` 在 signal 两个维度均为编译期常量时必须恰好等于 `2 * (NR - 1) + 1`；仅
 `shape[0]` 静态可知时则至少为 `2 * (NR - 1) + 1`（两个维度均为动态时无静态检查）。
-当参与设备数静态可知时，signal 的静态容量必须足够。ring allreduce 还要求 `numel(src) % NR == 0`（ring schedule 将 src 划分为 NR 个连续 chunk；余数非零会留下内核无法处理的尾部部分 chunk）。host-ring 的 `src` 形状必须静态已知——动态 extent 会被拒绝，否则运行时 `numel` 不被 `NR` 整除时内核会静默返回未归约的数据。
+当参与设备数静态可知时，signal 的静态容量必须足够。ring allreduce 会在运行时把每个 rank 的 `src` 划分为 `NR` 个均衡、可能不齐（ragged）的 chunk——chunk `r` 覆盖 `[floor(numel*r/NR), floor(numel*(r+1)/NR))`——因此 `numel(src)` 不必能被 `NR` 整除，host-ring 的 `src` 形状也不必静态已知。每次 TPUT 传输都通过 staging tile 的 valid shape 精确收窄到对应 chunk 的范围，因此不齐（ragged）与动态输入均得到完整支持。
 
 Ring allreduce 目前仅支持 `ReduceOp.Sum` 和 `dtype=FP32`。
 `ReduceOp.Max`、`ReduceOp.Min`、`ReduceOp.Prod` 以及 `FP16` 在

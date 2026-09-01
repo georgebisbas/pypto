@@ -139,11 +139,11 @@ Ring allreduce (`mode="ring"`) uses a rank-2 signal shaped
 signal dimensions are compile-time constants, and must be at least
 `2 * (NR - 1) + 1` when only `shape[0]` is statically known (no static check when
 both dims are dynamic). When the participating device count is statically known, the signal
-must have enough static capacity. Ring allreduce additionally requires `numel(src) % NR == 0`
-(the ring schedule partitions src into NR contiguous chunks; a non-zero remainder would leave a
-trailing partial chunk the kernel cannot handle). The host-ring `src` shape must be
-statically known — dynamic extents are rejected, since the kernel would otherwise silently
-return unreduced data when the runtime `numel` is not divisible by `NR`.
+must have enough static capacity. Ring allreduce partitions each rank's `src` into `NR` balanced,
+potentially ragged chunks at runtime — chunk `r` spans `[floor(numel*r/NR), floor(numel*(r+1)/NR))` — so
+`numel(src)` need not be divisible by `NR` and the host-ring `src` shape need not be statically
+known. Every TPUT transfer is narrowed to its chunk's exact extent via the staging tile's valid
+shape, so ragged and dynamic inputs are fully supported.
 
 Ring allreduce currently supports only `ReduceOp.Sum` with `dtype=FP32`.
 `ReduceOp.Max`, `ReduceOp.Min`, `ReduceOp.Prod`, and `FP16` are not yet available
