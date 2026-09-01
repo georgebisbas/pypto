@@ -180,7 +180,8 @@ def _check(nr, mr, host_counts, locals_, outputs, recv_outputs):
         for rank in range(nr):
             got = int(recv_outputs[rank, r, 0].item())
             assert got == expected, (
-                f"P={nr} rank={rank} src={r}: recv_counts={got} != clamp({host_counts[r]}, 0, {mr})={expected}"
+                f"P={nr} rank={rank} src={r}: recv_counts={got} != "
+                f"clamp({host_counts[r]}, 0, {mr})={expected}"
             )
             for k in range(expected):
                 got_row = outputs[rank, r * mr + k, :]
