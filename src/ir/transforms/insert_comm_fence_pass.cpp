@@ -408,55 +408,82 @@ class InsertCommMarkers : public IRMutator {
   }
 
   // True if `stmt` is a for/while whose body (through seq/if/for/while nesting)
-  // contains only `pld.system.wait` leaves and whose control expressions are
-  // memory-inert. No read or write can occur between the waits, so a single
-  // consume-side whole-GM cacheinvalid after the loop is equivalent to one after
-  // every wait — turning (P-1) whole-cache flushes into 1 per barrier generation
-  // in the mesh composite.
+  // contains only `pld.system.wait` leaves — and at least one — and whose
+  // control expressions are memory-inert. No read or write can occur between
+  // the waits, so a single consume-side whole-GM cacheinvalid after the loop is
+  // equivalent to one after every wait — turning (P-1) whole-cache flushes into
+  // 1 per barrier generation in the mesh composite.
   bool IsPureWaitLoop(const StmtPtr& stmt) {
-    if (auto for_ = As<ForStmt>(stmt)) return ContainsOnlyWaits(for_->body_);
-    if (auto while_ = As<WhileStmt>(stmt)) return ContainsOnlyWaits(while_->body_);
+    if (auto for_ = As<ForStmt>(stmt)) {
+      return ClassifyWaitPurity(for_->body_) == WaitPurity::kPureWithWait;
+    }
+    if (auto while_ = As<WhileStmt>(stmt)) {
+      return ClassifyWaitPurity(while_->body_) == WaitPurity::kPureWithWait;
+    }
     return false;
   }
+
+  // Wait-only structure, optionally with at least one wait. The third state
+  // exists because a wait-free body is NOT a "pure wait-loop" for batching:
+  // an empty SeqStmts (or an empty IfStmt branch) is vacuously "wait-only", so
+  // a boolean cannot express the distinction — and treating it as pure would
+  // make the pass append a whole-GM cacheinvalid after a loop that emitted
+  // nothing before, a regression in a pass whose point is removing flushes.
+  enum class WaitPurity { kNotPure, kPureNoWait, kPureWithWait };
 
   // Memoized purity. Without the memo, every enclosing SeqStmts/MarkBody would
   // re-scan the whole descendant subtree of a nested pure wait-loop before the
   // mutator traversal does the same for each inner loop — O(N²) for N nested
   // loops. Each node is classified once per pass.
-  bool ContainsOnlyWaits(const StmtPtr& stmt) {
-    if (!stmt) return false;
+  WaitPurity ClassifyWaitPurity(const StmtPtr& stmt) {
+    if (!stmt) return WaitPurity::kPureNoWait;
     auto it = purity_cache_.find(stmt.get());
     if (it != purity_cache_.end()) return it->second;
-    const bool result = ContainsOnlyWaitsImpl(stmt);
+    const WaitPurity result = ClassifyWaitPurityImpl(stmt);
     purity_cache_.emplace(stmt.get(), result);
     return result;
   }
 
-  bool ContainsOnlyWaitsImpl(const StmtPtr& stmt) {
+  WaitPurity ClassifyWaitPurityImpl(const StmtPtr& stmt) {
     if (auto seq = As<SeqStmts>(stmt)) {
+      bool any_wait = false;
       for (const auto& s : seq->stmts_) {
-        if (!ContainsOnlyWaits(s)) return false;
+        const WaitPurity c = ClassifyWaitPurity(s);
+        if (c == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+        if (c == WaitPurity::kPureWithWait) any_wait = true;
       }
-      return true;
+      return any_wait ? WaitPurity::kPureWithWait : WaitPurity::kPureNoWait;
     }
     if (auto iff = As<IfStmt>(stmt)) {
-      if (ExprMayRead(iff->condition_)) return false;
-      if (!ContainsOnlyWaits(iff->then_body_)) return false;
-      if (iff->else_body_.has_value() && !ContainsOnlyWaits(iff->else_body_.value())) return false;
-      return true;
+      if (ExprMayRead(iff->condition_)) return WaitPurity::kNotPure;
+      const WaitPurity then_p = ClassifyWaitPurity(iff->then_body_);
+      if (then_p == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+      // `if c: wait` with no else stays pure: on the fall-through path the body
+      // performs no memory access, so the loop may wait on some iterations and
+      // skip others without ever touching memory in between.
+      if (!iff->else_body_.has_value()) return then_p;
+      const WaitPurity else_p = ClassifyWaitPurity(iff->else_body_.value());
+      if (else_p == WaitPurity::kNotPure) return WaitPurity::kNotPure;
+      // Pure in both branches AND at least one branch contains a wait. An empty
+      // else (kPureNoWait) must not disqualify an otherwise-waiting if.
+      return (then_p == WaitPurity::kPureWithWait || else_p == WaitPurity::kPureWithWait)
+                 ? WaitPurity::kPureWithWait
+                 : WaitPurity::kPureNoWait;
     }
     if (auto for_ = As<ForStmt>(stmt)) {
       // Loop bounds are control expressions evaluated each iteration; a GM read
       // there must disqualify the loop — the deferred invalidate could otherwise
       // be observed by a stale cached load.
-      if (ExprMayRead(for_->start_) || ExprMayRead(for_->stop_) || ExprMayRead(for_->step_)) return false;
-      return ContainsOnlyWaits(for_->body_);
+      if (ExprMayRead(for_->start_) || ExprMayRead(for_->stop_) || ExprMayRead(for_->step_)) {
+        return WaitPurity::kNotPure;
+      }
+      return ClassifyWaitPurity(for_->body_);
     }
     if (auto while_ = As<WhileStmt>(stmt)) {
-      if (ExprMayRead(while_->condition_)) return false;
-      return ContainsOnlyWaits(while_->body_);
+      if (ExprMayRead(while_->condition_)) return WaitPurity::kNotPure;
+      return ClassifyWaitPurity(while_->body_);
     }
-    return IsLeafOp(stmt, "pld.system.wait");
+    return IsLeafOp(stmt, "pld.system.wait") ? WaitPurity::kPureWithWait : WaitPurity::kNotPure;
   }
 
   /// Set while visiting a pure wait-loop's body: suppresses the per-wait
@@ -464,8 +491,8 @@ class InsertCommMarkers : public IRMutator {
   /// whole-GM cacheinvalid after the loop instead).
   bool in_pure_wait_loop_ = false;
 
-  /// Purity memo keyed by original node pointer (see `ContainsOnlyWaits`).
-  std::unordered_map<const Stmt*, bool> purity_cache_;
+  /// Purity memo keyed by original node pointer (see `ClassifyWaitPurity`).
+  std::unordered_map<const Stmt*, WaitPurity> purity_cache_;
 };
 
 }  // namespace
