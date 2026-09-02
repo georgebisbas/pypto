@@ -602,6 +602,96 @@ def test_synthesize_multicore_allreduce_signal_uses_core_lanes_and_bytes():
     assert alloc_size.left.right.value == 4
 
 
+def test_synthesize_allreduce_signals_auto_sizes_large_payload_signal():
+    """An implicit-signal (1-arg) HOST mesh allreduce with an ABSENT core_num
+    sizes the synthesized signal for the width the lowering will auto-select
+    (plan 100): a per-rank payload above the 256 KiB P=2 crossover gets 8 lanes,
+    so the lowered builtin can actually launch 8 blocks (the kernel clamps to
+    signal_stride, so under-provisioning would silently drop the gain)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[1, 70000], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(70000 * pl.FP32.get_byte())
+            data = pld.window(data_buf, [1, 70000], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+            return data
+
+    synthesized = _synthesize(P)
+    host = _get_func(synthesized, "host_orch")
+    stmts = _flatten_stmts(host.body)
+    window_stmt = next(
+        stmt
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
+        and stmt.var.name_hint.startswith("__allreduce_signal_")
+    )
+    alloc_stmt = next(
+        stmt
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == _OP_PLD_TENSOR_ALLOC_WINDOW_BUFFER
+        and stmt.var.name_hint.startswith("__allreduce_signal_buf_")
+    )
+
+    signal_type = window_stmt.var.type
+    assert isinstance(signal_type, ir.DistributedTensorType)
+    assert isinstance(signal_type.shape[1], ir.ConstInt)
+    assert signal_type.shape[1].value == 8  # 280 KiB payload -> auto width 8
+
+    assert isinstance(alloc_stmt.value, ir.Call)
+    alloc_size = alloc_stmt.value.args[0]
+    assert isinstance(alloc_size, ir.Mul)
+    assert isinstance(alloc_size.left, ir.Mul)
+    assert isinstance(alloc_size.left.right, ir.ConstInt)
+    assert alloc_size.left.right.value == 8  # world_size * 8 * 4 bytes
+
+
+def test_synthesize_allreduce_signals_auto_keeps_small_payload_signal_single_lane():
+    """An absent core_num on a below-crossover implicit allreduce keeps the
+    synthesized signal at [world_size, 1] — byte-identical to the pre-auto
+    default (single-AIV)."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(256 * pl.FP32.get_byte())
+            data = pld.window(data_buf, [256], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            data = pld.tensor.allreduce(data, op=pld.ReduceOp.Sum)
+            return data
+
+    synthesized = _synthesize(P)
+    host = _get_func(synthesized, "host_orch")
+    stmts = _flatten_stmts(host.body)
+    signal_windows = [
+        stmt
+        for stmt in stmts
+        if isinstance(stmt, ir.AssignStmt)
+        and isinstance(stmt.value, ir.Call)
+        and stmt.value.op.name == _OP_PLD_TENSOR_WINDOW
+        and stmt.var.name_hint.startswith("__allreduce_signal_")
+    ]
+    assert len(signal_windows) == 1
+    _assert_rank2_signal_type(signal_windows[0].var, "__allreduce_signal_world_size_0")
+
+
 def test_implicit_allreduce_core_num_widening_sizes_signal_to_max():
     """Two implicit allreduces over the same data buffer with different
     core_num share ONE synthesized signal, sized to the widest core_num (the

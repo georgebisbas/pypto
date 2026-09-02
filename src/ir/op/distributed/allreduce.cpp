@@ -107,7 +107,10 @@ TypePtr DeduceTensorAllReduceType(const std::vector<ExprPtr>& args,
   CHECK(op_value >= static_cast<int>(ReduceOp::kSum) && op_value <= static_cast<int>(ReduceOp::kProd))
       << "pld.tensor.allreduce op must be ReduceOp.Sum, Max, Min, or Prod (got int " << op_value << ")";
 
-  auto core_num = GetRequiredKwarg<int>(kwargs, "core_num", "pld.tensor.allreduce");
+  // `core_num` is optional: when absent the HOST mesh lowering auto-selects the
+  // multi-AIV width from (payload, world_size), while the InCore composite path
+  // treats the absence as 1. When present it must be a positive int.
+  auto core_num = GetKwargOr<int>(kwargs, "core_num", 1);
   CHECK(core_num > 0) << "pld.tensor.allreduce core_num must be positive, got " << core_num;
 
   // Result type: same DistributedTensorType as the input target (in-place

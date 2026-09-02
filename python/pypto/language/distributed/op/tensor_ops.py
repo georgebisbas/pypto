@@ -584,7 +584,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
 ) -> DistributedTensor: ...
 
 
@@ -595,7 +595,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
 ) -> DistributedTensor: ...
 
 
@@ -605,7 +605,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
 ) -> DistributedTensor:
     """In-place cross-rank allreduce of a window-bound DistributedTensor.
 
@@ -714,7 +714,9 @@ def allreduce(
             In InCore code this remains required. In host-orchestrator code
             outside ``for`` / ``while`` loops, omitting it lets the compiler
             synthesize a private signal of shape
-            ``[pld.world_size(), core_num]``.
+            ``[pld.world_size(), core_num]`` — where ``core_num`` is the
+            resolved width (an explicit ``core_num=N``, or the payload/P
+            auto-selected width when ``core_num`` is left at ``None``).
         op: :class:`pld.ReduceOp` selecting element-wise ``Sum``, ``Max``,
             ``Min``, or ``Prod`` (keyword-only). Defaults to
             :attr:`pld.ReduceOp.Sum`.
@@ -727,21 +729,28 @@ def allreduce(
         core_num: Number of AIV blocks used by a HOST AllReduce builtin
             (keyword-only). Must be a positive compile-time Python integer and
             may not exceed the configured backend's AIV core count. Defaults to
-            1. Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
-            ``core_num=1``. InCore calls must keep this value at 1 and use an
-            enclosing :func:`pl.spmd` for multi-core execution.
+            ``None``, which asks the compiler to **auto-select** the width at
+            lowering from the per-rank payload and rank count (multi-AIV only
+            pays off above the measured crossover — below it single-AIV wins, so
+            small calls stay on ``core_num=1``). Explicit ``core_num=N`` always
+            wins over the auto selection and over ``PYPTO_ALLREDUCE_CORE_NUM``.
+            Multicore is ``mode="mesh"`` only — ``mode="ring"`` requires
+            ``core_num=1``. InCore calls must keep this value at 1 (the auto
+            selection applies to the HOST builtin only) and use an enclosing
+            :func:`pl.spmd` for multi-core execution.
 
     Returns:
         The rebound :class:`pld.DistributedTensor` view of ``target`` —
         identical shape / dtype / window-buffer binding, post-reduce content.
     """
-    if not isinstance(core_num, int) or isinstance(core_num, bool):
-        raise TypeError(
-            "pld.tensor.allreduce core_num must be a positive compile-time int, "
-            f"got {type(core_num).__name__}"
-        )
-    if core_num <= 0:
-        raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
+    if core_num is not None:
+        if not isinstance(core_num, int) or isinstance(core_num, bool):
+            raise TypeError(
+                "pld.tensor.allreduce core_num must be a positive compile-time int "
+                f"or None (auto-select), got {type(core_num).__name__}"
+            )
+        if core_num <= 0:
+            raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
 
     if signal is _ALLREDUCE_SIGNAL_MISSING:
         # Host signal synthesis produces a mesh-shaped [world_size, core_num]
