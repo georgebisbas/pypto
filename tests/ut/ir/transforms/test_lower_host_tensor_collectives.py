@@ -726,6 +726,247 @@ def test_host_allreduce_ring_rejects_multicore():
         passes.lower_host_tensor_collectives()(program)
 
 
+# ---------------------------------------------------------------------------
+# Phase A (plan 100): an absent `core_num` on a HOST mesh allreduce auto-selects
+# the SPMD AIV width at lowering from (per-rank payload bytes, P). Policy table
+# source: pypto-profiling corenum-message-size-crossover-2026-08-31.md — cn8's
+# monotone-stable crossover is 256 KiB (P=2), 128 KiB (P=4), 64 KiB (P>=8); cn16
+# only at >= 2 MiB. Unknown/dynamic world_size falls back to the P=2 column.
+# Explicit `core_num=` always wins; `PYPTO_ALLREDUCE_CORE_NUM` forces the width.
+# ---------------------------------------------------------------------------
+
+
+def _builtin_allreduce_core_nums(host_body: ir.Stmt) -> list[int]:
+    """Resolved ``core_num`` of every builtin.tensor.allreduce dispatch, in order."""
+    found: list[int] = []
+    name = ir.get_op("builtin.tensor.allreduce").name
+
+    def walk(s: ir.Stmt) -> None:
+        if isinstance(s, ir.EvalStmt) and isinstance(s.expr, ir.Call) and s.expr.op.name == name:
+            found.append(s.expr.kwargs["core_num"])
+        if isinstance(s, ir.SeqStmts):
+            for c in s.stmts:
+                walk(c)
+        if isinstance(s, ir.ScopeStmt):
+            walk(s.body)
+        if isinstance(s, ir.ForStmt):
+            walk(s.body)
+
+    walk(host_body)
+    return found
+
+
+def _auto_allreduce_program(
+    n_ranks: int,
+    size: int,
+    *,
+    lanes: int,
+    core_num: int | None = None,
+    mode: str = "mesh",
+    dynamic_world_size: bool = False,
+):
+    """Build a HOST mesh/ring allreduce program over ``n_ranks`` devices with an
+    explicit rank-2 ``[rows, lanes]`` signal.
+
+    ``core_num=None`` leaves the DSL default (auto-select);
+    ``dynamic_world_size=True`` dispatches inside ``pl.range(pld.world_size())``
+    instead of a static constant loop (the fully-dynamic all-device domain).
+    Ring requires ``[2*(NR-1)+1, NR]`` (pass ``lanes=NR``).
+    """
+    rows = 2 * (n_ranks - 1) + 1 if mode == "ring" else n_ranks
+
+    @pl.program
+    class AutoAllreduceStatic:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[1, size], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(size * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(rows * lanes * pl.INT32.get_byte())
+            data = pld.window(data_buf, [1, size], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [rows, lanes], dtype=pl.INT32)
+            for r in pl.range(n_ranks):
+                self.chip_orch(data, device=r)
+            data = pld.window(data_buf, [1, size], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [rows, lanes], dtype=pl.INT32)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode=mode, core_num=core_num)
+            return 0
+
+    @pl.program
+    class AutoAllreduceDynamic:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[1, size], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(size * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(rows * lanes * pl.INT32.get_byte())
+            data = pld.window(data_buf, [1, size], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [rows, lanes], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            data = pld.window(data_buf, [1, size], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [rows, lanes], dtype=pl.INT32)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode=mode, core_num=core_num)
+            return 0
+
+    return AutoAllreduceDynamic if dynamic_world_size else AutoAllreduceStatic
+
+
+def _lower_auto_allreduce(program) -> ir.Program:
+    """Synthesize signals, materialize comm domains, and lower host collectives."""
+    P = passes.convert_to_ssa()(program)
+    P = passes.synthesize_allreduce_signals()(P)
+    P = passes.materialize_comm_domain_scopes()(P)
+    return passes.lower_host_tensor_collectives()(P)
+
+
+@pytest.mark.parametrize(
+    ("n_ranks", "size", "expected"),
+    [
+        # fp32 payload = size * 4 bytes. Rows tie each band to the measured
+        # crossover (cn8 stable from 256 KiB @ P=2, 128 KiB @ P=4, 64 KiB @ P>=8).
+        pytest.param(2, 100, 1, id="p2-400B-tiny"),
+        pytest.param(2, 60000, 1, id="p2-240KiB-just-below-256KiB-crossover"),
+        pytest.param(2, 70000, 8, id="p2-280KiB-just-above-256KiB-crossover"),
+        pytest.param(2, 500000, 8, id="p2-2MiB-below-large-16-boundary"),
+        pytest.param(2, 600000, 16, id="p2-2.4MiB-above-2MiB-16-boundary"),
+        pytest.param(4, 30000, 1, id="p4-120KiB-just-below-128KiB-crossover"),
+        pytest.param(4, 40000, 8, id="p4-160KiB-just-above-128KiB-crossover"),
+        pytest.param(4, 70000, 8, id="p4-280KiB"),
+        pytest.param(8, 12000, 1, id="p8-48KiB-just-below-64KiB-crossover"),
+        pytest.param(8, 20000, 8, id="p8-80KiB-just-above-64KiB-crossover"),
+        pytest.param(8, 70000, 8, id="p8-280KiB"),
+        pytest.param(16, 20000, 8, id="p16-80KiB"),
+    ],
+)
+def test_host_allreduce_auto_selects_core_num_by_payload_and_rank_count(n_ranks, size, expected):
+    """Absent ``core_num`` selects the (payload, P) policy width at lowering."""
+    program = _auto_allreduce_program(n_ranks, size, lanes=16)
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert len(nums) == n_ranks
+    assert all(n == expected for n in nums), f"expected core_num={expected}, got {nums}"
+
+
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        pytest.param(20000, 1, id="80KiB-below-256KiB-P2-column"),
+        pytest.param(70000, 8, id="280KiB-above-256KiB-P2-column"),
+    ],
+)
+def test_host_allreduce_auto_dynamic_world_size_uses_conservative_p2_column(size, expected):
+    """Fully-dynamic world_size (device loop over pld.world_size()) falls back to
+    the P=2 column — the highest measured crossover, safe for every real P."""
+    program = _auto_allreduce_program(4, size, lanes=16, dynamic_world_size=True)
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [expected], f"dynamic world_size: expected [{expected}], got {nums}"
+
+
+def test_host_allreduce_auto_clamps_to_rank1_signal_lane_capacity():
+    """A rank-1 [world_size] signal only carries one lane per rank: the purely
+    auto width is clamped to 1 (single-AIV) so existing programs that sized a
+    narrow signal keep compiling — matching the kernel's runtime clamp."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[1, 70000], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(70000 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * pl.INT32.get_byte())
+            data = pld.window(data_buf, [1, 70000], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            data = pld.window(data_buf, [1, 70000], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size()], dtype=pl.INT32)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+            return 0
+
+    host = _get_func(_lower_auto_allreduce(P), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [1], f"rank-1 signal must clamp auto to 1, got {nums}"
+
+
+def test_host_allreduce_auto_clamps_to_narrow_rank2_signal_lane_capacity():
+    """A rank-2 signal with fewer lanes than the policy width clamps the auto
+    width to the available lanes (the kernel would clamp identically)."""
+    program = _auto_allreduce_program(4, 70000, lanes=2)
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [2, 2, 2, 2], f"2-lane signal must clamp auto to 2, got {nums}"
+
+
+def test_host_allreduce_explicit_core_num_wins_over_auto_default():
+    """Explicit ``core_num=1`` at a payload that would auto-select 8 stays 1."""
+    program = _auto_allreduce_program(4, 70000, lanes=16, core_num=1)
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [1, 1, 1, 1], f"explicit core_num=1 must win, got {nums}"
+
+
+def test_host_allreduce_auto_ring_stays_single_block():
+    """Ring is single-block: an absent ``core_num`` resolves to 1 and the ring
+    builtin carries no ``core_num`` at all (as before this default existed)."""
+    program = _auto_allreduce_program(4, 70000, lanes=4, mode="ring")  # ring signal is [2*(NR-1)+1, NR]
+    lowered = _lower_auto_allreduce(program)
+    host = _get_func(lowered, "host_orch")
+    ring_name = ir.get_op("builtin.tensor.allreduce_ring").name
+    found = []
+
+    def walk(s: ir.Stmt) -> None:
+        if isinstance(s, ir.EvalStmt) and isinstance(s.expr, ir.Call) and s.expr.op.name == ring_name:
+            found.append(s.expr)
+        if isinstance(s, ir.SeqStmts):
+            for c in s.stmts:
+                walk(c)
+        if isinstance(s, ir.ScopeStmt):
+            walk(s.body)
+        if isinstance(s, ir.ForStmt):
+            walk(s.body)
+
+    walk(host.body)
+    assert len(found) == 4
+    for call in found:
+        assert "core_num" not in call.kwargs
+
+
+def test_host_allreduce_auto_env_override(monkeypatch):
+    """PYPTO_ALLREDUCE_CORE_NUM forces the width for absent-core_num calls (a
+    forced width — a too-narrow signal is a hard error, like an explicit value)."""
+    monkeypatch.setenv("PYPTO_ALLREDUCE_CORE_NUM", "8")
+    program = _auto_allreduce_program(2, 100, lanes=16)  # tiny payload: auto would pick 1
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [8, 8], f"env override must force 8, got {nums}"
+
+
+def test_host_allreduce_auto_env_override_rejects_narrow_signal(monkeypatch):
+    """A forced env width on a too-narrow signal errors (it cannot be honored)."""
+    monkeypatch.setenv("PYPTO_ALLREDUCE_CORE_NUM", "8")
+    program = _auto_allreduce_program(2, 100, lanes=1)  # [2, 1] signal
+    with pytest.raises(ValueError, match=r"at least the required lane count"):
+        _lower_auto_allreduce(program)
+
+
+def test_host_allreduce_explicit_core_num_wins_over_env_override(monkeypatch):
+    """Explicit ``core_num=`` beats the env override."""
+    monkeypatch.setenv("PYPTO_ALLREDUCE_CORE_NUM", "8")
+    program = _auto_allreduce_program(2, 100, lanes=16, core_num=1)
+    host = _get_func(_lower_auto_allreduce(program), "host_orch")
+    nums = _builtin_allreduce_core_nums(host.body)
+    assert nums == [1, 1], f"explicit core_num=1 must beat env=8, got {nums}"
+
+
 def test_host_allreduce_rejects_unsupported_dtype_before_lowering():
     with pytest.raises(InvalidOperationError, match="target dtype must be FP16 or FP32"):
 

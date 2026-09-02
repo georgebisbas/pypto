@@ -258,7 +258,7 @@ def allreduce(
     *,
     op: ReduceOp = ReduceOp.Sum,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
     span: Span | None = None,
 ) -> Call: ...
 
@@ -270,7 +270,7 @@ def allreduce(
     op: ReduceOp = ReduceOp.Sum,
     *,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
     span: Span | None = None,
 ) -> Call: ...
 
@@ -281,7 +281,7 @@ def allreduce(
     op: ReduceOp = ReduceOp.Sum,
     *,
     mode: str = "mesh",
-    core_num: int = 1,
+    core_num: int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.allreduce(target[, signal])`` Call.
@@ -302,6 +302,12 @@ def allreduce(
     type is ``target``'s :class:`ir.DistributedTensorType` (the rebind target —
     same semantics as :func:`pl.store`).
 
+    ``core_num`` is the HOST mesh builtin's SPMD AIV grid width. ``None`` (the
+    default) leaves the kwarg off the call: the HOST path auto-selects the
+    width at lowering from the per-rank payload and rank count, while the
+    InCore composite path treats the absence as ``core_num=1`` (single block).
+    An explicit positive ``core_num`` is kept as-is.
+
     Explicit-signal InCore allreduce is expanded by LowerCompositeOps into a
     ready barrier followed by UB-sized remote-load/accumulate chunks, each with
     a monotonic AtomicAdd/wait before store (mesh), or the 2(P−1)-step
@@ -313,13 +319,14 @@ def allreduce(
     type-metadata-only symbol is rejected during PTO codegen. A fully dynamic
     physical target dimension is bound from that tensor parameter.
     """
-    if not isinstance(core_num, int) or isinstance(core_num, bool):
-        raise TypeError(
-            "pld.tensor.allreduce core_num must be a positive compile-time int, "
-            f"got {type(core_num).__name__}"
-        )
-    if core_num <= 0:
-        raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
+    if core_num is not None:
+        if not isinstance(core_num, int) or isinstance(core_num, bool):
+            raise TypeError(
+                "pld.tensor.allreduce core_num must be a positive compile-time int "
+                f"or None (auto-select), got {type(core_num).__name__}"
+            )
+        if core_num <= 0:
+            raise ValueError(f"pld.tensor.allreduce core_num must be positive, got {core_num}")
 
     actual_span = _get_span_or_capture(span, frame_offset=1)
     if signal is _ALLREDUCE_SIGNAL_MISSING:
@@ -332,10 +339,13 @@ def allreduce(
         args = [target, signal]
     else:
         raise TypeError(f"pld.tensor.allreduce signal must be an Expr, got {type(signal).__name__}")
+    attrs: dict[str, object] = {"op": int(op), "mode": mode}
+    if core_num is not None:
+        attrs["core_num"] = core_num
     return _ir_core.create_op_call(
         "pld.tensor.allreduce",
         args,
-        {"op": int(op), "mode": mode, "core_num": core_num},
+        attrs,
         actual_span,
     )
 

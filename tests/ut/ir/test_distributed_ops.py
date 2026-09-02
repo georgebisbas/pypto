@@ -233,7 +233,10 @@ def test_tensor_allreduce_returns_src_type():
     call = dist_tensor_ops.allreduce(src, signal, op=ir.ReduceOp.Sum, span=span)
     assert call.type is src.type
     assert call.kwargs["op"] == int(ir.ReduceOp.Sum)
-    assert call.kwargs["core_num"] == 1
+    # `core_num` now defaults to None = "auto-select": the kwarg is absent from
+    # the call (the HOST lowering resolves a payload/P width; the InCore
+    # composite treats the absence as 1).
+    assert "core_num" not in call.kwargs
 
 
 @pytest.mark.parametrize(

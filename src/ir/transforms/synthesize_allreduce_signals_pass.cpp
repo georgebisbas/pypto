@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/allreduce_core_num.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
@@ -48,6 +49,26 @@ namespace {
 
 [[nodiscard]] bool IsTensorAllReduce(const CallPtr& call) {
   return call && call->op_ && IsOp(call, "pld.tensor.allreduce");
+}
+
+/// Effective signal lane count for an implicit-signal (1-arg) HOST mesh
+/// allreduce. An explicit `core_num` kwarg sizes the synthesized signal exactly
+/// as before; an absent kwarg (the DSL's "auto" default) sizes it for the width
+/// the lowering will select. World_size is not statically known here (signal
+/// synthesis runs before comm-domain materialisation), so the auto width uses
+/// the P-independent (P=2, most conservative) column of the policy; the lowering
+/// then resolves the same value for the fully-dynamic domain, or clamps to these
+/// lanes when a static rank count would want more.
+[[nodiscard]] int EffectiveImplicitSignalCoreNum(const CallPtr& call) {
+  if (call->HasKwarg("core_num")) {
+    return call->GetKwarg<int>("core_num");
+  }
+  if (int64_t env = allreduce_core_num::EnvCoreNumOverride(); env > 0) {
+    return static_cast<int>(env);
+  }
+  return static_cast<int>(allreduce_core_num::PolicyCoreNum(
+      allreduce_core_num::StaticPayloadBytes(call->args_[0]), /*world_size_known=*/false,
+      /*world_size=*/0));
 }
 
 [[nodiscard]] bool IsHostOrch(const FunctionPtr& func) {
@@ -234,7 +255,7 @@ class AllReduceSignalNeedFinder : public IRVisitor {
     if (IsTensorAllReduce(op)) {
       has_allreduce = true;
       if (op->args_.size() == 1) {
-        implicit_calls.emplace_back(op->args_[0], op->GetKwarg<int>("core_num"));
+        implicit_calls.emplace_back(op->args_[0], EffectiveImplicitSignalCoreNum(op));
       }
     }
     IRVisitor::VisitExpr_(op);

@@ -178,6 +178,139 @@ def _build_multicore_allreduce_program(
     return HostTensorAllReduceMulticore
 
 
+def _build_multicore_allreduce_auto_program(
+    n_ranks: int,
+    size: int,
+    signal_stride: int,
+):
+    """Multicore host allreduce WITHOUT an explicit ``core_num`` (plan 100 auto).
+
+    The DSL default is now ``core_num=None`` = auto-select: LowerHostTensorCollectives
+    resolves the SPMD AIV width from (per-rank payload, P). At ``size=70000`` fp32
+    (280 KiB per rank, above the 256 KiB P=2 crossover) the fully-dynamic
+    all-device domain falls back to the conservative P=2 column and selects 8
+    blocks, so the kernel must launch and self-clear 8 signal lanes. Width
+    selection itself is a lowering-time property covered by the UT suite; this
+    ST guards the device path through the no-core_num route (correctness +
+    per-lane self-clearing epilogue).
+
+    ``auto_cores`` mirrors the resolved width (8) so the on-device wait loop
+    observes every lane the auto-selected launch is expected to use.
+    """
+    nr = n_ranks
+    sz = size
+    stride = signal_stride
+    auto_cores = 8  # plan-100 policy: 280 KiB >= 256 KiB crossover -> 8 (P=2 column)
+    stage_rows = 8 if size == 1 else 1
+    stage_cols = 1 if size == 1 else ((size + 7) // 8) * 8
+    signal_stage_cols = ((signal_stride + 7) // 8) * 8
+
+    @pl.program
+    class HostTensorAllReduceMulticoreAuto:
+        @pl.function(type=pl.FunctionType.InCore)
+        def publish_step(
+            self,
+            inp: pl.Tensor[[1, sz], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[1, sz], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, stride], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, sz], pl.FP32]:
+            local = pl.load(
+                inp,
+                [0, 0],
+                [stage_rows, stage_cols],
+                valid_shape=[1, sz],
+            )
+            return pl.store(local, [0, 0], data)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def publish_orch(
+            self,
+            inp: pl.Tensor[[1, sz], pl.FP32],
+            data: pl.InOut[pld.DistributedTensor[[1, sz], pl.FP32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, stride], pl.INT32]],
+        ) -> pld.DistributedTensor[[1, sz], pl.FP32]:
+            return self.publish_step(inp, data, signal)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            data: pld.DistributedTensor[[1, sz], pl.FP32],
+            signal: pld.DistributedTensor[[nr, stride], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, sz], pl.FP32]],
+            signal_out: pl.Out[pl.Tensor[[nr, stride], pl.INT32]],
+        ) -> pl.Tensor[[1, sz], pl.FP32]:
+            ctx = pld.get_comm_ctx(signal)
+            my_rank = pld.rank(ctx)
+            for peer in pl.range(nr):
+                if peer != my_rank:
+                    for lane in pl.range(auto_cores):
+                        pld.system.wait(
+                            signal=signal,
+                            offsets=[peer, lane],
+                            expected=0,
+                            cmp=pld.WaitCmp.Eq,
+                        )
+
+            reduced = pl.load(
+                data,
+                [0, 0],
+                [stage_rows, stage_cols],
+                valid_shape=[1, sz],
+            )
+            out = pl.store(reduced, [0, 0], out)
+
+            signal_values = pl.load(
+                signal,
+                [0, 0],
+                [nr, signal_stage_cols],
+                valid_shape=[nr, stride],
+            )
+            pl.store(signal_values, [0, 0], signal_out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            data: pld.DistributedTensor[[1, sz], pl.FP32],
+            signal: pld.DistributedTensor[[nr, stride], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, sz], pl.FP32]],
+            signal_out: pl.Out[pl.Tensor[[nr, stride], pl.INT32]],
+        ) -> pl.Tensor[[1, sz], pl.FP32]:
+            return self.consume_step(data, signal, out, signal_out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[nr, 1, sz], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[nr, 1, sz], pl.FP32]],
+            signal_outputs: pl.Out[pl.Tensor[[nr, nr, stride], pl.INT32]],
+        ) -> pl.Tensor[[nr, 1, sz], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(sz * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(pld.world_size() * stride * pl.INT32.get_byte())
+
+            for rank in pl.range(pld.world_size()):
+                data = pld.window(data_buf, [1, sz], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [pld.world_size(), stride], dtype=pl.INT32)
+                self.publish_orch(inputs[rank], data, signal, device=rank)
+
+            data = pld.window(data_buf, [1, sz], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [pld.world_size(), stride], dtype=pl.INT32)
+            # NO core_num -> plan-100 auto-select (payload-based multi-AIV width).
+            data = pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum)
+
+            for rank in pl.range(pld.world_size()):
+                self.consume_orch(
+                    data,
+                    signal,
+                    outputs[rank],
+                    signal_outputs[rank],
+                    device=rank,
+                )
+            return outputs
+
+    return HostTensorAllReduceMulticoreAuto
+
+
 def _build_multicore_allreduce_signal_reuse(
     n_ranks: int,
     size: int,
@@ -345,6 +478,66 @@ class TestL3HostTensorAllReduceMulticore:
                     f"signal lane not self-cleared for P={n_ranks}, C={core_num}, size={size}, "
                     f"stride={signal_stride}, receiver={rank}, sender={peer}: "
                     f"got {signal_outputs[rank, peer].tolist()}"
+                )
+
+    @pytest.mark.parametrize(
+        ("n_ranks", "size", "signal_stride"),
+        [
+            # 70000 fp32 = 280 KiB per rank: above the 256 KiB P=2 crossover the
+            # auto (absent-core_num) default selects 8 blocks (plan 100 policy).
+            pytest.param(2, 70000, 8, id="p2-280KiB-auto-cn8"),
+            pytest.param(4, 70000, 8, id="p4-280KiB-auto-cn8"),
+        ],
+    )
+    def test_multicore_auto_default_core_num_at_large_payload(
+        self,
+        test_config,
+        device_ids,
+        n_ranks,
+        size,
+        signal_stride,
+    ):
+        """Plan 100 regression: an ABSENT ``core_num`` on a large-payload HOST
+        mesh allreduce auto-selects the multi-AIV width at lowering (8 blocks at
+        280 KiB per rank) and the device path is correct, with every auto-used
+        signal lane self-cleared. The width itself is a lowering-time property
+        covered by the UT suite; this ST guards the real-device path through the
+        no-``core_num`` route.
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(
+                f"multicore auto host allreduce P={n_ranks} needs {n_ranks} devices, got {device_ids}"
+            )
+
+        program = _build_multicore_allreduce_auto_program(n_ranks, size, signal_stride)
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:n_ranks],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = _make_rank_inputs(n_ranks, size)
+        outputs = torch.zeros((n_ranks, 1, size), dtype=torch.float32)
+        signal_outputs = torch.zeros((n_ranks, n_ranks, signal_stride), dtype=torch.int32)
+
+        compiled(inputs, outputs, signal_outputs)
+
+        expected_outputs = _expected_allreduce(inputs)
+        assert torch.allclose(outputs, expected_outputs, rtol=1e-4, atol=1e-5), (
+            f"auto-default multicore host allreduce P={n_ranks}, size={size} mismatch: "
+            f"max diff = {(outputs - expected_outputs).abs().max().item()}"
+        )
+
+        for rank in range(n_ranks):
+            for peer in range(n_ranks):
+                if peer == rank:
+                    continue
+                assert torch.all(signal_outputs[rank, peer, :8] == 0), (
+                    f"auto-selected signal lane not self-cleared for P={n_ranks}, size={size}, "
+                    f"receiver={rank}, sender={peer}: got {signal_outputs[rank, peer].tolist()}"
                 )
 
     @pytest.mark.parametrize(

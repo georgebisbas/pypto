@@ -1055,7 +1055,10 @@ ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>
       << "pld.tensor.allreduce lowering received unknown ReduceOp " << op_value;
   const auto reduce_op = static_cast<ReduceOp>(op_value);
 
-  auto core_num = GetRequiredKwarg<int>(call->kwargs_, "core_num", "pld.tensor.allreduce");
+  // The InCore composite is hard-restricted to a single AIV block: the
+  // multi-AIV auto-selection is a HOST builtin feature, so an absent `core_num`
+  // (the DSL's new "auto" default) must still mean 1 here.
+  auto core_num = GetKwargOr<int>(call->kwargs_, "core_num", 1);
   CHECK_SPAN(core_num == 1, span)
       << "pld.tensor.allreduce core_num > 1 is supported only in a HOST orchestrator; "
          "use an enclosing pl.spmd(...) for multi-core InCore execution";

@@ -37,6 +37,7 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/allreduce_core_num.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/window_alias_utils.h"
 #include "pypto/ir/type.h"
@@ -266,6 +267,75 @@ void CheckAllReduceCoreCapacity(const CallPtr& call, int64_t core_num) {
   CHECK_SPAN(core_num <= max_blocks, call->span_)
       << "pld.tensor.allreduce core_num (" << core_num << ") exceeds the backend AIV core count ("
       << max_blocks << ")";
+}
+
+/// The signal lane capacity of a HOST allreduce signal: a rank-1
+/// `[world_size]` signal carries one lane per rank (single-AIV only); a rank-2
+/// `[world_size, lanes]` signal carries `lanes` lanes. Returns -1 when the lane
+/// count is not a compile-time constant (that shape is rejected downstream by
+/// `CheckStaticSignalCapacity`, so no clamp applies).
+int64_t AllReduceSignalLaneCapacity(const ExprPtr& signal_expr) {
+  auto signal_type = As<DistributedTensorType>(signal_expr->GetType());
+  if (!signal_type) return 1;
+  if (signal_type->shape_.size() == 2) {
+    auto lanes = As<ConstInt>(signal_type->shape_[1]);
+    if (!lanes) return -1;
+    return lanes->value_;
+  }
+  return 1;
+}
+
+/// Copy of `call` with its `core_num` kwarg set to `core_num` (add or replace),
+/// so downstream checks and builtin emission see one concrete width.
+[[nodiscard]] CallPtr WithAllReduceCoreNum(const CallPtr& call, int core_num) {
+  auto kwargs = call->kwargs_;
+  bool replaced = false;
+  for (auto& [key, value] : kwargs) {
+    if (key == "core_num") {
+      value = core_num;
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) kwargs.emplace_back("core_num", core_num);
+  return std::make_shared<Call>(call->op_, call->args_, std::move(kwargs), call->attrs_, call->GetType(),
+                                call->span_);
+}
+
+/// Resolve the effective `core_num` of a HOST allreduce and stamp it onto the
+/// call. Runs at lowering time, where the materialized comm-domain scope fixes
+/// the rank count (or marks it dynamic) and the src type fixes the payload.
+///
+/// Precedence: an explicit `core_num=` in the DSL always wins (validated by the
+/// checks below exactly as today); then the `PYPTO_ALLREDUCE_CORE_NUM` env
+/// override (a forced width — a too-narrow signal is a hard error, matching an
+/// explicit `core_num=`); then the auto `(payload, P)` policy
+/// (`allreduce_core_num::PolicyCoreNum`). Purely-auto widths are clamped to the
+/// signal's lane capacity so existing programs that sized a narrow/rank-1
+/// signal — which compiled as single-AIV before this default existed — keep
+/// compiling instead of newly failing the lane-capacity check. This mirrors the
+/// clamp the kernel already applies at runtime
+/// (`active_blocks = min(block_num, signal_stride)`). Ring allreduce stays
+/// single-block: an absent `core_num` resolves to 1.
+[[nodiscard]] CallPtr ResolveAllReduceCoreNum(const CallPtr& call, const ExprPtr& signal_expr,
+                                              size_t world_size, bool world_size_known) {
+  if (call->HasKwarg("core_num")) {
+    return call;  // explicit wins; validated as today by the checks below
+  }
+  int64_t core_num = 1;
+  if (!ShouldLowerAllReduceAsRing(call)) {
+    const int64_t env = allreduce_core_num::EnvCoreNumOverride();
+    if (env > 0) {
+      core_num = env;  // env override: forced width (narrow signal errors below)
+    } else {
+      core_num = allreduce_core_num::PolicyCoreNum(allreduce_core_num::StaticPayloadBytes(call->args_[0]),
+                                                   world_size_known, static_cast<int64_t>(world_size));
+      // Purely-auto width: clamp to the signal lanes for backward compatibility.
+      const int64_t lanes = AllReduceSignalLaneCapacity(signal_expr);
+      if (lanes >= 1 && core_num > lanes) core_num = lanes;
+    }
+  }
+  return WithAllReduceCoreNum(call, static_cast<int>(core_num));
 }
 
 /// Validate a HOST AllReduce call.
@@ -579,9 +649,18 @@ struct HostCollectiveRule {
 StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule& rule,
                                   const CommDomainScopeStmtPtr& scope, const Span& span,
                                   const std::vector<std::string>& leading_comments) {
+  // The effective `core_num` of a HOST allreduce is resolved here, where the
+  // materialized comm-domain scope fixes the rank count (or marks it dynamic)
+  // and the src type fixes the payload. Explicit `core_num=` /
+  // `PYPTO_ALLREDUCE_CORE_NUM` win; otherwise the (payload, P) policy selects
+  // the width, clamped to the signal lanes. All other host collectives lower
+  // from the original call unchanged.
+  CallPtr lowered_call = call;
   if (!scope->devices_.empty()) {
     if (IsOp(call, "pld.tensor.allreduce")) {
-      CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
+      lowered_call = ResolveAllReduceCoreNum(call, rule.signal_expr(call), scope->devices_.size(),
+                                             /*world_size_known=*/true);
+      CheckAllReduceSignalCapacity(lowered_call, rule.signal_expr(call), scope->devices_.size(),
                                    /*world_size_known=*/true);
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
@@ -591,7 +670,7 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
     stmts.reserve(scope->devices_.size());
     for (auto device : scope->devices_) {
       auto device_expr = std::make_shared<ConstInt>(device, DataType::INT64, call->span_);
-      stmts.push_back(std::make_shared<EvalStmt>(rule.make_builtin(call, device_expr), call->span_));
+      stmts.push_back(std::make_shared<EvalStmt>(rule.make_builtin(lowered_call, device_expr), call->span_));
     }
     return std::make_shared<SeqStmts>(std::move(stmts), span, leading_comments);
   }
@@ -607,11 +686,13 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   // The device set is dynamic here, so world-size-dependent capacity cannot be
   // checked; pass 0 so only the world-size-independent constraints apply.
   if (IsOp(call, "pld.tensor.allreduce")) {
-    CheckAllReduceSignalCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
+    lowered_call = ResolveAllReduceCoreNum(call, rule.signal_expr(call), /*world_size=*/0,
+                                           /*world_size_known=*/false);
+    CheckAllReduceSignalCapacity(lowered_call, rule.signal_expr(call), 0, /*world_size_known=*/false);
   } else {
     CheckStaticSignalCapacity(call, rule.signal_expr(call), 0);
   }
-  auto body = std::make_shared<EvalStmt>(rule.make_builtin(call, loop_var), call->span_);
+  auto body = std::make_shared<EvalStmt>(rule.make_builtin(lowered_call, loop_var), call->span_);
   return std::make_shared<ForStmt>(loop_var, zero, stop, one, std::vector<IterArgPtr>{}, body,
                                    std::vector<VarPtr>{}, span, ForKind::Sequential,
                                    std::vector<std::pair<std::string, std::any>>{}, leading_comments);
