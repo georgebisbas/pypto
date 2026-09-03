@@ -13,7 +13,12 @@ with decode.prepare(persistent=True) as worker:
         worker(x, weights, output)
 ```
 
-The persistent path is opt-in. The default `prepare()` behavior is unchanged.
+`persistent` defaults to `None`, which defers to pypto's own choice (today,
+non-persistent — unchanged from the prior `False` default). Pass an explicit
+`True` to require persistence: on an artifact that predates the
+`_domain_provider` hook this raises `ValueError` rather than silently
+dispatching non-persistently. Leaving `persistent` unset never raises for that
+reason — see "Artifact compatibility" below.
 
 ## Lifecycle
 
@@ -31,6 +36,24 @@ keyword. Normal dispatch leaves it unset and continues to call
 `orch.allocate_domain`. Persistent dispatch supplies a provider keyed by the
 compiled program and generated domain name. Existing generated artifacts must
 be regenerated before they can use persistent execution.
+
+## Artifact compatibility
+
+`DistributedWorker` detects the `_domain_provider` hook on the loaded
+orchestration entry at `prepare()` time, before any dispatch. What happens on
+a missing hook depends on whether persistence was requested explicitly:
+
+- `persistent=True` (explicit): raises `ValueError` naming the missing hook.
+  Recompile via `ir.compile()` to pick it up.
+- `persistent=None` (the default, or forwarded unset through `benchmark()`):
+  warns with `RuntimeWarning` and falls back to transient dispatch for every
+  program on the worker, instead of raising. A caller who never asked for
+  persistence should not see a hard failure just because pypto's own default
+  happens to want it.
+
+A worker preparing multiple programs (`extra_compiled=[...]`) shares one
+`persistent` flag: if any program's artifact lacks the hook, the whole worker
+falls back (or raises, if requested explicitly) — not just that program.
 
 ## Window contents
 

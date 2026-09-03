@@ -13,7 +13,11 @@ with decode.prepare(persistent=True) as worker:
         worker(x, weights, output)
 ```
 
-持久模式需要显式开启，默认的 `prepare()` 行为保持不变。
+`persistent` 默认为 `None`，表示交由 pypto 自行决定（目前解析为非持久模式，
+与此前默认值 `False` 的行为一致）。显式传入 `True` 则要求必须启用持久模式：
+若 artifact（构建产物）早于 `_domain_provider` hook（钩子）生成，将抛出
+`ValueError`，而不会静默退回非持久 dispatch。不传 `persistent`（保持默认）
+则永远不会因为这个原因抛错——见下文「Artifact 兼容性」。
 
 ## 生命周期
 
@@ -28,6 +32,23 @@ domain 释放错误都会抛给调用方。
 不传该参数，仍然调用 `orch.allocate_domain`；持久 dispatch 则传入一个按 compiled
 program 和 generated domain name 隔离的 provider。已有 generated artifact 必须
 重新生成后才能使用持久模式。
+
+## Artifact 兼容性
+
+`DistributedWorker` 会在 `prepare()` 时（即任何 dispatch 之前）检测已加载
+orchestration entry 上是否存在 `_domain_provider` hook。缺失该 hook 时的处理
+方式取决于持久模式是否被显式请求：
+
+- `persistent=True`（显式）：抛出 `ValueError`，指明缺失的 hook。需通过
+  `ir.compile()` 重新编译以获得该 hook。
+- `persistent=None`（默认值，或经 `benchmark()` 透传的未设置状态）：发出
+  `RuntimeWarning` 警告，并将该 worker 上的所有 program 都退回非持久
+  dispatch，而不是抛错。调用方本就没有请求持久模式，不应仅因为 pypto 自身的
+  默认策略想要持久模式而遭遇硬失败。
+
+若一个 worker 同时准备多个 program（`extra_compiled=[...]`），它们共享同一个
+`persistent` 标志：只要其中任意一个 program 的 artifact 缺失该 hook，整个
+worker 都会退回（或者在显式请求时抛错）——而不仅仅是那一个 program。
 
 ## Window 内容
 

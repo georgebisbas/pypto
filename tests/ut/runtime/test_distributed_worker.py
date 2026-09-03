@@ -2966,6 +2966,28 @@ class TestPersistentDistributedWorker:
         with pytest.raises(ValueError, match="requires regenerated host orchestration"):
             DistributedWorker(compiled, persistent=True)
 
+    def test_implicit_default_falls_back_on_artifact_without_domain_provider_hook(self, patched_setup):
+        """persistent=None (unset) must warn and fall back, never raise.
+
+        A caller who did not ask for persistence must not see one just because the
+        library's own default happens to resolve to True and this artifact predates
+        the domain-provider hook (`persistent=True` explicit, above, still raises).
+
+        ``_PERSISTENT_DEFAULT`` is ``False`` today, so the fallback branch this test
+        targets is unreachable through the real default until a later Phase A flips
+        it — patch the constant to exercise the fallback mechanism itself now.
+        """
+        compiled = _fake_compiled([_param("a", [16, 16])], [])
+
+        with patch("pypto.runtime.distributed_runner._PERSISTENT_DEFAULT", True):
+            with pytest.warns(RuntimeWarning, match="predates persistent-domain codegen"):
+                rt = DistributedWorker(compiled)
+
+            assert rt._persistent is False
+            a = _resident(rt, (16, 16))
+            rt(a)  # falls back to ordinary transient dispatch, does not raise
+            rt.close()
+
     @pytest.mark.parametrize("attribute", ["_live_domains", "_building_run_resources"])
     def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup, attribute):
         m = patched_setup
