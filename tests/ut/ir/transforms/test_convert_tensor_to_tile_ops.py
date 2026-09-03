@@ -759,6 +759,87 @@ class TestConvertTensorToTileOps:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_put_async_emits_scratch_session_and_binds_it_into_the_wait(self):
+        """The async put family lowers to a shared UB scratch threaded into the wait.
+
+        `pld.system.async_session` becomes `tile.create` (256 B INT8 Vec — pto-isa
+        `kUbAlignSize`, the shape its own a2a3 ST kernel and `PrefetchAsyncContext`
+        both declare) plus `pld.tile.async_session(scratch)`. `pld.tensor.put_async`
+        is a pure rename to `pld.tile.put_async` — no staging tile, since
+        `pto.comm.tput_async` takes no `buf(...)` operand.
+
+        The load-bearing part is the third operand of the wait. pto-isa
+        `BuildSdmaSession` stores `session.tmpBufAddr = tmpBuf.addr` and
+        `AsyncEvent::Wait` reads the completion word back through it, so the
+        hardware touches the scratch at every wait while the IR would otherwise
+        mention it only at the session build. MemoryReuse derives lifetimes from
+        IR uses, so without this operand it could hand that UB address to a tile
+        created between the issue and the wait.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[1, 64], pl.FP16],
+                src: pld.DistributedTensor[[1, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                sess = pld.system.async_session()
+                evt = pld.tensor.put_async(dst, peer, src, sess)
+                pld.system.wait_async_event(evt, sess)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Out[pld.DistributedTensor[[1, 64], pl.FP16]],
+                src: pld.DistributedTensor[[1, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                sdma_session_scratch: pl.Tile[[1, 256], pl.INT8, pl.Mem.Vec] = pl.tile.create(
+                    [1, 256], dtype=pl.INT8, target_memory=pl.Mem.Vec
+                )
+                sess = pld.tile.async_session(sdma_session_scratch)
+                evt = pld.tile.put_async(dst, peer, src, sess)
+                pld.tile.wait_async_event(evt, sess, sdma_session_scratch)
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_wait_async_event_rejects_a_session_it_cannot_resolve(self):
+        """A wait whose session has no visible async_session build is rejected.
+
+        The binder resolves the scratch by def-use within the function. If the
+        session reached the wait through something it does not model, emitting a
+        wait without the scratch operand would silently reopen the reuse hazard,
+        so it fails loudly instead.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[1, 64], pl.FP16],
+                src: pld.DistributedTensor[[1, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                sess = pld.system.async_session()
+                evt = pld.tensor.put_async(dst, peer, src, sess)
+                for _ in pl.range(2):
+                    pld.system.wait_async_event(evt, sess)
+
+        # A loop body is still the same function, so the session resolves; this
+        # asserts the binder handles nesting rather than bailing on it.
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        printed = ir.python_print(After)
+        assert "pld.tile.wait_async_event" in printed
+        assert "sdma_session_scratch" in printed
+
     def test_put_chunk_sizes_staging_tile_to_subtile(self):
         """``chunk_rows`` / ``chunk_cols`` size the VEC staging tile to a sub-tile
         of the flattened [rows, cols] transfer; pto-isa TPUT auto-chunks the rest,
