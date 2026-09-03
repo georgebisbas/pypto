@@ -1937,16 +1937,10 @@ class DistributedWorker(Worker):
         """Fail before worker initialization when Simpler cannot retain domains."""
         if not self._persistent:
             return
-        live_domains = getattr(self._w, "_live_domains", None)
-        missing = []
-        if not isinstance(live_domains, dict):
-            missing.append("_live_domains")
-        if not hasattr(self._w, "_building_run_resources"):
-            missing.append("_building_run_resources")
-        if missing:
+        if not hasattr(self._w, "detach_persistent_domain"):
             raise RuntimeError(
-                "persistent distributed execution requires Simpler's private retention hooks: "
-                + ", ".join(missing)
+                "persistent distributed execution requires a Simpler version exposing "
+                "Worker.detach_persistent_domain"
             )
 
     def _reset_persistent_domains(
@@ -2020,32 +2014,11 @@ class DistributedWorker(Worker):
     def _detach_persistent_domain(self, handle: Any) -> None:
         """Transfer one CommDomain from the current run to Worker ownership.
 
-        Simpler records a newly allocated domain in both the current
-        ``_RunResources.live_domains`` journal and ``Worker._live_domains``.
-        Remove only the run-local claim: the global entry must remain reachable
-        so ``Worker.close()`` can reclaim it if request finalization is
-        interrupted before the run is retired.
+        Delegates to Simpler's public ``Worker.detach_persistent_domain``, which
+        keeps the domain reachable via ``Worker.live_domains`` so ``close()`` can
+        reclaim it if request finalization is interrupted before the run retires.
         """
-        live_domains = getattr(self._w, "_live_domains", None)
-        resources = getattr(self._w, "_building_run_resources", None)
-        run_live_domains = getattr(resources, "live_domains", None)
-        domain_lock = getattr(resources, "domain_lock", None)
-        if (
-            not isinstance(live_domains, dict)
-            or not isinstance(run_live_domains, dict)
-            or domain_lock is None
-        ):
-            raise RuntimeError(
-                "persistent distributed execution requires Simpler's active per-run CommDomain journal"
-            )
-        with domain_lock:
-            if bool(getattr(resources, "retired", False)):
-                raise RuntimeError("persistent CommDomain cannot be retained from an already-retired run")
-            if live_domains.get(handle.name) is not handle or run_live_domains.get(handle.name) is not handle:
-                raise RuntimeError(
-                    "persistent distributed execution could not transfer the CommDomain's run-local ownership"
-                )
-            del run_live_domains[handle.name]
+        self._w.detach_persistent_domain(handle)
 
     def _release_persistent_domains(
         self,

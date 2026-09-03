@@ -2846,6 +2846,7 @@ class _PersistentOrch:
         self.handles: list[_PersistentDomainHandle] = []
         self.resources: list[_PersistentRunResources] = []
         self.worker.close.side_effect = self._close_live_domains
+        self.worker.detach_persistent_domain = self._detach_persistent_domain
 
     def _begin_run(self) -> _PersistentRunResources:
         resources = _PersistentRunResources()
@@ -2906,6 +2907,23 @@ class _PersistentOrch:
     def copy_to(self, dst: _FakeBuffer, src: _FakeBuffer) -> None:
         payload = ctypes.string_at(int(src.base), int(src.nbytes))
         self.copy_calls.append((dst, src, payload))
+
+    def _detach_persistent_domain(self, handle: _PersistentDomainHandle) -> None:
+        """Model Simpler's ``Worker.detach_persistent_domain`` against this fake."""
+        resources = self.worker._building_run_resources
+        if resources is None:
+            raise RuntimeError("detach_persistent_domain: no run resources are being built")
+        with resources.domain_lock:
+            if resources.retired:
+                raise RuntimeError("detach_persistent_domain: run resources are already retired")
+            if (
+                self.worker._live_domains.get(handle.name) is not handle
+                or resources.live_domains.get(handle.name) is not handle
+            ):
+                raise RuntimeError(
+                    "detach_persistent_domain: handle is not this run's live claim on this domain"
+                )
+            del resources.live_domains[handle.name]
 
     def _close_live_domains(self) -> None:
         first_error: BaseException | None = None
@@ -2988,17 +3006,13 @@ class TestPersistentDistributedWorker:
             rt(a)  # falls back to ordinary transient dispatch, does not raise
             rt.close()
 
-    @pytest.mark.parametrize("attribute", ["_live_domains", "_building_run_resources"])
-    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup, attribute):
+    def test_rejects_missing_persistent_runtime_hooks_before_init(self, patched_setup):
         m = patched_setup
-        if attribute == "_live_domains":
-            m["worker"]._live_domains = None
-        else:
-            del m["worker"]._building_run_resources
+        del m["worker"].detach_persistent_domain
         m["load_entry"].return_value = (_persistent_entry(64, []), None)
         compiled = _fake_compiled([_param("a", [16, 16])], [])
 
-        with pytest.raises(RuntimeError, match=attribute):
+        with pytest.raises(RuntimeError, match="detach_persistent_domain"):
             DistributedWorker(compiled, persistent=True)
 
         m["worker"].init.assert_not_called()
