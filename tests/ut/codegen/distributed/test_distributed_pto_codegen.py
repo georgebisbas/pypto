@@ -1734,6 +1734,62 @@ def test_put_async_without_a_wait_is_rejected():
         _generate_mlir(PNoWait)
 
 
+def test_notify_while_an_async_put_is_in_flight_is_rejected():
+    """Publishing before the drain is rejected — the other half of the wait contract.
+
+    `test_put_async_without_a_wait_is_rejected` covers "never waited". This covers
+    "waited, but too late": a notify between the issue and the wait releases data
+    that has not reached the peer. Since #2591 removed the barrier PyPTO emitted
+    before TNOTIFY, and PTOAS's TNotify lowering drains only MTE2/MTE3 — neither
+    of which SDMA uses — the explicit wait is the only thing ordering the two.
+    """
+
+    @pl.program
+    class PNotifyEarly:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            # Publishes the transfer before it has landed.
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+            pld.system.wait_async_event(evt, sess)
+
+    with pytest.raises(ValueError, match="in flight|wait_async_event"):
+        _generate_mlir(PNotifyEarly)
+
+
+def test_notify_after_the_wait_is_accepted():
+    """The same kernel with the drain before the notify compiles — the guard is
+    ordering-sensitive, not a blanket ban on notify in an async kernel."""
+
+    @pl.program
+    class PNotifyLate:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+
+    mlir = _generate_mlir(PNotifyLate)
+    lines = mlir.splitlines()
+    wait_idx = next(i for i, ln in enumerate(lines) if "pto.comm.wait_async_event" in ln)
+    notify_idx = next(i for i, ln in enumerate(lines) if "pto.comm.tnotify" in ln)
+    assert wait_idx < notify_idx, "the drain must precede the publish"
+
+
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     """``chunk_rows`` / ``chunk_cols`` shrink the VEC staging tile while the
     partition views keep the full transfer extent — pto-isa TPUT then 2-D-slides

@@ -503,6 +503,26 @@ static std::string MakeNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase&
                       << op->args_[3]->GetType()->TypeName();
   value_ssa = codegen.EmitCastToI32(op->args_[3], value_ssa);
   std::string value_type = codegen.GetTypeString(DataType::INT32);
+  // Data-before-signal for async transfers: a notify published while an async
+  // remote write is still outstanding would release data that has not landed.
+  // Since #2591 there is no barrier before TNOTIFY, and PTOAS's TNotify lowering
+  // drains only MTE2/MTE3 — neither of which an SDMA transfer uses — so the
+  // explicit wait is the *only* thing ordering the two. `pending_peer_invalidates`
+  // already holds exactly the events issued and not yet drained, so this is the
+  // whole check.
+  if (auto outstanding = codegen.GetUndrainedAsyncEvents(); !outstanding.empty()) {
+    std::ostringstream names;
+    for (size_t i = 0; i < outstanding.size(); ++i) {
+      if (i > 0) names << ", ";
+      names << outstanding[i];
+    }
+    CHECK_SPAN(false, op->span_)
+        << "pld.system.notify would publish while an async remote put is still in flight (" << names.str()
+        << "). Drain it with pld.system.wait_async_event before the notify: the peer-region "
+           "cache invalidate and the GM release fence are emitted at that wait, so notifying "
+           "first releases data that has not reached the peer.";
+  }
+
   // A notify publishes completion to a peer. Pipeline synchronisation before
   // TNOTIFY is PTOAS's responsibility — its TNotify lowering drains what it
   // issued (MTE2/MTE3) and owns the ordering. Do NOT emit a pto.barrier here:
@@ -1110,8 +1130,7 @@ static std::string MakeWaitAsyncEventCodegenPTO(const CallPtr& op, codegen::Code
 
   std::string done = codegen.GetCurrentResultTarget();
   if (done.empty()) done = codegen.NewTemp();
-  codegen.Emit(done + " = pto.comm.wait_async_event(" + event + ", " + session +
-               " : !pto.async_event, !pto.async_session) -> i1");
+  pto_ops_detail::EmitWaitAsyncEventPTO(codegen, done, event, session);
 
   // Data-before-signal, deferred: the peer-region cacheinvalid the async put
   // could not emit at its issue is emitted here, once the transfer has landed.
