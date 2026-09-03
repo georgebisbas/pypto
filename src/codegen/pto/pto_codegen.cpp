@@ -559,6 +559,12 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   /// runtime-owned SDMA workspace pointer to the emitted func.func signature.
   [[nodiscard]] bool UsesSdmaWorkspace() const { return uses_sdma_workspace_; }
 
+  /// True when the body builds a prefetch async context, and separately when it
+  /// builds a `pld.system.async_session`. A function doing both is rejected: see
+  /// the diagnostic in GenerateFunction for why the two sessions collide.
+  [[nodiscard]] bool UsesPrefetchContext() const { return uses_prefetch_context_; }
+  [[nodiscard]] bool UsesAsyncSession() const { return uses_async_session_; }
+
   /// Returns true when the visited body registers deferred task completion.
   /// Drives the hidden raw dispatch-args pointer shared with the kernel wrapper.
   [[nodiscard]] bool UsesDeferredCompletion() const { return uses_deferred_completion_; }
@@ -596,10 +602,16 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       // Both async-SDMA session builders drive the same hidden workspace param:
       // prefetch owns its scratch inside PrefetchAsyncContext, while
       // pld.tile.async_session carries an explicit one, but each needs the
-      // runtime-provisioned workspace pointer.
-      if (!uses_sdma_workspace_ &&
-          (ir::IsOp(op, "prefetch.make_context") || ir::IsOp(op, "pld.tile.async_session"))) {
+      // runtime-provisioned workspace pointer. They are tracked separately
+      // because a function using *both* is rejected -- see the check in
+      // GenerateFunction.
+      if (ir::IsOp(op, "prefetch.make_context")) {
         uses_sdma_workspace_ = true;
+        uses_prefetch_context_ = true;
+      }
+      if (ir::IsOp(op, "pld.tile.async_session")) {
+        uses_sdma_workspace_ = true;
+        uses_async_session_ = true;
       }
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
         uses_deferred_completion_ = true;
@@ -626,6 +638,8 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
   bool uses_sdma_workspace_ = false;
+  bool uses_prefetch_context_ = false;
+  bool uses_async_session_ = false;
   bool uses_deferred_completion_ = false;
   bool uses_spmd_block_ops_ = false;
   bool uses_subblock_op_ = false;
@@ -924,6 +938,27 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     collector.VisitStmt(func->body_);
   }
   const bool uses_sdma_workspace = collector.UsesSdmaWorkspace();
+  // One SDMA session per function. Both builders default `channel_group_idx` to
+  // `get_block_idx()` and `queue_num` to 1, so on one core they resolve to the
+  // *same* GM state -- `ResolvePostDoneBase` and the SQ channel array are keyed
+  // by (channel group, queue), and `sync_id` separates neither. Two sessions
+  // there corrupt each other three ways: the later `InitializeRuntimeCtx` zeroes
+  // a post-done record the earlier session's wait is polling, each caches its own
+  // `sqHead`/`sqTail` snapshot so the second post reuses a claimed SQE slot, and
+  // both drive the same pipe sync flag. Prefetch builds its session lazily on the
+  // first TPREFETCH_ASYNC, so the interleaving is not even lexically obvious.
+  //
+  // pto-isa already has the fix -- `PrefetchAsyncContextBase` accepts an
+  // `externalSession`, so both surfaces could share one -- but PTOAS's
+  // `pto.make_prefetch_async_context` takes only a workspace and cannot pass one
+  // through yet. Until it can, reject rather than emit a kernel that hangs on
+  // device and looks fine on the simulator (which never builds a real session).
+  CHECK_SPAN(!(collector.UsesPrefetchContext() && collector.UsesAsyncSession()), func->span_)
+      << "InCore function '" << func->name_
+      << "' uses both pl.prefetch and pld.system.async_session. They build two independent SDMA "
+         "sessions that resolve to the same channel group and corrupt each other's queue state. "
+         "Split them into separate kernels; sharing one session needs PTOAS support that does not "
+         "exist yet.";
   const bool uses_deferred_completion = collector.UsesDeferredCompletion();
   const bool uses_spmd_params = collector.UsesSpmdBlockOps();
   const bool uses_subblock_param = collector.UsesSubblockOp();

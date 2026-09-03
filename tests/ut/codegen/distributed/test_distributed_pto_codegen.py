@@ -1790,6 +1790,41 @@ def test_notify_after_the_wait_is_accepted():
     assert wait_idx < notify_idx, "the drain must precede the publish"
 
 
+def test_prefetch_and_async_session_in_one_kernel_is_rejected():
+    """Two SDMA sessions in one function collide, so the combination is refused.
+
+    Both builders default `channel_group_idx` to `get_block_idx()` and
+    `queue_num` to 1, and the session's GM state is keyed by (channel group,
+    queue) — `sync_id` separates neither. On one core they land on identical
+    state, and the later `InitializeRuntimeCtx` zeroes a post-done record the
+    earlier session's wait polls, while each caches its own `sqHead`/`sqTail`
+    so the second post reuses a claimed SQE slot.
+
+    The simulator would not catch this: it never builds a real session.
+    """
+
+    @pl.program
+    class PBoth:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            warm: pl.Tensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            ctx = pl.prefetch.make_context()
+            pev = pl.prefetch.async_prefetch(warm, ctx)
+            pl.prefetch.wait(pev, pl.prefetch.session(ctx))
+
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    with pytest.raises(ValueError, match="two independent SDMA sessions|both pl.prefetch"):
+        _generate_mlir(PBoth)
+
+
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     """``chunk_rows`` / ``chunk_cols`` shrink the VEC staging tile while the
     partition views keep the full transfer extent — pto-isa TPUT then 2-D-slides
