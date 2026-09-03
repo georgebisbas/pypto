@@ -48,6 +48,7 @@ from _pto_loc_common import strip_loc
 from pypto import DataType, backend, codegen, ir, passes
 from pypto.backend import BackendType
 from pypto.ir.builder import IRBuilder
+from pypto.ir.compile import compile as ir_compile
 from pypto.ir.instruments import make_roundtrip_instrument
 from pypto.ir.op.distributed import system_ops as dist_system
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
@@ -1600,6 +1601,112 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "pto.addptr" in mlir
     assert "_peer_pview" in mlir
     assert "_local_pview" in mlir
+
+
+def test_put_async_emits_tput_async_without_stage_or_trailing_drain():
+    """The async put emits build_async_session + tput_async + wait_async_event.
+
+    Pins the three ways the emitted MLIR differs from the synchronous put, each
+    of which is the point of the op rather than an incidental detail:
+
+    * **no `buf(...)` staging operand** — PTOAS `TPutAsyncOp` takes only
+      `(dst, src, session)`; SDMA moves GM->GM without a UB bounce.
+    * **the leading `pto.barrier <PIPE_ALL>` survives, the trailing one does
+      not** — the leading barrier orders a preceding TSTORE before the transfer
+      reads the source, which asynchrony does not change; the trailing drain is
+      exactly the stall the event replaces.
+    * **`pto.cmo.cacheinvalid` lands after the wait, not after the issue** — at
+      the issue the data has not landed at the peer yet.
+    """
+
+    @pl.program
+    class PAsync:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    mlir = _generate_mlir(PAsync)
+    lines = mlir.splitlines()
+
+    # Session build, against the runtime-owned hidden workspace pointer.
+    build_line = next(line for line in lines if "pto.comm.build_async_session" in line)
+    assert "!pto.ptr<i8>" in build_line, build_line
+    assert "!pto.async_session" in build_line, build_line
+    assert "!pto.tile_buf<loc=vec" in build_line, build_line
+
+    # The transfer: no staging buffer group, and the same partition view type on
+    # both sides exactly as the synchronous put emits.
+    tput_line = next(line for line in lines if "pto.comm.tput_async(" in line)
+    assert "buf(" not in tput_line, tput_line
+    assert tput_line.count("!pto.partition_tensor_view<1x64xf16>") == 2, tput_line
+    assert "!pto.async_event" in tput_line, tput_line
+    assert "atomic_type" not in tput_line, tput_line
+
+    # Peer addressing is the synchronous put's, unchanged.
+    assert "pto.addptr" in mlir
+    assert "_peer_pview" in mlir
+    assert "_local_pview" in mlir
+
+    wait_idx = next(i for i, line in enumerate(lines) if "pto.comm.wait_async_event" in line)
+    tput_idx = next(i for i, line in enumerate(lines) if "pto.comm.tput_async(" in line)
+    invalidate_idx = next(i for i, line in enumerate(lines) if "pto.cmo.cacheinvalid" in line)
+
+    # The deferred release marker: after the drain, never at the issue.
+    assert tput_idx < wait_idx < invalidate_idx, (
+        f"cacheinvalid must follow the wait; got tput={tput_idx}, wait={wait_idx}, "
+        f"invalidate={invalidate_idx}"
+    )
+
+    # And the paired GM release fence (InsertCommFence's half) after that, so the
+    # full data-before-signal sequence sits behind the drain rather than the issue.
+    fence_idx = next(i for i, line in enumerate(lines) if "pto.fence.barrier_all" in line)
+    assert invalidate_idx < fence_idx, (
+        f"the GM release fence must follow the peer invalidate; got invalidate={invalidate_idx}, "
+        f"fence={fence_idx}"
+    )
+
+    # Barriers: one before the transfer, none between it and the wait.
+    barriers_before = [i for i, line in enumerate(lines) if "pto.barrier <PIPE_ALL>" in line and i < tput_idx]
+    barriers_between = [
+        i for i, line in enumerate(lines) if "pto.barrier <PIPE_ALL>" in line and tput_idx < i < wait_idx
+    ]
+    assert barriers_before, "the leading source-ordering barrier must be kept"
+    assert not barriers_between, (
+        f"no trailing drain belongs between the async issue and its wait; found at {barriers_between}"
+    )
+
+
+def test_put_async_emitted_pto_assembles(tmp_path):
+    """The emitted async-put PTO is accepted by the real assembler, not just by us.
+
+    The MLIR assertions above pin the shape of what we emit; this pins that PTOAS
+    agrees. It is not redundant: attribute *types* are invisible to a substring
+    check but load-bearing to the verifier. `sync_id` is declared
+    `OptionalAttr<I32Attr>`, and a bare `{sync_id = 0}` parses as i64 and is
+    rejected — a defect that would otherwise have surfaced only on the a2a3 gate.
+    """
+
+    @pl.program
+    class PAsm:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    ir_compile(PAsm, skip_ptoas=False, platform="a2a3", output_dir=str(tmp_path / "gen"))
 
 
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():

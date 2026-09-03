@@ -554,9 +554,9 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
     return memref_tile_types_;
   }
 
-  /// Returns true when the visited body invokes prefetch.make_context. Drives
-  /// PTOCodegen's decision to append the hidden runtime-owned SDMA workspace
-  /// pointer to the emitted func.func signature.
+  /// Returns true when the visited body invokes prefetch.make_context or
+  /// pld.tile.async_session. Drives PTOCodegen's decision to append the hidden
+  /// runtime-owned SDMA workspace pointer to the emitted func.func signature.
   [[nodiscard]] bool UsesSdmaWorkspace() const { return uses_sdma_workspace_; }
 
   /// Returns true when the visited body registers deferred task completion.
@@ -593,7 +593,12 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
 
   void VisitExpr_(const ir::CallPtr& op) override {
     if (op->op_) {
-      if (!uses_sdma_workspace_ && ir::IsOp(op, "prefetch.make_context")) {
+      // Both async-SDMA session builders drive the same hidden workspace param:
+      // prefetch owns its scratch inside PrefetchAsyncContext, while
+      // pld.tile.async_session carries an explicit one, but each needs the
+      // runtime-provisioned workspace pointer.
+      if (!uses_sdma_workspace_ &&
+          (ir::IsOp(op, "prefetch.make_context") || ir::IsOp(op, "pld.tile.async_session"))) {
         uses_sdma_workspace_ = true;
       }
       if (!uses_deferred_completion_ && ir::IsOp(op, "pld.system.defer_wait")) {
