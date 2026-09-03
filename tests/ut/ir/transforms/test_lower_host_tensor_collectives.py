@@ -1982,6 +1982,53 @@ def test_host_allreduce_ring_accepts_nondivisible_numel():
     )
 
 
+def test_host_allreduce_ring_accepts_dynamic_src_extent():
+    """Dynamic-extent HOST ring allreduce src is accepted (#2242).
+
+    The ring kernel accumulates ``numel`` at runtime from the tensor descriptor
+    shapes and partitions it into NR balanced, potentially ragged chunks, so a
+    ``src`` whose leading extent is only known at runtime needs no compile-time
+    guard. ``pld.world_size()`` as a window dim is a ``pld.system.world_size``
+    Call rather than a ``ConstInt``, which is exactly the shape the removed
+    static-shape check used to reject.
+
+    This is the lowering-side companion to
+    ``test_tensor_allreduce_ring_accepts_dynamic_shape``: only the lowering
+    reaches ``builtin.tensor.allreduce_ring``'s type deducer, since the builtin
+    is internal-only and is constructed solely by this pass.
+    """
+    SIZE = 64
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[4, SIZE], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(pld.world_size() * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(7 * 4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [pld.world_size(), SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [7, 4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+            return 0
+
+    program = cast(ir.Program, passes.materialize_comm_domain_scopes()(P))
+    result = cast(ir.Program, passes.lower_host_tensor_collectives()(program))
+
+    _assert_builtin_dispatch(
+        result,
+        "builtin.tensor.allreduce_ring",
+        arg_names=["data", "signal"],
+        arg_directions=[ir.ArgDirection.InOut, ir.ArgDirection.InOut],
+        kwargs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+        attrs={"op": int(pld.ReduceOp.Sum), "dtype": pl.FP32},
+    )
+
+
 def test_host_allreduce_ring_rejects_too_many_ranks():
     """Ring allreduce rejects more than 16 participating devices (P=17)."""
     SIZE = 64
