@@ -81,6 +81,27 @@ reset copy 会计入每次重复请求的 host 开销。
 会由具名 buffer 完整覆盖 window；如果 artifact 含有未命名的 window 空隙，reset
 会直接拒绝，因为当前 Buffer API 无法将该空隙恢复为 fresh-window 状态。
 
+## Shape 稳定性
+
+一个 retained CommDomain 的 spec（worker 集合、`window_size`、具名 buffer 大小）
+在其首次 dispatch 后即固定为一份身份标识。compiled program 的 `window_size`
+可能依赖某个运行时标量（例如 decode 循环的序列长度），因此同一个持久 worker
+的两次 dispatch **确实可能**为同一个 generated domain 请求不同大小。发生这种
+情况时，持久 dispatch 会抛出 `ValueError`，而不会静默重新分配。
+
+这是刻意设计，而非可以重试规避的限制：一次 dispatch 可能按顺序声明多个
+CommDomain，等到后面某个 domain 的 shape 不匹配被发现时，同一次请求中更早的
+domain 可能已经进入使用状态，并已对其发出真实的设备端操作。因此不存在能够
+安全地只替换那个不匹配 domain 的时机——失败会使整个持久 worker 中毒：此后
+每次调用都会抛出同一个已存储的错误，即便某次调用又恢复到最初匹配的 shape 也
+一样。这种失败之后调用 `close()` 仍会正常释放所有 retained domain。
+
+Shape 确实会变化的工作负载应当显式传入 `persistent=False`，或者把请求填充
+（pad）到同一个固定 window 大小，使 retained spec 永不改变。不传 `persistent`
+（保持默认）并不能规避这个问题——「Artifact 兼容性」一节中的回退逻辑只覆盖
+`_domain_provider` hook 缺失的情形，并不覆盖持久模式已激活后发生的 shape
+变化。
+
 ## 多 compiled program
 
 持久模式支持现有的 multi-program prepared worker：

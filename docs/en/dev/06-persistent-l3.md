@@ -95,6 +95,30 @@ their windows exactly with named buffers. Reset rejects artifacts with unnamed
 window slack because the Buffer API cannot restore that slack to fresh-window
 state.
 
+## Shape stability
+
+A retained CommDomain's spec — its worker set, `window_size`, and named buffer
+sizes — is an identity, fixed by its first dispatch. A compiled program's
+`window_size` can depend on a runtime scalar (a decode loop's sequence length,
+for example), so two dispatches of the same persistent worker *can* legitimately
+request different sizes for the same generated domain. When that happens,
+persistent dispatch raises `ValueError` instead of silently reallocating.
+
+This is deliberate, not a limitation to work around with a retry: a single
+dispatch can declare more than one CommDomain in sequence, and by the time a
+later domain's mismatch is discovered, an earlier one in the same request may
+already be entered with real device-side effects issued against it. There is
+no safe point to swap out just the mismatched domain, so the failure poisons
+the whole persistent worker — every subsequent call raises the same stored
+error, including one that reverts to the original, previously-matching shape.
+`close()` after such a failure still releases every retained domain cleanly.
+
+A workload whose shape genuinely varies across calls should pass
+`persistent=False` explicitly, or pad requests to one fixed window size so the
+retained spec never changes. Leaving `persistent` unset does not avoid this —
+the fallback in "Artifact compatibility" only covers a missing `_domain_provider`
+hook, not a shape change once persistence is active.
+
 ## Multiple compiled programs
 
 Persistent execution supports the existing multi-program prepared worker:
