@@ -1221,6 +1221,25 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   std::string body_content = stream_.str();
 
+  // Every async remote write parks its peer-region cacheinvalid for the
+  // `wait_async_event` that drains it. An entry still parked once the body is
+  // emitted means the transfer was never waited, so that marker was never
+  // emitted and the peer can read stale data — with no simulator signal and no
+  // single-rank test that would notice. Reject rather than emit the kernel.
+  if (auto undrained = GetUndrainedAsyncEvents(); !undrained.empty()) {
+    std::ostringstream names;
+    for (size_t i = 0; i < undrained.size(); ++i) {
+      if (i > 0) names << ", ";
+      names << undrained[i];
+    }
+    CHECK_SPAN(false, func->span_)
+        << "InCore function '" << func->name_ << "' issues an async remote put whose event is never "
+        << "waited: " << names.str()
+        << ". Drain it with pld.system.wait_async_event before the kernel ends — the peer-region "
+           "cache invalidate and the GM release fence are both emitted at that wait, so without it "
+           "the peer may observe stale data.";
+  }
+
   // Render the prologue before flushing constants so constants unique to a
   // shape/stride expression (e.g. the 2 in M * 2) are declared before use.
   stream_.str("");

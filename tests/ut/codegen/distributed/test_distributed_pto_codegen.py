@@ -1709,6 +1709,31 @@ def test_put_async_emitted_pto_assembles(tmp_path):
     ir_compile(PAsm, skip_ptoas=False, platform="a2a3", output_dir=str(tmp_path / "gen"))
 
 
+def test_put_async_without_a_wait_is_rejected():
+    """An async put whose event is never drained fails codegen rather than emitting.
+
+    Both release markers — the peer-region cacheinvalid and the GM fence — are
+    emitted at the wait. With no wait, neither is emitted, and the peer can read
+    stale data. Nothing downstream would notice: the CPU simulator copies
+    synchronously, and a single-rank test has no peer to observe the staleness.
+    """
+
+    @pl.program
+    class PNoWait:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            pld.tensor.put_async(dst, peer, src, sess)
+
+    with pytest.raises(ValueError, match="never.*waited|wait_async_event"):
+        _generate_mlir(PNoWait)
+
+
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     """``chunk_rows`` / ``chunk_cols`` shrink the VEC staging tile while the
     partition views keep the full transfer extent — pto-isa TPUT then 2-D-slides
