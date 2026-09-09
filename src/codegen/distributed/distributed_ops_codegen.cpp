@@ -107,17 +107,20 @@ std::string Fp32TypeCpp(const DataType& dtype) {
 std::string AllToAllVVariantSuffix(const DataType& dtype) {
   if (dtype == DataType::FP32) return "fp32";
   if (dtype == DataType::INT8) return "int8";
-  CHECK(false) << "builtin.tensor.all_to_all_v variant mangling currently supports only FP32 or INT8, got "
-               << dtype.ToString();
+  // DeduceBuiltinTensorAllToAllVType already rejects other dtypes; reaching
+  // here means malformed IR, not a user-facing dtype error.
+  INTERNAL_CHECK(false) << "builtin.tensor.all_to_all_v variant mangling currently supports only FP32 or "
+                           "INT8, got "
+                        << dtype.ToString();
   return "fp32";
 }
 
 std::string AllToAllVTypeCpp(const DataType& dtype) {
   if (dtype == DataType::FP32) return "float";
   if (dtype == DataType::INT8) return "int8_t";
-  CHECK(false) << "builtin.tensor.all_to_all_v template instantiation currently supports only FP32 or "
-                  "INT8, got "
-               << dtype.ToString();
+  INTERNAL_CHECK(false) << "builtin.tensor.all_to_all_v template instantiation currently supports only "
+                           "FP32 or INT8, got "
+                        << dtype.ToString();
   return "float";
 }
 

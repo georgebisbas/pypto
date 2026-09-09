@@ -126,7 +126,7 @@ rank 数，`pld.system.nranks` 只有 InCore 代码生成，没有 orchestration
 | 条件 | 诊断 |
 | ---- | ---- |
 | `core_num != 1` | 拒绝 —— 多 AIV 启动尚未实现 |
-| `dtype != FP32` | 拒绝 —— 与 HOST 通路声明的单 dtype 支持一致 |
+| `dtype != FP32 && dtype != INT8` | 拒绝 —— 支持 FP32 与 INT8（与 HOST 通路的 allowlist 一致） |
 | 集合通信残留在非 HOST 的 orchestration 函数体中 | 被本 pass 自身的后置条件检查拒绝 |
 
 残留检查覆盖除 HOST orchestrator 之外的每个 orchestration 函数体（HOST 交由自己的
@@ -178,9 +178,6 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   INT8 variant。
 - `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` ——
   HOST 与 CHIP 通路对 FP32 / INT8 渲染逐字节相同的 kernel。
-- `tests/ut/codegen/distributed/test_all_to_all_v_benchmark.py` —— RFC #2521 A1
-  harness（`tests/st/distributed/collectives/all_to_all_v_benchmark.py`）：
-  `L→B` 映射、规范 INT8 形状、计数模式、JSON schema、compile-only smoke。
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` —— composite 通路把
   CHIP orchestration 中的集合通信交给本 pass，并在 InCore 函数体中拒绝
   `core_num != 1`。

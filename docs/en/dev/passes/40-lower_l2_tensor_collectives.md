@@ -139,7 +139,7 @@ since every operand of one collective belongs to one comm domain.
 | Condition | Diagnostic |
 | --------- | ---------- |
 | `core_num != 1` | rejected — the multi-AIV launch is not implemented yet |
-| `dtype != FP32` | rejected — the same single-dtype support the HOST rail declares |
+| `dtype != FP32 && dtype != INT8` | rejected — FP32 and INT8 are supported (same allowlist as the HOST rail) |
 | collective left in a non-HOST orchestration body | rejected by the pass's own postcondition check |
 
 The residual check runs over every orchestration body except a HOST
@@ -202,10 +202,6 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   InCore pass-through, `core_num > 1` rejection, INT8 variant.
 - `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` —
   HOST and CHIP rails render a byte-identical kernel for FP32 and INT8.
-- `tests/ut/codegen/distributed/test_all_to_all_v_benchmark.py` — RFC #2521 A1
-  harness (`tests/st/distributed/collectives/all_to_all_v_benchmark.py`):
-  `L→B` map, canonical INT8 shape, count patterns, JSON schema, compile-only
-  smoke.
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` — the composite rail
   defers a CHIP-orchestration collective to this pass and rejects
   `core_num != 1` in an InCore body.

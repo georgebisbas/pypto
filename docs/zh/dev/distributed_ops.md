@@ -649,8 +649,7 @@ host_orch 函数体包裹进嵌套的 `CommDomainScopeStmt` 节点（按推断�
   `test_l3_ep_dispatch_combine.py`、`test_l3_notify_wait.py`、
   `test_l3_tensor_all_to_all_v_intrinsic.py`（InCore composite）、
   `test_l3_host_tensor_all_to_all_v.py`（HOST builtin）、
-  `test_l2_tensor_all_to_all_v.py`（CHIP builtin），
-  `all_to_all_v_benchmark.py`（RFC #2521 A1 INT8 harness，HOST / CHIP），以及
+  `test_l2_tensor_all_to_all_v.py`（CHIP builtin），以及
   `tests/st/distributed/` 下其他 L3 ST。**Put/Get 端到端权威契约** 已启用：
   `test_l3_put.py`（环形覆写、行偏移 put、原子加 put、分块/流水 transfer ✅）、
   `test_l3_get.py`（环形读、行偏移 get ✅）、以及 `test_l3_remote_store.py`

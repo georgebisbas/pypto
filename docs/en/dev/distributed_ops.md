@@ -744,7 +744,6 @@ dispatches before the final `Simplify`.
   `test_l3_tensor_all_to_all_v_intrinsic.py` (InCore composite),
   `test_l3_host_tensor_all_to_all_v.py` (HOST builtin),
   `test_l2_tensor_all_to_all_v.py` (CHIP builtin),
-  `all_to_all_v_benchmark.py` (RFC #2521 A1 INT8 harness, HOST and CHIP rails),
   and related L3 STs
   under `tests/st/distributed/`. **Put/get canonical e2e contracts** are now
   enabled: `test_l3_put.py` (ring overwrite, row-offset put, atomic-add put, and
