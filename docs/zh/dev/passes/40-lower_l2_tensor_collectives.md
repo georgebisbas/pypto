@@ -55,9 +55,11 @@ def chip_pipeline(self, inp, out, stage, data, signal, counts, recv):
 
 ```python
 data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
+# INT8（RFC #2521 A1 规范负载）合成为 __builtin_all_to_all_v__int8，
+# builtin_template_vars = "dtype_cpp=int8_t"
 ```
 
-其中 `__builtin_all_to_all_v__fp32` 是新增到 program 中的合成
+其中 `__builtin_all_to_all_v__{fp32,int8}` 是新增到 program 中的合成
 `FunctionType.AIV` 函数：
 
 | 方面 | 取值 |
@@ -172,7 +174,13 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
 ## 测试
 
 - `tests/ut/ir/transforms/test_lower_l2_tensor_collectives.py` —— 改写后的形态、
-  合成签名与方向、模板 attrs、variant 共享、InCore 透传、`core_num > 1` 拒绝。
+  合成签名与方向、模板 attrs、variant 共享、InCore 透传、`core_num > 1` 拒绝、
+  INT8 variant。
+- `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` ——
+  HOST 与 CHIP 通路对 FP32 / INT8 渲染逐字节相同的 kernel。
+- `tests/ut/codegen/distributed/test_all_to_all_v_benchmark.py` —— RFC #2521 A1
+  harness（`tests/st/distributed/collectives/all_to_all_v_benchmark.py`）：
+  `L→B` 映射、规范 INT8 形状、计数模式、JSON schema、compile-only smoke。
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` —— composite 通路把
   CHIP orchestration 中的集合通信交给本 pass，并在 InCore 函数体中拒绝
   `core_num != 1`。

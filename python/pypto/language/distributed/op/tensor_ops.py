@@ -1070,7 +1070,8 @@ def all_to_all_v(
             (``LowerL2TensorCollectives``); the first version accepts only
             ``core_num=1``.  Called from an InCore function, the composite rail
             expands the exchange into point-to-point primitives and requires
-            ``core_num=1``.
+            ``core_num=1``.  Payload dtype is ``FP32`` or ``INT8`` (INT8 is the
+            RFC #2521 A1 canonical benchmark dtype); other dtypes are rejected.
 
     Returns:
         The ``target`` :class:`pld.DistributedTensor` with received chunks.

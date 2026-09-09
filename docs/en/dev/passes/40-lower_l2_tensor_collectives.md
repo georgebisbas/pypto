@@ -59,9 +59,11 @@ the collective becomes:
 
 ```python
 data = self.__builtin_all_to_all_v__fp32(stage, data, signal, counts, recv)
+# INT8 (RFC #2521 A1 canonical payload) synthesizes __builtin_all_to_all_v__int8
+# with builtin_template_vars = "dtype_cpp=int8_t"
 ```
 
-where `__builtin_all_to_all_v__fp32` is a synthesized `FunctionType.AIV`
+where `__builtin_all_to_all_v__{fp32,int8}` is a synthesized `FunctionType.AIV`
 function added to the program:
 
 | Aspect | Value |
@@ -197,7 +199,13 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 
 - `tests/ut/ir/transforms/test_lower_l2_tensor_collectives.py` — lowered shape,
   synthesized signature and directions, template attrs, variant sharing,
-  InCore pass-through, `core_num > 1` rejection.
+  InCore pass-through, `core_num > 1` rejection, INT8 variant.
+- `tests/ut/codegen/distributed/test_builtin_collective_kernel_source.py` —
+  HOST and CHIP rails render a byte-identical kernel for FP32 and INT8.
+- `tests/ut/codegen/distributed/test_all_to_all_v_benchmark.py` — RFC #2521 A1
+  harness (`tests/st/distributed/collectives/all_to_all_v_benchmark.py`):
+  `L→B` map, canonical INT8 shape, count patterns, JSON schema, compile-only
+  smoke.
 - `tests/ut/ir/transforms/test_lower_composite_ops.py` — the composite rail
   defers a CHIP-orchestration collective to this pass and rejects
   `core_num != 1` in an InCore body.
