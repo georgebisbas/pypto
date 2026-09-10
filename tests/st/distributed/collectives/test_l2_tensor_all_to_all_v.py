@@ -135,6 +135,9 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             exercises the intended consumer pattern; the tail loop is what makes
             a bounded-transfer regression visible.
             """
+            # Peer TNOTIFY writes recv_counts; cross-task read needs GM invalidate per InsertCommFence.
+            pl.system.cacheinvalid(recv_counts, [nr, 1], [0, 0])
+            pl.system.fence()
             for src in pl.range(nr):
                 n_rows_i32 = pl.read(recv_counts, [src, 0])
                 pl.write(recv_out, [src, 0], n_rows_i32)
