@@ -868,6 +868,91 @@ def test_bare_barrier_notify_no_marker():
     ir.assert_structural_equal(_apply(Before), Before)
 
 
+def test_orch_collective_then_consume_prepends_incore_prologue():
+    # An orchestration pipeline that dispatches an opaque collective kernel task
+    # and then a separate InCore consumer must prepend whole-GM cacheinvalid +
+    # fence to the consumer's entry — orchestration codegen cannot host InCore
+    # system ops, so the markers land on the callee (same pattern as the manual
+    # workaround formerly in the all_to_all_v ST consume_step).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(inp, data, signal, counts, recv)
+            return self.consume_step(recv, out)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def collective_kernel(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        ) -> pld.DistributedTensor[[1, N], pl.FP32]:
+            pl.func_attr({"builtin_template_dir": ":pypto.runtime.builtins.collectives.all_to_all_v"})
+            return data
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            pl.system.cacheinvalid()
+            pl.system.fence()
+            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            inp: pl.Tensor[[1, N], pl.FP32],
+            data: pld.DistributedTensor[[1, N], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            counts: pld.DistributedTensor[[1, 1], pl.INT32],
+            recv: pld.DistributedTensor[[1, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+        ) -> pl.Tensor[[1, 1], pl.INT32]:
+            data = self.collective_kernel(inp, data, signal, counts, recv)
+            return self.consume_step(recv, out)
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_orchestration_function_untouched():
     # The data-before-signal contract is InCore-only. An Orchestration function
     # dispatches tasks via cross-function calls; those are not GM publishing

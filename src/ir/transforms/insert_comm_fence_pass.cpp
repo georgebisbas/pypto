@@ -73,7 +73,9 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -83,6 +85,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -263,6 +266,144 @@ StmtPtr MakeNoArgOp(const char* op_name, const Span& span) {
 
 // Whole-GM cacheinvalid: the no-argument form of `system.cacheinvalid`.
 StmtPtr MakeCacheInvalidAll(const Span& span) { return MakeNoArgOp("system.cacheinvalid", span); }
+
+bool HasConsumePrologue(const StmtPtr& body) {
+  if (auto seq = As<SeqStmts>(body)) {
+    return seq->stmts_.size() >= 2 && IsCacheInvalidAll(seq->stmts_[0]) &&
+           IsLeafOp(seq->stmts_[1], "system.fence");
+  }
+  return false;
+}
+
+FunctionPtr PrependConsumePrologue(const FunctionPtr& func) {
+  if (!func || !func->body_ || HasConsumePrologue(func->body_)) return func;
+  std::vector<StmtPtr> stmts;
+  stmts.push_back(MakeCacheInvalidAll(func->span_));
+  stmts.push_back(MakeNoArgOp("system.fence", func->span_));
+  stmts.push_back(func->body_);
+  auto new_body = SeqStmts::Flatten(std::move(stmts), func->span_);
+  return std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                    new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                    func->attrs_);
+}
+
+// True when an orchestration-level dispatch launches an opaque GM-publishing
+// task whose body is not analysed here (collective AIV kernels, Submit, …).
+bool IsCollectiveBuiltinDispatch(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  return call->op_->name_.rfind("builtin.tensor.", 0) == 0;
+}
+
+bool IsOpaquePublishingDispatchExpr(const ExprPtr& expr, const ProgramPtr& program) {
+  if (As<Submit>(expr)) return true;
+  auto call = As<Call>(expr);
+  if (!call || !call->op_) return false;
+  if (IsCollectiveBuiltinDispatch(call)) return true;
+  if (auto callee = program->GetFunction(call->op_->name_)) {
+    return callee->HasAttr(kAttrBuiltinTemplateDir);
+  }
+  return false;
+}
+
+FunctionPtr ResolveSingleInCoreDelegate(const ProgramPtr& program, const FunctionPtr& orch) {
+  if (!orch || !orch->body_) return nullptr;
+  const StmtPtr* body = &orch->body_;
+  if (auto seq = As<SeqStmts>(orch->body_)) {
+    if (seq->stmts_.size() != 1) return nullptr;
+    body = &seq->stmts_[0];
+  }
+  ExprPtr callee_expr;
+  if (auto ret = As<ReturnStmt>(*body)) {
+    if (ret->value_.size() != 1) return nullptr;
+    callee_expr = ret->value_[0];
+  } else if (auto eval = As<EvalStmt>(*body)) {
+    callee_expr = eval->expr_;
+  } else {
+    return nullptr;
+  }
+  auto call = As<Call>(callee_expr);
+  if (!call || !call->op_) return nullptr;
+  auto inner = program->GetFunction(call->op_->name_);
+  if (inner && IsInCoreType(inner->func_type_)) return inner;
+  return nullptr;
+}
+
+void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& program,
+                                       std::unordered_set<std::string>* targets) {
+  auto call = As<Call>(expr);
+  if (!call || !call->op_ || op_predicates::IsBuiltinOp(call->op_->name_)) return;
+  if (auto callee = program->GetFunction(call->op_->name_)) {
+    if (IsInCoreType(callee->func_type_)) {
+      targets->insert(call->op_->name_);
+      return;
+    }
+    if (IsOrchestrationLike(callee->func_type_)) {
+      if (auto inner = ResolveSingleInCoreDelegate(program, callee)) {
+        targets->insert(inner->name_);
+      }
+    }
+  }
+}
+
+// Scan orchestration bodies for "opaque collective dispatch, then later InCore
+// consume" and record the ultimate InCore callees that need an entry prologue.
+class OrchPostCollectiveScanner {
+ public:
+  explicit OrchPostCollectiveScanner(ProgramPtr program) : program_(std::move(program)) {}
+
+  void Scan(const FunctionPtr& func) {
+    if (!func || !func->body_) return;
+    ScanStmt(func->body_, false);
+  }
+
+  [[nodiscard]] const std::unordered_set<std::string>& targets() const { return targets_; }
+
+ private:
+  bool ScanStmt(const StmtPtr& stmt, bool seen_publish) {
+    if (!stmt) return seen_publish;
+    if (auto seq = As<SeqStmts>(stmt)) {
+      bool flag = seen_publish;
+      for (const auto& child : seq->stmts_) {
+        flag = ScanStmt(child, flag);
+      }
+      return flag;
+    }
+    if (auto iff = As<IfStmt>(stmt)) {
+      const bool then_flag = ScanStmt(iff->then_body_, seen_publish);
+      if (iff->else_body_.has_value()) {
+        const bool else_flag = ScanStmt(iff->else_body_.value(), seen_publish);
+        return then_flag || else_flag;
+      }
+      return then_flag;
+    }
+    if (auto for_ = As<ForStmt>(stmt)) {
+      return ScanStmt(for_->body_, seen_publish);
+    }
+    if (auto while_ = As<WhileStmt>(stmt)) {
+      return ScanStmt(while_->body_, seen_publish);
+    }
+    if (auto assign = As<AssignStmt>(stmt)) {
+      if (seen_publish) MarkPostCollectiveInCoreConsumers(assign->value_, program_, &targets_);
+      return seen_publish || IsOpaquePublishingDispatchExpr(assign->value_, program_);
+    }
+    if (auto eval = As<EvalStmt>(stmt)) {
+      if (seen_publish) MarkPostCollectiveInCoreConsumers(eval->expr_, program_, &targets_);
+      return seen_publish || IsOpaquePublishingDispatchExpr(eval->expr_, program_);
+    }
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      bool flag = seen_publish;
+      for (const auto& value : ret->value_) {
+        if (flag) MarkPostCollectiveInCoreConsumers(value, program_, &targets_);
+        flag = flag || IsOpaquePublishingDispatchExpr(value, program_);
+      }
+      return flag;
+    }
+    return seen_publish;
+  }
+
+  ProgramPtr program_;
+  std::unordered_set<std::string> targets_;
+};
 
 // Structural traversal: emit `cacheinvalid; fence` after every publishing write
 // and `cacheinvalid()` after every wait. No control-flow state is needed — both
@@ -498,22 +639,47 @@ class InsertCommMarkers : public IRMutator {
 }  // namespace
 
 Pass InsertCommFence() {
-  auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
-    if (!func || !func->body_) return func;
-    // The data-before-signal contract is an InCore-only concern: the publishing
-    // writes, waits, and the system.cacheinvalid / system.fence markers are
-    // InCore GM builtins. Orchestration / HOST functions only dispatch tasks —
-    // their cross-function calls are not GM publishing writes, and inserting an
-    // InCore builtin there is rejected by orchestration codegen.
-    if (!IsInCoreType(func->func_type_)) return func;
-    InsertCommMarkers mutator;
-    auto new_body = mutator.MarkTopLevel(func->body_);
-    if (new_body.get() == func->body_.get()) return func;
-    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_);
+  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
+    if (!program) return program;
+
+    std::unordered_set<std::string> post_collective_consumers;
+    for (const auto& [gvar, func] : program->functions_) {
+      (void)gvar;
+      if (!func || !IsOrchestrationLike(func->func_type_)) continue;
+      OrchPostCollectiveScanner scanner(program);
+      scanner.Scan(func);
+      post_collective_consumers.insert(scanner.targets().begin(), scanner.targets().end());
+    }
+    auto new_functions = program->functions_;
+    bool changed = false;
+    for (auto& [gvar, func] : new_functions) {
+      (void)gvar;
+      if (!func || !func->body_) continue;
+
+      if (IsInCoreType(func->func_type_)) {
+        InsertCommMarkers mutator;
+        auto new_body = mutator.MarkTopLevel(func->body_);
+        if (new_body.get() != func->body_.get()) {
+          func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                            func->return_types_, new_body, func->span_, func->func_type_,
+                                            func->level_, func->role_, func->attrs_);
+          changed = true;
+        }
+      }
+
+      if (post_collective_consumers.count(func->name_) > 0) {
+        auto with_prologue = PrependConsumePrologue(func);
+        if (with_prologue.get() != func.get()) {
+          func = with_prologue;
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) return program;
+    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
-  return CreateFunctionPass(pass_func, "InsertCommFence", kInsertCommFenceProperties);
+  return CreateProgramPass(pass_func, "InsertCommFence", kInsertCommFenceProperties);
 }
 
 }  // namespace pass
