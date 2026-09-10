@@ -68,6 +68,25 @@
  * wait already followed by a whole-GM cacheinvalid, are left alone. Runs last in
  * the Default pipeline (after all statement-reordering passes) so the inserted ops
  * stay adjacent through codegen.
+ *
+ * ## Phase B — orchestration → InCore consumer prologue
+ *
+ * Phase A (`InsertCommMarkers`) is InCore-only: orchestration codegen rejects
+ * `system.cacheinvalid` / `system.fence`. L2/HOST pipelines that dispatch an
+ * opaque collective task (`builtin.tensor.*`, a callee with `builtin_template_dir`,
+ * or `Submit`) and then a *separate* InCore consumer task need the same whole-GM
+ * consume-side contract at the consumer entry — stale GM cache reads across AIV
+ * tasks otherwise produce silent data races (e.g. `recv_counts=0` after peer
+ * TNOTIFY).
+ *
+ * `OrchPostCollectiveScanner` walks every `Orchestration` / `Graph` body with a
+ * sequential `seen_publish` flag: after an opaque publish dispatch, the next
+ * InCore callee (directly, or through a one-hop orchestration wrapper such as
+ * `consume_orch → consume_step`) is recorded. The pass then prepends
+ * `system.cacheinvalid(); system.fence()` at that InCore function's entry
+ * (`PrependConsumePrologue`, idempotent via `HasConsumePrologue`). Orchestration
+ * IR is never modified. Marking is function-granular and conservative (whole-GM;
+ * if/else branches OR their publish flags).
  */
 
 #include <cstddef>
