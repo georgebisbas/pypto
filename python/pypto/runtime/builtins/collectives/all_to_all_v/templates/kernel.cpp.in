@@ -185,9 +185,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
 
   // Self-slot clamped count, captured in the dest loop below and written to
-  // local recv_counts after the completion barrier (see Phase 2). Avoids both
-  // a flaky local TNOTIFY(Set) and a post-barrier re-read of send_counts that
-  // can observe a stale cached 0 on the CHIP rail.
+  // local recv_counts after the completion barrier (see Phase 2).
   int32_t self_rows = 0;
 
   // ==================================================================
@@ -201,10 +199,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //          HOST and InCore agree bit-for-bit on every input, including a
   //          negative send_counts.
   //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set)
+  //        — best-effort early publish (matches InCore); NOT authoritative on
+  //        HOST/L2. Remote NotifyOp::Set is a posted GM store; barrier
+  //        AtomicAdd on a different address does not prove it is visible
+  //        (CI flake: peer recv_counts=0). Phase 2 re-derives every local
+  //        slot after the completion barrier.
   //   TPUT input[dest*max_recv : dest*max_recv + rows, :]
   //        -> target[my_rank*max_recv : my_rank*max_recv + rows, :]
-  //   After ExchangeBarrier: local store recv_counts[my_rank] = self_rows
-  //        (reinforces the self slot; see Phase 2).
   //
   // The TPUT transfers exactly `rows` rows, not the full max_recv capacity —
   // only the payload crosses the interconnect. Rows past `rows` in the
@@ -241,9 +242,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (dest == my_rank) {
       self_rows = rows;
     }
-    // Publish clamped rows into dest's recv_counts[my_rank] (peers and self).
-    // Self is also rewritten after ExchangeBarrier from `self_rows` — local
-    // TNOTIFY(Set) alone has been flaky under load (rank==src reads 0).
+    // Best-effort early count publish (InCore wire parity). Phase 2 overwrites
+    // every local recv_counts slot from register / peer send_counts.
     __gm__ int32_t *remote_recv_slot =
         CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
     pto::comm::Signal count_sig(remote_recv_slot);
@@ -300,14 +300,31 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   PublishFence();
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
-  // Self-slot reinforce: plain store + local TNOTIFY(Set) of the register-
-  // captured clamped count. Either path alone has been insufficient on one
-  // of the two rails under load; together with the consume-side Phase B
-  // invalidate this closes the rank==src recv_counts=0 flake.
-  recv_counts_base[my_rank] = self_rows;
-  {
-    pto::comm::Signal self_count_sig(recv_counts_base + my_rank);
-    pto::comm::TNOTIFY(self_count_sig, self_rows, pto::comm::NotifyOp::Set);
+  // Authoritative local recv_counts fill (Phase 2). Do NOT rely on the Phase 1
+  // remote TNOTIFY(Set) being visible here: that path races under NPU load.
+  // Self: register-captured clamped rows. Peers: pull send_counts[my_rank]
+  // from each peer's counts window (staged before the start barrier, so long
+  // retired by now) and apply the same two-sided clamp. Local stores + local
+  // TNOTIFY(Set) + consume-side Phase B invalidate close both self and peer
+  // recv_counts=0 flakes without spinning on remote Sets.
+  for (int src = 0; src < nranks; ++src) {
+    int32_t rows;
+    if (src == my_rank) {
+      rows = self_rows;
+    } else {
+      __gm__ int32_t *remote_send_slot =
+          CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+      __asm__ __volatile__("");
+      dcci(reinterpret_cast<__gm__ void *>(remote_send_slot), SINGLE_CACHE_LINE);
+      __asm__ __volatile__("");
+      int64_t rows64 = static_cast<int64_t>(*remote_send_slot);
+      if (rows64 > max_recv) rows64 = max_recv;
+      if (rows64 < 0) rows64 = 0;
+      rows = static_cast<int32_t>(rows64);
+    }
+    recv_counts_base[src] = rows;
+    pto::comm::Signal count_sig(recv_counts_base + src);
+    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
   }
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
