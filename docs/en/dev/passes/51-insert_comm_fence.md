@@ -81,7 +81,7 @@ with a sequential `seen_publish` flag:
 | Step | Action |
 | ---- | ------ |
 | Opaque publish | Any `builtin.tensor.*` call, callee with `builtin_template_dir`, or `Submit` sets `seen_publish`. |
-| Later InCore dispatch | While `seen_publish`, record the InCore callee (unwrap one-hop orchestration wrappers like `consume_orch → consume_step`). |
+| Later InCore dispatch | While `seen_publish`, record the InCore callee reached by a plain `Call` **or** a `Submit` (`pl.submit` / `pl.manual_scope`); the scan recurses into `ScopeStmt` bodies so nested launches are visible; unwrap one-hop orchestration wrappers like `consume_orch → consume_step`. |
 | Apply | Prepend `system.cacheinvalid(); system.fence()` at the recorded InCore function entry. Orchestration IR is unchanged. |
 
 Whole-GM at function entry matches the opaque cross-InCore-call rule. It is

@@ -65,7 +65,7 @@ pass 在 InCore 内 `pld.system.wait` 或不透明 InCore 调用之后插入的�
 | 步骤 | 行为 |
 | ---- | ---- |
 | 不透明发布 | 任何 `builtin.tensor.*` 调用、带 `builtin_template_dir` 的被调函数、或 `Submit` 置位 `seen_publish`。 |
-| 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（可 unwrap 一层编排包装，如 `consume_orch → consume_step`）。 |
+| 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（普通 `Call` **或** `Submit`/`pl.submit`/`pl.manual_scope` 均可；扫描会递归进入 `ScopeStmt` body；可 unwrap 一层编排包装，如 `consume_orch → consume_step`）。 |
 | 应用 | 在记录的 InCore 函数入口 prepend `system.cacheinvalid(); system.fence()`。编排 IR 不变。 |
 
 函数入口处的整 GM 失效与不透明跨 InCore 调用规则一致。标记是**函数粒度**的（被标记消费者的每次入口都会执行序言），控制流上**保守**（`if` 任一分支可能发布则 `if` 之后的代码仍视为已发布）。幂等：入口已以整 GM `cacheinvalid` + `fence` 开头则跳过。

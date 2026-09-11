@@ -82,7 +82,10 @@
  * `OrchPostCollectiveScanner` walks every `Orchestration` / `Graph` body with a
  * sequential `seen_publish` flag: after an opaque publish dispatch, the next
  * InCore callee (directly, or through a one-hop orchestration wrapper such as
- * `consume_orch → consume_step`) is recorded. The pass then prepends
+ * `consume_orch → consume_step`) is recorded. Consumer marking is Submit-aware:
+ * both plain `Call` and `Submit` (from `pl.manual_scope` / `pl.submit`) are
+ * resolved via the callee op, and the scan recurses into `ScopeStmt` bodies so
+ * launches nested under `pl.manual_scope` are visible. The pass then prepends
  * `system.cacheinvalid(); system.fence()` at that InCore function's entry
  * (`PrependConsumePrologue`, idempotent via `HasConsumePrologue`). Orchestration
  * IR is never modified. Marking is function-granular and conservative (whole-GM;
@@ -313,6 +316,14 @@ bool IsCollectiveBuiltinDispatch(const CallPtr& call) {
   return call->op_->name_.rfind("builtin.tensor.", 0) == 0;
 }
 
+// Callee op from a Call or Submit expr (pass-submit-awareness: both are
+// call-like launches). Null when `expr` is neither.
+OpPtr GetCallLikeOp(const ExprPtr& expr) {
+  if (auto submit = As<Submit>(expr)) return submit->op_;
+  if (auto call = As<Call>(expr)) return call->op_;
+  return nullptr;
+}
+
 bool IsOpaquePublishingDispatchExpr(const ExprPtr& expr, const ProgramPtr& program) {
   if (As<Submit>(expr)) return true;
   auto call = As<Call>(expr);
@@ -340,20 +351,20 @@ FunctionPtr ResolveSingleInCoreDelegate(const ProgramPtr& program, const Functio
   } else {
     return nullptr;
   }
-  auto call = As<Call>(callee_expr);
-  if (!call || !call->op_) return nullptr;
-  auto inner = program->GetFunction(call->op_->name_);
+  auto op = GetCallLikeOp(callee_expr);
+  if (!op) return nullptr;
+  auto inner = program->GetFunction(op->name_);
   if (inner && IsInCoreType(inner->func_type_)) return inner;
   return nullptr;
 }
 
 void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& program,
                                        std::unordered_set<std::string>* targets) {
-  auto call = As<Call>(expr);
-  if (!call || !call->op_ || op_predicates::IsBuiltinOp(call->op_->name_)) return;
-  if (auto callee = program->GetFunction(call->op_->name_)) {
+  auto op = GetCallLikeOp(expr);
+  if (!op || op_predicates::IsBuiltinOp(op->name_)) return;
+  if (auto callee = program->GetFunction(op->name_)) {
     if (IsInCoreType(callee->func_type_)) {
-      targets->insert(call->op_->name_);
+      targets->insert(op->name_);
       return;
     }
     if (IsOrchestrationLike(callee->func_type_)) {
@@ -400,6 +411,11 @@ class OrchPostCollectiveScanner {
     }
     if (auto while_ = As<WhileStmt>(stmt)) {
       return ScanStmt(while_->body_, seen_publish);
+    }
+    // pl.manual_scope / pl.at / other scope wrappers: recurse so Submit
+    // launches inside the body are still seen (pass-submit-awareness).
+    if (auto scope = As<ScopeStmt>(stmt)) {
+      return ScanStmt(scope->body_, seen_publish);
     }
     if (auto assign = As<AssignStmt>(stmt)) {
       if (seen_publish) MarkPostCollectiveInCoreConsumers(assign->value_, program_, &targets_);
