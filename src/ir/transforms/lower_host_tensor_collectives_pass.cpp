@@ -409,20 +409,21 @@ void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const cha
   INTERNAL_CHECK_SPAN(target_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
-  // The HOST builtin runs a single block per rank; multi-AIV AllToAllV is a
-  // CHIP/L2 capability (LowerL2TensorCollectives), so a HOST call that asks for
-  // more cores would silently get one.
-  const auto core_num = call->GetKwarg<int>("core_num", 1);
-  CHECK_SPAN(core_num == 1, call->span_)
-      << "HOST pld.tensor.all_to_all_v does not support core_num > 1, got core_num=" << core_num
+  // core_num (args_[5]) is the requested block limit L — now a genuine
+  // Scalar[INDEX] argument (see plan 118), still gated to a compile-time 1 on
+  // this rail: multi-AIV AllToAllV enablement lands in plan 120, not here.
+  auto core_num_const = As<ConstInt>(call->args_[5]);
+  CHECK_SPAN(core_num_const && core_num_const->value_ == 1, call->span_)
+      << "HOST pld.tensor.all_to_all_v does not support core_num > 1, got "
+      << (core_num_const ? std::to_string(core_num_const->value_) : std::string("a dynamic value"))
       << "; call it from a CHIP Orchestration function for the multi-AIV managed path";
 
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all_v", call,
-      {call->args_[0], call->args_[1], call->args_[2], call->args_[3], call->args_[4]},
+      {call->args_[0], call->args_[1], call->args_[2], call->args_[3], call->args_[4], call->args_[5]},
       {{"dtype", target_type->dtype_}}, device, {{"dtype", target_type->dtype_}},
       {ArgDirection::Input, ArgDirection::InOut, ArgDirection::InOut, ArgDirection::Input,
-       ArgDirection::InOut});
+       ArgDirection::InOut, ArgDirection::Input});
 }
 
 struct HostCollectiveRule {

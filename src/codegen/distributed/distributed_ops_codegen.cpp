@@ -168,6 +168,13 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   const std::string cfg_var = ta_var + "_config";
 
   codegen.Emit(ta_var + " = TaskArgs()");
+  // Scalar-typed args (e.g. all_to_all_v's core_num, a genuine argument since
+  // dynamic core_num support was added) can't be emitted inline here — TaskArgs
+  // requires every tensor added before any scalar, and the ordering-token
+  // tensor below still has to follow every window/tile arg. Collect their code
+  // in arg order and emit them after that token, ahead of the fixed
+  // domain_size/device_ctx/core_num-attr scalars below.
+  std::vector<std::string> deferred_scalar_args;
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const std::string tag = ArgDirectionToTensorArgType(arg_directions[i]);
     if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
@@ -193,6 +200,10 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
                    tag + ")");
       continue;
     }
+    if (ir::As<ir::ScalarType>(call->args_[i]->GetType())) {
+      deferred_scalar_args.push_back(codegen.GetExprAsCode(call->args_[i]));
+      continue;
+    }
     INTERNAL_CHECK_SPAN(false, call->span_)
         << "Internal error: unsupported builtin tensor collective arg type at index " << i;
   }
@@ -211,6 +222,12 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
     codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].domain_size)");
   }
   codegen.Emit(ta_var + ".add_scalar(" + *handle_var + "[" + rank_expr + "].device_ctx)");
+  // A genuine dynamic scalar argument (e.g. all_to_all_v's core_num) — a
+  // reference to its actual runtime value, unlike the `core_num` out-of-band
+  // *attr* parameter just below, which is always baked as a literal.
+  for (const auto& arg_code : deferred_scalar_args) {
+    codegen.Emit(ta_var + ".add_scalar(" + arg_code + ")");
+  }
   if (core_num.has_value()) {
     codegen.Emit(ta_var + ".add_scalar(" + std::to_string(*core_num) + ")");
   }

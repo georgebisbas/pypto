@@ -979,6 +979,7 @@ def test_host_builtin_tensor_collective_then_consume():
             signal,
             counts,
             recv,
+            1,
             dtype=pl.FP32,
             attrs={
                 "device": 0,
@@ -989,6 +990,7 @@ def test_host_builtin_tensor_collective_then_consume():
                     pl.adir.inout,
                     pl.adir.input,
                     pl.adir.inout,
+                    pl.adir.input,
                 ],
             },
         )

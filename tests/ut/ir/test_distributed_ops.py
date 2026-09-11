@@ -2472,8 +2472,9 @@ def _make_all_to_all_v_args(
     counts_shape: list[int] | None = None,
     counts_dtype: DataType = DataType.INT32,
     recv_shape: list[int] | None = None,
+    core_num: int = 1,
 ) -> list[ir.Expr]:
-    """Build a valid 5-arg operand list, with the counts operands overridable."""
+    """Build a valid 6-arg operand list, with the counts operands and core_num overridable."""
     shape = counts_shape or [_AAV_NR, 1]
     # recv_counts is always [NR, 1] (same layout as the barrier signal).
     return [
@@ -2482,6 +2483,7 @@ def _make_all_to_all_v_args(
         _make_distributed_tensor_var("signal", [_AAV_NR, 1], DataType.INT32, span),
         _make_tensor_var("counts", shape, counts_dtype, span),
         _make_distributed_tensor_var("recv_counts", recv_shape or [_AAV_NR, 1], DataType.INT32, span),
+        ir.ConstInt(core_num, DataType.INDEX, span),
     ]
 
 
@@ -2536,7 +2538,7 @@ def test_all_to_all_v_requires_recv_counts_operand():
     """The 4-arg form is rejected — recv_counts exposes the receive-side counts."""
     span = ir.Span.unknown()
     args = _make_all_to_all_v_args(span)[:4]
-    with pytest.raises(ValueError, match="requires 5 args"):
+    with pytest.raises(ValueError, match="requires 6 args"):
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
@@ -2582,31 +2584,30 @@ def test_all_to_all_v_rejects_non_divisible_target_rows():
 
 
 def test_all_to_all_v_core_num_defaults_to_one():
-    """An absent core_num means the single-block launch every rail starts from.
-
-    Keeping it optional is what lets IR built before the kwarg existed — hand-built
-    calls, programs deserialized from an older ``.pto`` — keep its meaning.
-    """
+    """An absent core_num means the single-block launch every rail starts from."""
     span = ir.Span.unknown()
-    call = ir.create_op_call("pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {}, span)
-    assert dict(call.kwargs).get("core_num", 1) == 1
+    args = _make_all_to_all_v_args(span)[:5]
+    call = dist_tensor_ops.all_to_all_v(*args, span=span)
+    assert isinstance(call.args[5], ir.ConstInt)
+    assert call.args[5].value == 1
 
 
-def test_all_to_all_v_carries_core_num_kwarg():
-    """An explicit core_num reaches the Call for the lowering rails to read."""
+def test_all_to_all_v_carries_core_num_arg():
+    """An explicit core_num reaches the Call as a real argument for the lowering rails to read."""
     span = ir.Span.unknown()
-    call = ir.create_op_call("pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {"core_num": 4}, span)
-    assert dict(call.kwargs)["core_num"] == 4
+    args = _make_all_to_all_v_args(span)[:5]
+    call = dist_tensor_ops.all_to_all_v(*args, 4, span=span)
+    assert isinstance(call.args[5], ir.ConstInt)
+    assert call.args[5].value == 4
 
 
 @pytest.mark.parametrize("core_num", [0, -1])
 def test_all_to_all_v_rejects_non_positive_core_num(core_num):
     """No rail can launch zero or fewer blocks."""
     span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)[:5]
     with pytest.raises(ValueError, match="core_num must be positive"):
-        ir.create_op_call(
-            "pld.tensor.all_to_all_v", _make_all_to_all_v_args(span), {"core_num": core_num}, span
-        )
+        dist_tensor_ops.all_to_all_v(*args, core_num, span=span)
 
 
 @pytest.mark.parametrize(

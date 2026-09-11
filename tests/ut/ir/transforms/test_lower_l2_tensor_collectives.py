@@ -111,7 +111,12 @@ def test_collective_becomes_a_local_builtin_kernel_call():
 
 
 def test_synthesized_kernel_signature_and_directions():
-    """The kernel is an AIV function carrying the five collective operands."""
+    """The kernel is an AIV function carrying the collective operands plus core_num.
+
+    core_num carries no new behavior on this rail (still gated to a compile-time
+    1) — the parameter exists purely so this rail's ABI matches the HOST rail's
+    shared entry.cpp.in/kernel.cpp.in (see plan 118).
+    """
     result = passes.lower_l2_tensor_collectives()(_build_program())
 
     kernel = _get_func(result, _KERNEL_NAME)
@@ -123,6 +128,7 @@ def test_synthesized_kernel_signature_and_directions():
         "signal",
         "send_counts",
         "recv_counts",
+        "core_num",
     ]
     # Directions are what orders compute -> collective -> consume once
     # DeriveCallDirections and AutoDeriveTaskDependencies run over the call.
@@ -132,6 +138,7 @@ def test_synthesized_kernel_signature_and_directions():
         ir.ParamDirection.InOut,
         ir.ParamDirection.In,
         ir.ParamDirection.InOut,
+        ir.ParamDirection.In,
     ]
 
 
@@ -282,13 +289,14 @@ def test_kernel_signature_is_canonical_not_call_site_typed():
     kinds = [type(p.type).__name__ for p in kernel.params]
     # input and send_counts canonical to plain Tensor even though the call site
     # passed DistributedTensors; the other three stay distributed, which is what
-    # supplies the CommCtx parameters.
+    # supplies the CommCtx parameters. core_num is a plain scalar, uncanonicalized.
     assert kinds == [
         "TensorType",
         "DistributedTensorType",
         "DistributedTensorType",
         "TensorType",
         "DistributedTensorType",
+        "ScalarType",
     ], kinds
 
 
@@ -348,7 +356,7 @@ def test_unsupported_collective_in_a_chip_body_is_named():
 
 def test_multi_core_request_is_rejected():
     """core_num > 1 is not implemented yet and must fail loudly, not silently."""
-    with pytest.raises(ValueError, match="only core_num=1"):
+    with pytest.raises(ValueError, match="only a compile-time core_num=1"):
         passes.lower_l2_tensor_collectives()(_build_program(core_num=2))
 
 

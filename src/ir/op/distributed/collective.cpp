@@ -601,21 +601,29 @@ void CheckStaticContiguousPayload(const TensorTypePtr& type, const char* role) {
 
 TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 5) << "pld.tensor.all_to_all_v requires 5 args "
-                             "(input, target, signal, send_counts, recv_counts), but got "
+  (void)kwargs;
+  CHECK(args.size() == 6) << "pld.tensor.all_to_all_v requires 6 args "
+                             "(input, target, signal, send_counts, recv_counts, core_num), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << "pld.tensor.all_to_all_v positional argument #" << i << " must not be null";
   }
 
-  // core_num is the requested AIV block limit for the managed CHIP/L2 rail.
-  // The InCore composite rail requires 1; LowerCompositeOps enforces that, so
-  // the deducer only rejects a value no rail could honour. Optional with a
-  // default of 1: every rail is single-core unless asked otherwise, so IR built
-  // without the kwarg (hand-built calls, programs deserialized from a .pto
-  // written before it existed) keeps its original meaning.
-  auto core_num = GetKwargOr<int>(kwargs, "core_num", 1);
-  CHECK(core_num > 0) << "pld.tensor.all_to_all_v core_num must be positive, got " << core_num;
+  // core_num is the requested AIV block *limit* L for the managed CHIP/L2 or
+  // HOST rail — a maximum, not a promise; the admitted block count B is
+  // computed at the entry (CalAllToAllVBlocks). It is now a genuine argument
+  // (a Scalar[INDEX] Expr), not a compile-time-only kwarg, so a fully dynamic
+  // request can flow through IR: only a statically-known ConstInt is
+  // range-checked here, exactly as no other dynamic scalar argument in this
+  // op (e.g. send_counts' runtime values) is compile-time-checked either. A
+  // dynamic core_num's positivity is validated at the runtime entry instead.
+  // The InCore composite rail requires a compile-time core_num == 1;
+  // LowerCompositeOps enforces that, so this deducer only rejects a
+  // statically-provable non-positive value no rail could ever honour.
+  if (auto core_num_const = As<ConstInt>(args[5])) {
+    CHECK(core_num_const->value_ > 0)
+        << "pld.tensor.all_to_all_v core_num must be positive, got " << core_num_const->value_;
+  }
 
   // input: flattened send buffer [NR*MAX_RECV, SIZE] — Tensor or DistributedTensor
   // (same Tensor-like contract as symmetric all_to_all / send_counts).
@@ -1195,9 +1203,9 @@ namespace {
 TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
                                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
   constexpr const char* kOpName = "builtin.tensor.all_to_all_v";
-  CHECK(args.size() == 5) << kOpName
-                          << " requires exactly 5 positional arguments "
-                             "(input, target, signal, send_counts, recv_counts), but got "
+  CHECK(args.size() == 6) << kOpName
+                          << " requires exactly 6 positional arguments "
+                             "(input, target, signal, send_counts, recv_counts, core_num), but got "
                           << args.size();
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
@@ -1334,6 +1342,9 @@ REGISTER_OP("builtin.tensor.all_to_all_v")
     .add_argument("recv_counts",
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
+    .add_argument("core_num",
+                  "Scalar[INDEX] requested AIV block limit L (a maximum, not a promise — the "
+                  "admitted block count B is computed at the entry from L)")
     .set_attr<DataType>("dtype")
     .no_memory_spec()
     .set_internal_only(true)

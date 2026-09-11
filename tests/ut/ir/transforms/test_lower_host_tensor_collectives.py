@@ -148,6 +148,7 @@ def _assert_builtin_dispatch(
     arg_directions: list[ir.ArgDirection],
     kwargs: dict[str, object],
     attrs: dict[str, object] | None = None,
+    trailing_scalar_const: int | None = None,
 ) -> ir.Call:
     """Pin the lowered ``builtin_name`` dispatch, in the pass output *and* in the
     print -> parse round-trip of that output.
@@ -172,6 +173,7 @@ def _assert_builtin_dispatch(
         "arg_directions": arg_directions,
         "kwargs": kwargs,
         "attrs": attrs,
+        "trailing_scalar_const": trailing_scalar_const,
     }
     call = _match_builtin_dispatch(_get_func(result, "host_orch").body, builtin_name, **expectations)
     reparsed = pl.parse_program(ir.python_print(result, format=False))
@@ -191,6 +193,7 @@ def _match_builtin_dispatch(
     kwargs: dict[str, object],
     attrs: dict[str, object] | None = None,
     window_bound_args: bool = True,
+    trailing_scalar_const: int | None = None,
 ) -> ir.Call:
     """Assert the host body dispatches ``builtin_name`` exactly once and pin the
     full emitted structure of the dispatch.
@@ -243,14 +246,26 @@ def _match_builtin_dispatch(
     # device attr is bound to the loop induction var
     assert call.attrs["device"] is loop.loop_var
 
-    # every argument is the expected window-bound DistributedTensor, in order
-    assert len(call.args) == len(arg_names), f"expected {len(arg_names)} args, got {len(call.args)}"
-    for actual, expected in zip(call.args, arg_names):
+    # every leading argument is the expected window-bound DistributedTensor, in
+    # order; an optional trailing scalar (e.g. all_to_all_v's core_num) is
+    # checked separately below, not as a window-bound Var.
+    expected_len = len(arg_names) + (1 if trailing_scalar_const is not None else 0)
+    assert len(call.args) == expected_len, f"expected {expected_len} args, got {len(call.args)}"
+    tensor_args = call.args[:-1] if trailing_scalar_const is not None else call.args
+    for actual, expected in zip(tensor_args, arg_names):
         var = _as_var(actual)
         assert var.name_hint == expected, f"expected arg window var {expected!r}, got {var.name_hint!r}"
         assert isinstance(var.type, ir.DistributedTensorType)
         if window_bound_args:
             assert var.type.window_buffer is not None, f"arg {expected!r} must be window-bound"
+    if trailing_scalar_const is not None:
+        scalar_arg = call.args[-1]
+        assert isinstance(scalar_arg, ir.ConstInt), (
+            f"expected a trailing scalar const arg, got {type(scalar_arg).__name__}"
+        )
+        assert scalar_arg.value == trailing_scalar_const, (
+            f"expected trailing scalar const {trailing_scalar_const}, got {scalar_arg.value}"
+        )
 
     assert list(call.arg_directions) == arg_directions
     # arg_directions is mirrored in attrs
@@ -1509,9 +1524,11 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
             ir.ArgDirection.InOut,
             ir.ArgDirection.Input,
             ir.ArgDirection.InOut,
+            ir.ArgDirection.Input,
         ],
         kwargs={"dtype": pl.FP32},
         attrs={"dtype": pl.FP32},
+        trailing_scalar_const=1,
     )
 
 
