@@ -17,6 +17,14 @@
 
 namespace {
 
+// The maximum admitted AIV block count B for a requested launch-width limit L
+// across P participating ranks (RFC #2521 K2 frozen contract item 3). This
+// entry.cpp.in template is compiled standalone, with no link-time path back
+// into the compiler's own C++ sources, so it cannot call
+// python/pypto/ir/op/distributed/launch_width.py's cal_all_to_all_v_blocks —
+// this is an independent mirror of that same formula.
+int32_t CalAllToAllVBlocks(int32_t p, int32_t l) { return l < p ? l : (l / p) * p; }
+
 template <typename DType>
 void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   const Tensor &input = orch_args.tensor(0).ref();
@@ -25,26 +33,47 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   const Tensor &send_counts = orch_args.tensor(3).ref();
   const Tensor &recv_counts = orch_args.tensor(4).ref();
 
+  // nranks (P) and core_num (L) reach only this dispatch's own args, never the
+  // synthesized AICore kernel's `CoreTaskArgs` below — the kernel itself still
+  // derives nranks from CommContext::rankNum, so its argument layout stays
+  // identical to the managed CHIP/L2 rail's, which renders the same kernel
+  // template.
+  const int32_t nranks = static_cast<int32_t>(orch_args.scalar(0));
+  const int32_t core_num = static_cast<int32_t>(orch_args.scalar(2));
+  if (nranks <= 0) {
+    rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "all_to_all_v: nranks must be positive, got %d", nranks);
+    return;
+  }
+  if (core_num <= 0) {
+    rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "all_to_all_v: core_num must be positive, got %d", core_num);
+    return;
+  }
+  const int32_t admitted_blocks = CalAllToAllVBlocks(nranks, core_num);
+
+  // signal is 2D [NR, S] (collective.cpp's deducer enforces a positive
+  // compile-time S) or 1D [NR] (S == 1, all_to_all_v's own composite deducer
+  // only ever emits the 2D form, but this mirrors CheckStaticSignalCapacity's
+  // rank-1 acceptance for defense in depth).
+  const int64_t signal_stride = signal.ndims == 1 ? 1 : static_cast<int64_t>(signal.shapes[1]);
+  if (signal_stride < admitted_blocks) {
+    rt_report_fatal(
+        SIMPLER_ERROR_INVALID_ARGS,
+        "all_to_all_v: signal stride (%lld) is smaller than the admitted block count (%d) for "
+        "core_num=%d, nranks=%d",
+        static_cast<long long>(signal_stride), admitted_blocks, core_num, nranks
+    );
+    return;
+  }
+
   CoreTaskArgs params;
   params.add_input(input);
   params.add_inout(target);
   params.add_inout(signal);
   params.add_input(send_counts);
   params.add_inout(recv_counts);
-  // No rank-count scalar: the kernel reads CommContext::rankNum, which is the
-  // same number (the context is per comm domain, so its rankNum *is* the
-  // domain size). Dropping it makes this rail's kernel argument layout
-  // identical to the managed CHIP/L2 rail's, so both render one byte-identical
-  // kernel source from the shared template.
-  params.add_scalar(orch_args.scalar(0));  // CommContext device pointer
-  // core_num: the requested AIV block limit L (RFC #2521 K2). Both rails now
-  // carry it — genuinely dynamic on the HOST rail, a compile-time 1 on the
-  // CHIP/L2 rail (its own gate isn't lifted yet) — so it always reaches this
-  // shared kernel source at the same scalar slot. Not yet used for anything:
-  // the launch-width/admission wiring lands in a later PR (plan 120); for now
-  // just assert the only value either rail can currently produce.
-  int32_t core_num = static_cast<int32_t>(orch_args.scalar(1));
-  (void)core_num;
+  params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
+  params.launch_spec.{{launch_core_count_method}}(admitted_blocks);
+  params.launch_spec.set_require_sync_start(true);
   rt_submit_aiv_task(0, params);
 }
 
@@ -56,8 +85,9 @@ __attribute__((visibility("default"))) OrchestrationConfig aicpu_orchestration_c
     const ChipTaskArgs &orch_args) {
   (void)orch_args;
   return OrchestrationConfig{
-      // 5 window tensors + CommContext scalar + core_num scalar.
-      .expected_arg_count = 7,
+      // 5 window tensors + 1 per-rank ordering token + rank-count scalar +
+      // CommContext scalar + core_num scalar.
+      .expected_arg_count = 9,
   };
 }
 

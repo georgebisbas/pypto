@@ -428,14 +428,21 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
   const std::string variant = op->op_->name_ + "__" + Fp32VariantSuffix(dtype);
 
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
-    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", Fp32TypeCpp(dtype)}});
+    dist_codegen->RecordBuiltinNextLevel(
+        op, variant,
+        {{"dtype_cpp", Fp32TypeCpp(dtype)},
+         {"launch_core_count_method",
+          pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod()}});
   }
-  // No rank-count scalar: this kernel reads CommContext::rankNum, which is the
-  // same number (see EmitBuiltinWindowCollectiveDispatch). Dropping it makes
-  // this rail's kernel argument layout identical to the managed CHIP rail's, so
-  // both render one byte-identical source from the shared template.
+  // Rank-count scalar re-added (RFC #2521 K2): entry.cpp.in needs the
+  // participating rank count P to compute the admitted block count
+  // B = CalAllToAllVBlocks(P, L) before choosing the launch width. It reaches
+  // only entry.cpp.in's own dispatch args, never the synthesized kernel's own
+  // `CoreTaskArgs` — that kernel still derives nranks from CommContext::rankNum
+  // for its own purposes, so its argument layout remains identical to the
+  // managed CHIP rail's, which renders the same kernel template.
   EmitBuiltinWindowCollectiveDispatch(*dist_codegen, op, variant, /*core_num=*/std::nullopt,
-                                      /*emit_rank_count=*/false);
+                                      /*emit_rank_count=*/true);
   return "";
 }
 
