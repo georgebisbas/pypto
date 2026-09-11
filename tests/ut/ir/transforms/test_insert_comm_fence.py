@@ -46,7 +46,8 @@ mirroring ``test_stamp_tfree_split.py``.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import ir
+from pypto import backend, ir
+from pypto.backend import BackendType
 from pypto.pypto_core import passes
 
 N = 8
@@ -1135,9 +1136,6 @@ def test_orch_consume_wrapper_unwraps_after_materialize_runtime_scopes():
     # Default pipeline runs MaterializeRuntimeScopes before InsertCommFence, so
     # consume_orch's body is wrapped in an AUTO RuntimeScopeStmt. Phase B's
     # one-hop unwrap must peel that scope or the prologue is silently skipped.
-    from pypto import backend
-    from pypto.backend import BackendType
-
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
     try:
