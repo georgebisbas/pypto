@@ -76,12 +76,14 @@ invalidate the pass already inserts after an in-function `pld.system.wait` or
 opaque InCore call.
 
 A second phase (`OrchPostCollectiveScanner`) scans every orchestration-like body
-with a sequential `seen_publish` flag:
+— `Orchestration` / `Graph`, and HOST `Opaque` functions with
+`Role::Orchestrator` (the real L3 `host_orch` shape) — with a sequential
+`seen_publish` flag:
 
 | Step | Action |
 | ---- | ------ |
 | Opaque publish | Any `builtin.tensor.*` call, callee with `builtin_template_dir`, or `Submit` sets `seen_publish`. |
-| Later InCore dispatch | While `seen_publish`, record the InCore callee reached by a plain `Call` **or** a `Submit` (`pl.submit` / `pl.manual_scope`); the scan recurses into `ScopeStmt` bodies so nested launches are visible; unwrap one-hop orchestration wrappers like `consume_orch → consume_step`. |
+| Later InCore dispatch | While `seen_publish`, record the InCore callee reached by a plain `Call` **or** a `Submit` (`pl.submit` / `pl.manual_scope`); the scan recurses into `ScopeStmt` bodies so nested launches are visible; unwrap one-hop orchestration wrappers like `consume_orch → consume_step` (peeling `RuntimeScopeStmt` / single-stmt `SeqStmts` after `MaterializeRuntimeScopes`). |
 | Apply | Prepend `system.cacheinvalid(); system.fence()` at the recorded InCore function entry. Orchestration IR is unchanged. |
 
 Whole-GM at function entry matches the opaque cross-InCore-call rule. It is
@@ -236,8 +238,9 @@ recognized and **not duplicated**, so the pass is idempotent.
 
 ## Algorithm — phase B: orchestration scan + InCore entry prepend
 
-1. Scan every `Orchestration` / `Graph` function; union the InCore consumer names
-   that appear after an opaque publish dispatch.
+1. Scan every `Orchestration` / `Graph` function and every HOST `Opaque`
+   `Role::Orchestrator` body; union the InCore consumer names that appear after
+   an opaque publish dispatch (one-hop unwrap peels `RuntimeScopeStmt`).
 2. For each program function: run phase A on InCore bodies; prepend the consume
    prologue on any function whose name was recorded in step 1.
 

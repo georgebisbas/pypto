@@ -184,6 +184,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // launch is require_sync_start) — not implemented, no-op until block_num>1.
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
 
+  // Self-slot clamped count, captured in the dest loop below and written to
+  // local recv_counts after the completion barrier (see Phase 2). Avoids both
+  // a flaky local TNOTIFY(Set) and a post-barrier re-read of send_counts that
+  // can observe a stale cached 0 on the CHIP rail.
+  int32_t self_rows = 0;
+
   // ==================================================================
   // Phase 1: per-destination push + inline count publish. Include self
   // (dest == my_rank), matching HCCL identity / the InCore composite's
@@ -197,6 +203,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set)
   //   TPUT input[dest*max_recv : dest*max_recv + rows, :]
   //        -> target[my_rank*max_recv : my_rank*max_recv + rows, :]
+  //   After ExchangeBarrier: local store recv_counts[my_rank] = self_rows
+  //        (reinforces the self slot; see Phase 2).
   //
   // The TPUT transfers exactly `rows` rows, not the full max_recv capacity —
   // only the payload crosses the interconnect. Rows past `rows` in the
@@ -230,7 +238,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
+    if (dest == my_rank) {
+      self_rows = rows;
+    }
+    // Publish clamped rows into dest's recv_counts[my_rank] (peers and self).
+    // Self is also rewritten after ExchangeBarrier from `self_rows` — local
+    // TNOTIFY(Set) alone has been flaky under load (rank==src reads 0).
+    __gm__ int32_t *remote_recv_slot =
+        CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
     pto::comm::Signal count_sig(remote_recv_slot);
     pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
 
@@ -285,5 +300,15 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   PublishFence();
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
+  // Self-slot reinforce: plain store + local TNOTIFY(Set) of the register-
+  // captured clamped count. Either path alone has been insufficient on one
+  // of the two rails under load; together with the consume-side Phase B
+  // invalidate this closes the rank==src recv_counts=0 flake.
+  recv_counts_base[my_rank] = self_rows;
+  {
+    pto::comm::Signal self_count_sig(recv_counts_base + my_rank);
+    pto::comm::TNOTIFY(self_count_sig, self_rows, pto::comm::NotifyOp::Set);
+  }
   pipe_barrier(PIPE_ALL);
+  dsb(DSB_DDR);
 }

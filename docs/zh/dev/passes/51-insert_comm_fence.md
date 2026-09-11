@@ -60,12 +60,14 @@
 `builtin.tensor.*` dispatch、`Submit` 等）之后，消费者的第一次可缓存 GM 读需要与
 pass 在 InCore 内 `pld.system.wait` 或不透明 InCore 调用之后插入的整 GM 失效相同的契约。
 
-第二阶段（`OrchPostCollectiveScanner`）用顺序的 `seen_publish` 标志扫描每个编排类函数体：
+第二阶段（`OrchPostCollectiveScanner`）用顺序的 `seen_publish` 标志扫描每个编排类函数体
+—— `Orchestration` / `Graph`，以及 HOST 上带 `Role::Orchestrator` 的 `Opaque` 函数
+（真实 L3 `host_orch` 形态）：
 
 | 步骤 | 行为 |
 | ---- | ---- |
 | 不透明发布 | 任何 `builtin.tensor.*` 调用、带 `builtin_template_dir` 的被调函数、或 `Submit` 置位 `seen_publish`。 |
-| 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（普通 `Call` **或** `Submit`/`pl.submit`/`pl.manual_scope` 均可；扫描会递归进入 `ScopeStmt` body；可 unwrap 一层编排包装，如 `consume_orch → consume_step`）。 |
+| 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（普通 `Call` **或** `Submit`/`pl.submit`/`pl.manual_scope` 均可；扫描会递归进入 `ScopeStmt` body；可 unwrap 一层编排包装，如 `consume_orch → consume_step`，并剥掉 `MaterializeRuntimeScopes` 插入的 `RuntimeScopeStmt`）。 |
 | 应用 | 在记录的 InCore 函数入口 prepend `system.cacheinvalid(); system.fence()`。编排 IR 不变。 |
 
 函数入口处的整 GM 失效与不透明跨 InCore 调用规则一致。标记是**函数粒度**的（被标记消费者的每次入口都会执行序言），控制流上**保守**（`if` 任一分支可能发布则 `if` 之后的代码仍视为已发布）。幂等：入口已以整 GM `cacheinvalid` + `fence` 开头则跳过。
@@ -189,7 +191,9 @@ cacheinvalid，都会被识别且**不重复插入**，故本 pass 幂等。
 
 ## 算法 —— 阶段 B：编排扫描 + InCore 入口 prepend
 
-1. 扫描每个 `Orchestration` / `Graph` 函数，合并「在不透明发布 dispatch 之后出现」的 InCore 消费者名称。
+1. 扫描每个 `Orchestration` / `Graph` 函数以及 HOST `Opaque` + `Role::Orchestrator`
+   函数体，合并「在不透明发布 dispatch 之后出现」的 InCore 消费者名称（一层 unwrap 会剥掉
+   `RuntimeScopeStmt`）。
 2. 对程序中每个函数：在 InCore 体上运行阶段 A；对步骤 1 记录到的函数 prepend consume 序言。
 
 不 rewrite 任何编排语句 —— 标记落在 codegen 能发射它们的 InCore 消费者 kernel 上。

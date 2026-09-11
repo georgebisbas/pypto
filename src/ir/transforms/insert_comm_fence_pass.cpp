@@ -79,13 +79,17 @@
  * tasks otherwise produce silent data races (e.g. `recv_counts=0` after peer
  * TNOTIFY).
  *
- * `OrchPostCollectiveScanner` walks every `Orchestration` / `Graph` body with a
- * sequential `seen_publish` flag: after an opaque publish dispatch, the next
- * InCore callee (directly, or through a one-hop orchestration wrapper such as
- * `consume_orch → consume_step`) is recorded. Consumer marking is Submit-aware:
- * both plain `Call` and `Submit` (from `pl.manual_scope` / `pl.submit`) are
- * resolved via the callee op, and the scan recurses into `ScopeStmt` bodies so
- * launches nested under `pl.manual_scope` are visible. The pass then prepends
+ * `OrchPostCollectiveScanner` walks every orchestration-like body — `Orchestration`
+ * / `Graph`, plus HOST `Opaque` functions with `Role::Orchestrator` (the real
+ * L3 `host_orch` shape; same eligibility as `IsHostOrch` in the HOST collective
+ * lowers) — with a sequential `seen_publish` flag: after an opaque publish
+ * dispatch, the next InCore callee (directly, or through a one-hop orchestration
+ * wrapper such as `consume_orch → consume_step`) is recorded. Consumer marking is
+ * Submit-aware: both plain `Call` and `Submit` (from `pl.manual_scope` /
+ * `pl.submit`) are resolved via the callee op, and the scan recurses into
+ * `ScopeStmt` bodies so launches nested under `pl.manual_scope` are visible.
+ * One-hop unwrap peels `RuntimeScopeStmt` / single-stmt `SeqStmts` so wrappers
+ * still resolve after `MaterializeRuntimeScopes`. The pass then prepends
  * `system.cacheinvalid(); system.fence()` at that InCore function's entry
  * (`PrependConsumePrologue`, idempotent via `HasConsumePrologue`). Orchestration
  * IR is never modified. Marking is function-granular and conservative (whole-GM;
@@ -335,27 +339,85 @@ bool IsOpaquePublishingDispatchExpr(const ExprPtr& expr, const ProgramPtr& progr
   return false;
 }
 
+// HOST Opaque + Orchestrator bodies are scanned like Orchestration/Graph — the
+// L3 ST's `@pl.function(level=HOST, role=Orchestrator)` defaults to Opaque.
+[[nodiscard]] bool IsPhaseBScanTarget(const FunctionPtr& func) {
+  if (!func) return false;
+  if (IsOrchestrationLike(func->func_type_)) return true;
+  if (!func->level_.has_value() || *func->level_ != Level::HOST) return false;
+  return func->role_.has_value() && *func->role_ == Role::Orchestrator;
+}
+
+// Peel AUTO/manual ScopeStmt and single-statement SeqStmts so one-hop wrappers
+// still resolve after MaterializeRuntimeScopes.
+StmtPtr PeelTrivialScopeWrappers(const StmtPtr& stmt) {
+  if (!stmt) return nullptr;
+  if (auto scope = As<ScopeStmt>(stmt)) return PeelTrivialScopeWrappers(scope->body_);
+  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
+    return PeelTrivialScopeWrappers(seq->stmts_[0]);
+  }
+  return stmt;
+}
+
+// Collect InCore callees reachable as the sole purpose of a thin orchestration
+// wrapper (direct Call/Submit, or assign + return of that call).
+void CollectInCoreCallees(const StmtPtr& stmt, const ProgramPtr& program,
+                          std::unordered_set<std::string>* names) {
+  if (!stmt || !names) return;
+  if (auto scope = As<ScopeStmt>(stmt)) {
+    CollectInCoreCallees(scope->body_, program, names);
+    return;
+  }
+  if (auto seq = As<SeqStmts>(stmt)) {
+    for (const auto& child : seq->stmts_) CollectInCoreCallees(child, program, names);
+    return;
+  }
+  auto consider = [&](const ExprPtr& expr) {
+    auto op = GetCallLikeOp(expr);
+    if (!op) return;
+    if (auto callee = program->GetFunction(op->name_); callee && IsInCoreType(callee->func_type_)) {
+      names->insert(op->name_);
+    }
+  };
+  if (auto ret = As<ReturnStmt>(stmt)) {
+    for (const auto& value : ret->value_) consider(value);
+    return;
+  }
+  if (auto eval = As<EvalStmt>(stmt)) {
+    consider(eval->expr_);
+    return;
+  }
+  if (auto assign = As<AssignStmt>(stmt)) {
+    consider(assign->value_);
+  }
+}
+
 FunctionPtr ResolveSingleInCoreDelegate(const ProgramPtr& program, const FunctionPtr& orch) {
   if (!orch || !orch->body_) return nullptr;
-  const StmtPtr* body = &orch->body_;
-  if (auto seq = As<SeqStmts>(orch->body_)) {
-    if (seq->stmts_.size() != 1) return nullptr;
-    body = &seq->stmts_[0];
-  }
+  StmtPtr body = PeelTrivialScopeWrappers(orch->body_);
+  if (!body) return nullptr;
+
+  // Fast path: bare return/eval of a Call/Submit (pre-MaterializeRuntimeScopes).
   ExprPtr callee_expr;
-  if (auto ret = As<ReturnStmt>(*body)) {
-    if (ret->value_.size() != 1) return nullptr;
-    callee_expr = ret->value_[0];
-  } else if (auto eval = As<EvalStmt>(*body)) {
+  if (auto ret = As<ReturnStmt>(body)) {
+    if (ret->value_.size() == 1) callee_expr = ret->value_[0];
+  } else if (auto eval = As<EvalStmt>(body)) {
     callee_expr = eval->expr_;
-  } else {
-    return nullptr;
   }
-  auto op = GetCallLikeOp(callee_expr);
-  if (!op) return nullptr;
-  auto inner = program->GetFunction(op->name_);
-  if (inner && IsInCoreType(inner->func_type_)) return inner;
-  return nullptr;
+  if (callee_expr) {
+    if (auto op = GetCallLikeOp(callee_expr)) {
+      auto inner = program->GetFunction(op->name_);
+      if (inner && IsInCoreType(inner->func_type_)) return inner;
+    }
+  }
+
+  // MaterializeRuntimeScopes wraps CHIP orch bodies as:
+  //   with pl.scope(): t = self.consume_step(...); return t
+  // Accept that shape when it forwards to exactly one InCore callee.
+  std::unordered_set<std::string> names;
+  CollectInCoreCallees(body, program, &names);
+  if (names.size() != 1) return nullptr;
+  return program->GetFunction(*names.begin());
 }
 
 void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& program,
@@ -367,7 +429,9 @@ void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& pr
       targets->insert(op->name_);
       return;
     }
-    if (IsOrchestrationLike(callee->func_type_)) {
+    // One-hop unwrap: Orchestration/Graph wrappers and HOST Opaque orchestrators
+    // that only forward to a single InCore consumer (consume_orch → consume_step).
+    if (IsPhaseBScanTarget(callee)) {
       if (auto inner = ResolveSingleInCoreDelegate(program, callee)) {
         targets->insert(inner->name_);
       }
@@ -680,7 +744,7 @@ Pass InsertCommFence() {
     std::unordered_set<std::string> post_collective_consumers;
     for (const auto& [gvar, func] : program->functions_) {
       (void)gvar;
-      if (!func || !IsOrchestrationLike(func->func_type_)) continue;
+      if (!IsPhaseBScanTarget(func)) continue;
       OrchPostCollectiveScanner scanner(program);
       scanner.Scan(func);
       post_collective_consumers.insert(scanner.targets().begin(), scanner.targets().end());
