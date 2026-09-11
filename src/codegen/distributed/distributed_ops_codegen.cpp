@@ -104,26 +104,6 @@ std::string Fp32TypeCpp(const DataType& dtype) {
   return "float";
 }
 
-std::string AllToAllVVariantSuffix(const DataType& dtype) {
-  if (dtype == DataType::FP32) return "fp32";
-  if (dtype == DataType::INT8) return "int8";
-  // DeduceBuiltinTensorAllToAllVType already rejects other dtypes; reaching
-  // here means malformed IR, not a user-facing dtype error.
-  INTERNAL_CHECK(false) << "builtin.tensor.all_to_all_v variant mangling currently supports only FP32 or "
-                           "INT8, got "
-                        << dtype.ToString();
-  return "fp32";
-}
-
-std::string AllToAllVTypeCpp(const DataType& dtype) {
-  if (dtype == DataType::FP32) return "float";
-  if (dtype == DataType::INT8) return "int8_t";
-  INTERNAL_CHECK(false) << "builtin.tensor.all_to_all_v template instantiation currently supports only "
-                           "FP32 or INT8, got "
-                        << dtype.ToString();
-  return "float";
-}
-
 std::string ArgDirectionToTensorArgType(ir::ArgDirection dir) {
   switch (dir) {
     case ir::ArgDirection::Input:
@@ -428,10 +408,10 @@ REGISTER_DISTRIBUTED_OP(builtin_tensor_all_to_all_v, "builtin.tensor.all_to_all_
   auto* dist_codegen = dynamic_cast<DistributedCodegen*>(&codegen);
   INTERNAL_CHECK(dist_codegen) << "builtin.tensor.all_to_all_v codegen requires DistributedCodegen";
   const auto dtype = op->GetAttr<DataType>("dtype");
-  const std::string variant = op->op_->name_ + "__" + AllToAllVVariantSuffix(dtype);
+  const std::string variant = op->op_->name_ + "__" + dtype.ToString();
 
   if (dist_codegen->MarkBuiltinEmitted(variant)) {
-    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", AllToAllVTypeCpp(dtype)}});
+    dist_codegen->RecordBuiltinNextLevel(op, variant, {{"dtype_cpp", dtype.ToCTypeString()}});
   }
   // No rank-count scalar: this kernel reads CommContext::rankNum, which is the
   // same number (see EmitBuiltinWindowCollectiveDispatch). Dropping it makes

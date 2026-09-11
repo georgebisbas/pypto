@@ -116,22 +116,18 @@ constexpr const char* kAllToAllV = "pld.tensor.all_to_all_v";
 /// Variant suffix and C++ element type the builtin kernel template is
 /// instantiated with.
 ///
-/// Shared with the HOST rail (`AllToAllVVariantSuffix` /
-/// `AllToAllVTypeCpp` in distributed_ops_codegen.cpp): both rails render the
-/// same template, so widening the dtype set is one change for both. FP32 and
-/// INT8 are the current pair; INT8 is the RFC #2521 A1 canonical payload.
+/// Both rails use DataType's string conversions to render the same template.
+/// FP32 and INT8 are the current pair; INT8 is the RFC #2521 A1 canonical payload.
 struct BuiltinDType {
-  const char* suffix;
-  const char* cpp;
+  std::string suffix;
+  std::string cpp;
 };
 
 [[nodiscard]] BuiltinDType ResolveBuiltinDType(const DataType& dtype, const Span& span) {
-  if (dtype == DataType::FP32) return {"fp32", "float"};
-  if (dtype == DataType::INT8) return {"int8", "int8_t"};
-  CHECK_SPAN(false, span) << "managed pld.tensor.all_to_all_v currently supports only dtype=FP32 or "
-                             "INT8, got "
-                          << dtype.ToString();
-  return {"fp32", "float"};
+  CHECK_SPAN(dtype == DataType::FP32 || dtype == DataType::INT8, span)
+      << "managed pld.tensor.all_to_all_v currently supports only dtype=FP32 or INT8, got "
+      << dtype.ToString();
+  return {dtype.ToString(), dtype.ToCTypeString()};
 }
 
 /// Encode the template substitutions as a ``k=v`` list for the Function attr.
