@@ -961,34 +961,11 @@ def test_host_builtin_tensor_collective_then_consume():
     # After LowerHostTensorCollectives, HOST pipelines dispatch ``builtin.tensor.*``
     # directly from orchestration. Phase B must treat that as an opaque publish
     # and prepend the consume prologue to the later InCore callee.
-    _src = """
-import pypto.language as pl
-import pypto.language.distributed as pld
-
-N = 8
-
-@pl.program
-class Before:
-    @pl.function(type=pl.FunctionType.InCore)
-    def consume_step(
-        self,
-        recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
-        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-    ) -> pl.Tensor[[1, 1], pl.INT32]:
-        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
-        pl.write(out, [0, 0], val)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def host_pipeline(
-        self,
-        inp: pld.DistributedTensor[[1, N], pl.FP32],
-        data: pld.DistributedTensor[[1, N], pl.FP32],
-        signal: pld.DistributedTensor[[1, 1], pl.INT32],
-        counts: pld.DistributedTensor[[1, 1], pl.INT32],
-        recv: pld.DistributedTensor[[1, 1], pl.INT32],
-        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-    ) -> pl.Tensor[[1, 1], pl.INT32]:
+    #
+    # Both sides use ``pl.parse_program`` — ``pl.builtin.*`` is a machine-only
+    # printer surface with no typed DSL wrapper, so a ``@pl.program`` Expected
+    # would fail pyright (reportAttributeAccessIssue on ``pl.builtin``).
+    _builtin_call = """
         data = pl.builtin.tensor.all_to_all_v(
             inp,
             data,
@@ -1008,54 +985,54 @@ class Before:
                 ],
             },
         )
+"""
+    _program_src = """
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+N = 8
+
+@pl.program
+class P:
+    @pl.function(type=pl.FunctionType.InCore)
+    def consume_step(
+        self,
+        recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+{consume_body}
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def host_pipeline(
+        self,
+        inp: pld.DistributedTensor[[1, N], pl.FP32],
+        data: pld.DistributedTensor[[1, N], pl.FP32],
+        signal: pld.DistributedTensor[[1, 1], pl.INT32],
+        counts: pld.DistributedTensor[[1, 1], pl.INT32],
+        recv: pld.DistributedTensor[[1, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, 1], pl.INT32]:
+{builtin_call}
         return self.consume_step(recv, out)
 """
-    Before = pl.parse_program(_src)
-
-    @pl.program
-    class Expected:
-        @pl.function(type=pl.FunctionType.InCore)
-        def consume_step(
-            self,
-            recv_counts: pld.DistributedTensor[[1, 1], pl.INT32],
-            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, 1], pl.INT32]:
-            pl.system.cacheinvalid()
-            pl.system.fence()
-            val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])
-            pl.write(out, [0, 0], val)
-            return out
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def host_pipeline(
-            self,
-            inp: pld.DistributedTensor[[1, N], pl.FP32],
-            data: pld.DistributedTensor[[1, N], pl.FP32],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
-            counts: pld.DistributedTensor[[1, 1], pl.INT32],
-            recv: pld.DistributedTensor[[1, 1], pl.INT32],
-            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, 1], pl.INT32]:
-            data = pl.builtin.tensor.all_to_all_v(
-                inp,
-                data,
-                signal,
-                counts,
-                recv,
-                dtype=pl.FP32,
-                attrs={
-                    "device": 0,
-                    "dtype": pl.FP32,
-                    "arg_directions": [
-                        pl.adir.input,
-                        pl.adir.inout,
-                        pl.adir.inout,
-                        pl.adir.input,
-                        pl.adir.inout,
-                    ],
-                },
-            )
-            return self.consume_step(recv, out)
+    Before = pl.parse_program(
+        _program_src.format(
+            consume_body="        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n        pl.write(out, [0, 0], val)\n",
+            builtin_call=_builtin_call,
+        )
+    )
+    Expected = pl.parse_program(
+        _program_src.format(
+            consume_body=(
+                "        pl.system.cacheinvalid()\n"
+                "        pl.system.fence()\n"
+                "        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n"
+                "        pl.write(out, [0, 0], val)\n"
+            ),
+            builtin_call=_builtin_call,
+        )
+    )
 
     ir.assert_structural_equal(_apply(Before), Expected)
 
