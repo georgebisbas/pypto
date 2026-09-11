@@ -1016,9 +1016,13 @@ class P:
 {builtin_call}
         return self.consume_step(recv, out)
 """
+    _consume_body = (
+        "        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n"
+        "        pl.write(out, [0, 0], val)\n"
+    )
     Before = pl.parse_program(
         _program_src.format(
-            consume_body="        val: pl.Scalar[pl.INT32] = pl.read(recv_counts, [0, 0])\n        pl.write(out, [0, 0], val)\n",
+            consume_body=_consume_body,
             builtin_call=_builtin_call,
         )
     )
