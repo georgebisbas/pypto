@@ -409,14 +409,14 @@ void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const cha
   INTERNAL_CHECK_SPAN(target_type, call->span_)
       << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
-  // core_num (args_[5]) is the requested block limit L — now a genuine
-  // Scalar[INDEX] argument (see plan 118), still gated to a compile-time 1 on
-  // this rail: multi-AIV AllToAllV enablement lands in plan 120, not here.
+  // core_num (args_[5]) is the requested block limit L — a genuine
+  // Scalar[INDEX] argument (see plan 118). Any positive value is admitted on
+  // this rail (RFC #2521 K2): entry.cpp.in computes the admitted block count
+  // B = CalAllToAllVBlocks(nranks, L) and rejects an insufficient signal
+  // stride at the runtime entry, before submitting the AIV task.
   auto core_num_const = As<ConstInt>(call->args_[5]);
-  CHECK_SPAN(core_num_const && core_num_const->value_ == 1, call->span_)
-      << "HOST pld.tensor.all_to_all_v does not support core_num > 1, got "
-      << (core_num_const ? std::to_string(core_num_const->value_) : std::string("a dynamic value"))
-      << "; call it from a CHIP Orchestration function for the multi-AIV managed path";
+  CHECK_SPAN(!core_num_const || core_num_const->value_ > 0, call->span_)
+      << "HOST pld.tensor.all_to_all_v core_num must be positive, got " << core_num_const->value_;
 
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all_v", call,
@@ -564,9 +564,14 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
       CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
                                    /*world_size_known=*/true);
     } else if (IsOp(call, "pld.tensor.all_to_all_v")) {
-      // Barrier signal [NR, 1]; counts publish on recv_counts (may be wider unused).
-      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
-                                /*required_lanes=*/1, /*allow_wider_lanes=*/true);
+      // Barrier signal [NR, S], any S > 0 (already enforced by the op
+      // deducer); counts publish on recv_counts, never on signal. core_num
+      // (args_[5]) is a genuine dynamic argument (RFC #2521 K2): the admitted
+      // block count B is not always known at this compile-time check, so any
+      // S > 0 is accepted here — the runtime entry rejects an insufficient S
+      // against the concrete runtime B.
+      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(), /*required_lanes=*/1,
+                                /*allow_wider_lanes=*/true);
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     }

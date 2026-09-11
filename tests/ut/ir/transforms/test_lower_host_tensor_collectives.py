@@ -1532,6 +1532,62 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
     )
 
 
+def test_host_all_to_all_v_accepts_multicore_request_with_wider_signal():
+    """RFC #2521 K2: core_num > 1 and a signal wider than [NR, 1] both lower
+    cleanly now — the entry-level admission check (CalAllToAllVBlocks + the
+    signal-capacity reject) is this PR's own runtime-side responsibility, not
+    something a compile-time pass can fully verify without a concrete P."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 256], pl.FP32],
+            data: pld.DistributedTensor[[8, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 4], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv, core_num=4)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    _assert_builtin_dispatch(
+        result,
+        "builtin.tensor.all_to_all_v",
+        arg_names=["inp", "data", "signal", "counts", "recv"],
+        arg_directions=[
+            ir.ArgDirection.Input,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.Input,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.Input,
+        ],
+        kwargs={"dtype": pl.FP32},
+        attrs={"dtype": pl.FP32},
+        trailing_scalar_const=4,
+    )
+
+
 def test_host_all_to_all_v_rejects_plain_tensor_input():
     """pld.tensor.all_to_all_v's public deducer accepts a plain Tensor for
     `input` (legitimate on the InCore composite path), but the HOST builtin
