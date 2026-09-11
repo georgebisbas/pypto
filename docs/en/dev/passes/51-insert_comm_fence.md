@@ -89,8 +89,11 @@ A second phase (`OrchPostCollectiveScanner`) scans every orchestration-like body
 Whole-GM at function entry matches the opaque cross-InCore-call rule. It is
 **function-granular** (every entry to a marked consumer gets the prologue) and
 **conservative** on control flow (an `if` that may publish keeps `seen_publish`
-true for code after the `if`). Idempotent: an entry that already starts with
-whole-GM `cacheinvalid` + `fence` is left alone.
+true for code after the `if`). Sequential `for` / `while` bodies that publish
+are re-scanned once with `seen_publish=true` so a loop-carried
+`consume; collective` still marks the consumer; `pl.parallel` skips that rescan
+(no back-edge order). Idempotent: an entry that already starts with whole-GM
+`cacheinvalid` + `fence` is left alone.
 
 A region `system.cacheinvalid(target)` addresses `target`'s **local** base, which
 is correct for a local-window store. The **remote** writes `remote_store` / `put`

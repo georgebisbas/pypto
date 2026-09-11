@@ -421,10 +421,14 @@ FunctionPtr ResolveSingleInCoreDelegate(const ProgramPtr& program, const Functio
 }
 
 void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& program,
-                                       std::unordered_set<std::string>* targets) {
+                                       std::unordered_set<std::string>* targets,
+                                       std::unordered_map<std::string, FunctionPtr>* delegate_cache) {
   auto op = GetCallLikeOp(expr);
   if (!op || op_predicates::IsBuiltinOp(op->name_)) return;
   if (auto callee = program->GetFunction(op->name_)) {
+    // Template collective kernels (often FunctionType::AIV, which is InCore-like)
+    // are opaque publishers, not Phase B consumers — never prologue them.
+    if (callee->HasAttr(kAttrBuiltinTemplateDir)) return;
     if (IsInCoreType(callee->func_type_)) {
       targets->insert(op->name_);
       return;
@@ -432,9 +436,19 @@ void MarkPostCollectiveInCoreConsumers(const ExprPtr& expr, const ProgramPtr& pr
     // One-hop unwrap: Orchestration/Graph wrappers and HOST Opaque orchestrators
     // that only forward to a single InCore consumer (consume_orch → consume_step).
     if (IsPhaseBScanTarget(callee)) {
-      if (auto inner = ResolveSingleInCoreDelegate(program, callee)) {
-        targets->insert(inner->name_);
+      FunctionPtr inner;
+      if (delegate_cache) {
+        auto it = delegate_cache->find(callee->name_);
+        if (it != delegate_cache->end()) {
+          inner = it->second;
+        } else {
+          inner = ResolveSingleInCoreDelegate(program, callee);
+          (*delegate_cache)[callee->name_] = inner;  // may be null — negative cache
+        }
+      } else {
+        inner = ResolveSingleInCoreDelegate(program, callee);
       }
+      if (inner) targets->insert(inner->name_);
     }
   }
 }
@@ -471,10 +485,23 @@ class OrchPostCollectiveScanner {
       return then_flag;
     }
     if (auto for_ = As<ForStmt>(stmt)) {
-      return ScanStmt(for_->body_, seen_publish);
+      // First pass: sequential order inside one iteration.
+      const bool after_first = ScanStmt(for_->body_, seen_publish);
+      // Loop-carried order: a publish in iteration k precedes the consume in
+      // iteration k+1. Re-scan once with seen_publish=true so that consume
+      // before collective in the body still gets marked. Parallel iterations
+      // are concurrent — no back-edge ordering — so skip the rescan there.
+      if (for_->kind_ != ForKind::Parallel && after_first) {
+        (void)ScanStmt(for_->body_, /*seen_publish=*/true);
+      }
+      return after_first;
     }
     if (auto while_ = As<WhileStmt>(stmt)) {
-      return ScanStmt(while_->body_, seen_publish);
+      const bool after_first = ScanStmt(while_->body_, seen_publish);
+      if (after_first) {
+        (void)ScanStmt(while_->body_, /*seen_publish=*/true);
+      }
+      return after_first;
     }
     // pl.manual_scope / pl.at / other scope wrappers: recurse so Submit
     // launches inside the body are still seen (pass-submit-awareness).
@@ -482,17 +509,21 @@ class OrchPostCollectiveScanner {
       return ScanStmt(scope->body_, seen_publish);
     }
     if (auto assign = As<AssignStmt>(stmt)) {
-      if (seen_publish) MarkPostCollectiveInCoreConsumers(assign->value_, program_, &targets_);
+      if (seen_publish) {
+        MarkPostCollectiveInCoreConsumers(assign->value_, program_, &targets_, &delegate_cache_);
+      }
       return seen_publish || IsOpaquePublishingDispatchExpr(assign->value_, program_);
     }
     if (auto eval = As<EvalStmt>(stmt)) {
-      if (seen_publish) MarkPostCollectiveInCoreConsumers(eval->expr_, program_, &targets_);
+      if (seen_publish) {
+        MarkPostCollectiveInCoreConsumers(eval->expr_, program_, &targets_, &delegate_cache_);
+      }
       return seen_publish || IsOpaquePublishingDispatchExpr(eval->expr_, program_);
     }
     if (auto ret = As<ReturnStmt>(stmt)) {
       bool flag = seen_publish;
       for (const auto& value : ret->value_) {
-        if (flag) MarkPostCollectiveInCoreConsumers(value, program_, &targets_);
+        if (flag) MarkPostCollectiveInCoreConsumers(value, program_, &targets_, &delegate_cache_);
         flag = flag || IsOpaquePublishingDispatchExpr(value, program_);
       }
       return flag;
@@ -502,6 +533,9 @@ class OrchPostCollectiveScanner {
 
   ProgramPtr program_;
   std::unordered_set<std::string> targets_;
+  // Cache ResolveSingleInCoreDelegate results per wrapper name (incl. nulls)
+  // so K post-publish calls to the same M-statement wrapper stay O(K+M).
+  std::unordered_map<std::string, FunctionPtr> delegate_cache_;
 };
 
 // Structural traversal: emit `cacheinvalid; fence` after every publishing write

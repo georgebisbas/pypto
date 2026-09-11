@@ -184,6 +184,26 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // launch is require_sync_start) — not implemented, no-op until block_num>1.
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
 
+  // Snapshot peer send_counts[my_rank] now (after start barrier, before any
+  // peer can exit the end barrier and rewrite its counts window for a later
+  // round). Phase 2 uses these clamped values — not a post-completion remote
+  // re-read — so recv_counts always matches the payload transferred this call.
+  int32_t peer_recv_rows[kMaxSupportedRanks];
+  for (int src = 0; src < nranks; ++src) {
+    if (src == my_rank) {
+      peer_recv_rows[src] = 0;
+      continue;
+    }
+    __gm__ int32_t *remote_send_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+    __asm__ __volatile__("");
+    dcci(reinterpret_cast<__gm__ void *>(remote_send_slot), SINGLE_CACHE_LINE);
+    __asm__ __volatile__("");
+    int64_t rows64 = static_cast<int64_t>(*remote_send_slot);
+    if (rows64 > max_recv) rows64 = max_recv;
+    if (rows64 < 0) rows64 = 0;
+    peer_recv_rows[src] = static_cast<int32_t>(rows64);
+  }
+
   // Self-slot clamped count, captured in the dest loop below and written to
   // local recv_counts after the completion barrier (see Phase 2).
   int32_t self_rows = 0;
@@ -302,26 +322,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
   // Authoritative local recv_counts fill (Phase 2). Do NOT rely on the Phase 1
   // remote TNOTIFY(Set) being visible here: that path races under NPU load.
-  // Self: register-captured clamped rows. Peers: pull send_counts[my_rank]
-  // from each peer's counts window (staged before the start barrier, so long
-  // retired by now) and apply the same two-sided clamp. Local stores + local
+  // Self: register-captured clamped rows. Peers: use peer_recv_rows snapshotted
+  // after the start barrier (not a post-completion remote re-read — a fast peer
+  // may already be staging the next round's send_counts). Local stores + local
   // TNOTIFY(Set) + consume-side Phase B invalidate close both self and peer
   // recv_counts=0 flakes without spinning on remote Sets.
   for (int src = 0; src < nranks; ++src) {
-    int32_t rows;
-    if (src == my_rank) {
-      rows = self_rows;
-    } else {
-      __gm__ int32_t *remote_send_slot =
-          CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
-      __asm__ __volatile__("");
-      dcci(reinterpret_cast<__gm__ void *>(remote_send_slot), SINGLE_CACHE_LINE);
-      __asm__ __volatile__("");
-      int64_t rows64 = static_cast<int64_t>(*remote_send_slot);
-      if (rows64 > max_recv) rows64 = max_recv;
-      if (rows64 < 0) rows64 = 0;
-      rows = static_cast<int32_t>(rows64);
-    }
+    int32_t rows = (src == my_rank) ? self_rows : peer_recv_rows[src];
     recv_counts_base[src] = rows;
     pto::comm::Signal count_sig(recv_counts_base + src);
     pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);

@@ -2634,6 +2634,13 @@ def test_cal_all_to_all_v_blocks_rejects_non_positive(p, req_l):
         cal_all_to_all_v_blocks(p, req_l)
 
 
+@pytest.mark.parametrize(("p", "req_l"), [(2.5, 6), (8, 3.0), (True, 8), (8, False)])
+def test_cal_all_to_all_v_blocks_rejects_non_integer(p, req_l):
+    """Admission mapping is an int→int contract; reject bools and floats."""
+    with pytest.raises(TypeError, match="must be int"):
+        cal_all_to_all_v_blocks(p, req_l)
+
+
 def test_all_to_all_v_rejects_input_target_alias():
     """input is read while target receives incoming pushes — they must differ.
 

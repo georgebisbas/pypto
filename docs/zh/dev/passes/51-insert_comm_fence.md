@@ -70,7 +70,7 @@ pass 在 InCore 内 `pld.system.wait` 或不透明 InCore 调用之后插入的�
 | 后续 InCore dispatch | `seen_publish` 为真时记录 InCore 被调函数（普通 `Call` **或** `Submit`/`pl.submit`/`pl.manual_scope` 均可；扫描会递归进入 `ScopeStmt` body；可 unwrap 一层编排包装，如 `consume_orch → consume_step`，并剥掉 `MaterializeRuntimeScopes` 插入的 `RuntimeScopeStmt`）。 |
 | 应用 | 在记录的 InCore 函数入口 prepend `system.cacheinvalid(); system.fence()`。编排 IR 不变。 |
 
-函数入口处的整 GM 失效与不透明跨 InCore 调用规则一致。标记是**函数粒度**的（被标记消费者的每次入口都会执行序言），控制流上**保守**（`if` 任一分支可能发布则 `if` 之后的代码仍视为已发布）。幂等：入口已以整 GM `cacheinvalid` + `fence` 开头则跳过。
+函数入口处的整 GM 失效与不透明跨 InCore 调用规则一致。标记是**函数粒度**的（被标记消费者的每次入口都会执行序言），控制流上**保守**（`if` 任一分支可能发布则 `if` 之后的代码仍视为已发布）。顺序 `for` / `while` 若在体内发布，会再以 `seen_publish=true` 扫描一次，使循环回边带来的 `consume; collective` 仍能标记消费者；`pl.parallel` 不做该重扫（无回边次序）。幂等：入口已以整 GM `cacheinvalid` + `fence` 开头则跳过。
 
 区域 `system.cacheinvalid(target)` 寻址的是 `target` 的**本地** base，这对本地窗口写是对的。
 但**远端写** `remote_store` / `put` 写到的是 **peer 偏移** GM 地址（`local_ptr +
