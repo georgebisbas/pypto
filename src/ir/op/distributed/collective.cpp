@@ -684,9 +684,14 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
         << (*target_type->window_buffer_)->name_hint_ << "'";
   }
 
-  // signal: DistributedTensor INT32 [NR, 1].  Restricted to the 2-D form because
+  // signal: DistributedTensor INT32 [NR, S].  Restricted to the 2-D form because
   // the composite lowering always emits MakeSignalOffsets(rank) → [rank, 0];
-  // pld.system.notify/wait reject a rank mismatch against a 1-D signal.
+  // pld.system.notify/wait reject a rank mismatch against a 1-D signal. S (the
+  // per-rank signal stride) is the block-aware barrier's per-block lane count
+  // (RFC #2521 K2) — any positive compile-time constant is accepted here, same
+  // as builtin.tensor.allreduce's already-general check; the runtime entry
+  // (K2 PR 4) is responsible for rejecting S < B for a given admitted block
+  // count B.
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << "pld.tensor.all_to_all_v signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();
@@ -694,11 +699,12 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all_v signal must have INT32 element type, got dtype "
       << signal_type->dtype_.ToString();
   CHECK(signal_type->shape_.size() == 2)
-      << "pld.tensor.all_to_all_v signal must be 2D [NR, 1], got " << signal_type->shape_.size() << " dims";
+      << "pld.tensor.all_to_all_v signal must be 2D [NR, S], got " << signal_type->shape_.size() << " dims";
   {
     auto signal_dim1 = As<ConstInt>(signal_type->shape_[1]);
-    CHECK(signal_dim1 && signal_dim1->value_ == 1)
-        << "pld.tensor.all_to_all_v signal second dimension must be 1, got "
+    CHECK(signal_dim1 && signal_dim1->value_ > 0)
+        << "pld.tensor.all_to_all_v signal second dimension (S, signal stride) must be a positive "
+           "compile-time constant, got "
         << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
   }
 
@@ -1243,22 +1249,25 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << kOpName << " target dtype " << target_type->dtype_.ToString() << " must match input dtype "
       << input_type->dtype_.ToString();
 
-  // signal: 2D [NR, 1] only — the composite's own deducer already enforces
+  // signal: 2D [NR, S] only — the composite's own deducer already enforces
   // this exact shape on the pld.tensor.all_to_all_v call this builtin is
   // constructed from, so there is no 1D case to additionally support here,
-  // unlike builtin.tensor.all_to_all which pre-dates that constraint.
+  // unlike builtin.tensor.all_to_all which pre-dates that constraint. S (the
+  // per-rank signal stride) is the block-aware barrier's per-block lane count
+  // (RFC #2521 K2) — any positive compile-time constant is accepted, mirroring
+  // the composite deducer's own relaxation above.
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << kOpName << " signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();
   CHECK(signal_type->dtype_ == DataType::INT32)
       << kOpName << " signal must have INT32 element type, got dtype " << signal_type->dtype_.ToString();
   CHECK(signal_type->shape_.size() == 2)
-      << kOpName << " signal must be 2D [NR, 1], got " << signal_type->shape_.size() << " dims";
+      << kOpName << " signal must be 2D [NR, S], got " << signal_type->shape_.size() << " dims";
   {
     auto signal_dim1 = As<ConstInt>(signal_type->shape_[1]);
-    CHECK(signal_dim1 && signal_dim1->value_ == 1)
-        << kOpName << " signal second dimension must be 1, got "
-        << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
+    CHECK(signal_dim1 && signal_dim1->value_ > 0)
+        << kOpName << " signal second dimension (S, signal stride) must be a positive compile-time constant, "
+        << "got " << (signal_dim1 ? std::to_string(signal_dim1->value_) : "<dynamic>");
   }
 
   auto target_dim0 = As<ConstInt>(target_type->shape_[0]);

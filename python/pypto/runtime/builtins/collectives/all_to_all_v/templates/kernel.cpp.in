@@ -27,6 +27,10 @@
 #define __aicore__ [aicore]
 #endif
 
+// Keep this after the qualifier fallbacks so hardware builds retain the
+// [aicore] entry annotation while using simpler's logical SPMD context.
+#include "intrinsic.h"
+
 namespace {
 
 static constexpr int64_t kTileCount = 256;
@@ -66,22 +70,29 @@ AICORE inline void PublishFence() {
 // synchronizes ring-adjacent neighbours per step, so non-adjacent ranks are
 // not bounded to one round apart the way a full N-way rendezvous bounds
 // every pair here — column separation is required there, not here.
+//
+// Block-aware (RFC #2521 K2): each participating block gets its own private
+// signal lane at `peer * signal_stride + block_idx`, mirroring
+// `builtin.tensor.allreduce`'s own per-block-lane clamp. A block whose
+// `block_idx` is not < `active_blocks` never calls this — see kernel_entry's
+// early return — so `block_idx` here is always in range.
 AICORE inline void ExchangeBarrier(__gm__ CommContext *comm_ctx, __gm__ int32_t *signal_base, int my_rank,
-                                    int nranks) {
+                                    int nranks, int64_t signal_stride, int32_t block_idx) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    __gm__ int32_t *remote_signal = CommRemotePtr(comm_ctx, signal_base + my_rank, peer);
+    __gm__ int32_t *remote_signal =
+        CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
     pto::comm::Signal sig(remote_signal);
     pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal sig(signal_base + peer);
+    pto::comm::Signal sig(signal_base + peer * signal_stride + block_idx);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal self_sig(signal_base + peer);
+    pto::comm::Signal self_sig(signal_base + peer * signal_stride + block_idx);
     pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
   }
 }
@@ -110,6 +121,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // that is identical on both rails.
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
   int nranks = static_cast<int>(comm_ctx->rankNum);
+  int32_t block_idx = get_block_idx(args);
+  int32_t block_num = get_block_num(args);
 
   // This guard, and the two below it (max_recv, row_numel), must evaluate
   // identically on every participating rank for the same call: each derives
@@ -117,12 +130,27 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // the domain, but if that symmetry were ever broken, one rank taking the
   // early return while its peers reach ExchangeBarrier() below would leave
   // those peers' TWAIT blocked forever (a hang, not data corruption).
-  if (nranks <= 0 || nranks > kMaxSupportedRanks) {
+  if (nranks <= 0 || nranks > kMaxSupportedRanks || block_num <= 0 || block_idx < 0 || block_idx >= block_num) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
+
+  // Block-aware barrier (RFC #2521 K2): each block gets a private per-block
+  // signal lane, same no-op-clamp pattern as builtin.tensor.allreduce's own
+  // kernel. `signal_stride` (S) is the signal tensor's second dimension — the
+  // deducer in collective.cpp accepts any positive compile-time constant here
+  // now, no longer hard-coded to 1. A block whose `block_idx` is not covered
+  // by `signal_stride` returns immediately rather than racing into a signal
+  // lane it does not own.
+  int64_t signal_stride = signal_tensor->ndims == 1 ? 1 : static_cast<int64_t>(signal_tensor->shapes[1]);
+  int32_t active_blocks =
+      block_num < static_cast<int32_t>(signal_stride) ? block_num : static_cast<int32_t>(signal_stride);
+  if (block_idx >= active_blocks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
 
   // MAX_RECV = target.shape[0] / nranks. target is 2D [NR*MAX_RECV, SIZE] and
   // nranks is the comm-domain size (dispatch scalar 0), so the block geometry
@@ -176,13 +204,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // Start-of-call global sync: under persistent execution with
   // reset_persistent_windows=False, this call's TPUTs below must not begin
   // until every rank has actually reached this call — otherwise this rank's
-  // round-N+1 write can race a peer still finishing round N. This kernel has
-  // no block_idx today (single AIV block only), so the cross-rank exchange
-  // below is the whole story; a multi-block launch would additionally need
-  // every block_idx != 0 to wait on block 0 via a soft sync_call before
-  // pushing (block 0's start point stands for the whole launch cohort, since
-  // launch is require_sync_start) — not implemented, no-op until block_num>1.
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
+  // round-N+1 write can race a peer still finishing round N. Each active
+  // block rendezvous-blocks independently on its own signal lane
+  // (signal_base + peer*signal_stride + block_idx), so this remains correct
+  // whether block_num is 1 or many — no per-block ordering (e.g. block 0
+  // leading the rest) is required for this barrier's own correctness.
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx);
 
   // Snapshot peer send_counts[my_rank] now (after start barrier, before any
   // peer can exit the end barrier and rewrite its counts window for a later
@@ -319,7 +346,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // its peers, rather than gating this call's start.
   // ==================================================================
   PublishFence();
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks);
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx);
   // Authoritative local recv_counts fill (Phase 2). Do NOT rely on the Phase 1
   // remote TNOTIFY(Set) being visible here: that path races under NPU load.
   // Self: register-captured clamped rows. Peers: use peer_recv_rows snapshotted

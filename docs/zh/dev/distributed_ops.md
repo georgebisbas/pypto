@@ -351,7 +351,7 @@ full-slice `get` 要求 `dst` / `src` 形状一致；subregion `get` 允许完�
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts, *, core_num: int = 1
+    input, target, signal, send_counts, recv_counts, core_num: int | Scalar[INDEX] = 1
 ) -> DistributedTensorType(target)
 ```
 
@@ -359,7 +359,11 @@ pld.tensor.all_to_all_v(
 
 - `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
-- `signal` — DistributedTensor INT32 `[NR, 1]`（自清理信用屏障；可在多次调用间复用）
+- `signal` — DistributedTensor INT32 `[NR, S]`（自清理信用屏障；可在多次调用间复用）。
+  `S`（signal stride）可以是任意正的编译期常量——即块感知屏障中每个 block 私有
+  信号槽位的数量（RFC #2521 K2）；一个 block 在 `peer * S + block_idx` 处寻址
+  自己的槽位，因此 `S` 必须不小于某个 `core_num` 实际产生的已准入 block 数 `B`
+  （在 HOST 入口处检查，见下文）
 - `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 
@@ -404,9 +408,15 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 **InCore composite**（`LowerCompositeOps`）：上述原语在芯片内核中被分解为
 `pld.tile.put` + `pld.system.notify`/`wait`。
 
-`core_num` 是请求的 AIV block 上限。目前所有路径都是单 block，因此只接受
-`core_num=1`；该参数存在是因为多 AIV 启动将落在托管 CHIP 路径上。InCore 路径会
-直接拒绝其他取值，并在诊断信息中指明 CHIP 路径。
+`core_num` 是请求的 AIV block 上限 `L`——它是一个上限，而非承诺：已准入的 block
+数 `B` 在 HOST 入口处根据 `L` 和 rank 数计算得出（`B = L < NR ? L : (L // NR) * NR`）。
+在 HOST 路径上，它是一个真正的动态参数（`int | Scalar[INDEX]`，与
+`pld.tensor.remote_store` 的 `peer` 参数模式一致）。目前所有路径仍是单 block，因此
+InCore、HOST、CHIP 三处的门控都只接受 `core_num=1`；放开 HOST 门控以准入
+`core_num>1` 正是 RFC #2521 工作项 K2 在同一系列 PR 中的后续 PR。InCore 路径会
+直接拒绝其他取值，并在诊断信息中指明 CHIP 路径。即便 HOST 门控放开之后，下文的
+CHIP/L2 路径仍会刻意保持在 `core_num=1`——把真正的多 block 启动接入 L2 托管路径
+是一个独立的、尚未启动的路线图项（O2），不属于 K2 范围。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
 `Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的

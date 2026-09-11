@@ -2472,15 +2472,16 @@ def _make_all_to_all_v_args(
     counts_shape: list[int] | None = None,
     counts_dtype: DataType = DataType.INT32,
     recv_shape: list[int] | None = None,
+    signal_shape: list[int] | None = None,
     core_num: int = 1,
 ) -> list[ir.Expr]:
-    """Build a valid 6-arg operand list, with the counts operands and core_num overridable."""
+    """Build a valid 6-arg operand list, with the counts/signal operands and core_num overridable."""
     shape = counts_shape or [_AAV_NR, 1]
     # recv_counts is always [NR, 1] (same layout as the barrier signal).
     return [
         _make_tensor_var("inp", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
         _make_distributed_tensor_var("target", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
-        _make_distributed_tensor_var("signal", [_AAV_NR, 1], DataType.INT32, span),
+        _make_distributed_tensor_var("signal", signal_shape or [_AAV_NR, 1], DataType.INT32, span),
         _make_tensor_var("counts", shape, counts_dtype, span),
         _make_distributed_tensor_var("recv_counts", recv_shape or [_AAV_NR, 1], DataType.INT32, span),
         ir.ConstInt(core_num, DataType.INDEX, span),
@@ -2526,11 +2527,33 @@ def test_all_to_all_v_accepts_window_bound_input():
 
 
 def test_all_to_all_v_rejects_1d_signal():
-    """Signal must be 2D [NR, 1] — lowering emits 2-D MakeSignalOffsets."""
+    """Signal must be 2D [NR, S] — lowering emits 2-D MakeSignalOffsets."""
     span = ir.Span.unknown()
     args = _make_all_to_all_v_args(span)
     args[2] = _make_distributed_tensor_var("signal_1d", [_AAV_NR], DataType.INT32, span)
     with pytest.raises(ValueError, match="signal must be 2D"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
+@pytest.mark.parametrize("signal_stride", [1, 2, 4])
+def test_all_to_all_v_accepts_wider_signal_stride(signal_stride):
+    """A [NR, S] signal for any positive compile-time S is accepted (RFC #2521 K2's
+    block-aware barrier addresses a private per-block lane at signal_stride S;
+    core_num is still gated at 1 elsewhere, so this only proves the shape check
+    itself was relaxed, not that S>1 is reachable end-to-end yet)."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, signal_shape=[_AAV_NR, signal_stride])
+    call = ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+    assert isinstance(call.type, ir.DistributedTensorType)
+
+
+def test_all_to_all_v_rejects_zero_width_signal():
+    """Signal second dimension (S) must be a positive compile-time constant."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span, signal_shape=[_AAV_NR, 0])
+    with pytest.raises(
+        ValueError, match="signal second dimension .* must be a positive compile-time constant"
+    ):
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
