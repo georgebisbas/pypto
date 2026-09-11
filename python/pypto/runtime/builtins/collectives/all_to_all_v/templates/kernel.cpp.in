@@ -32,6 +32,10 @@
 #include "pto/comm/pto_comm_inst.hpp"
 #include "tensor.h"
 
+// Keep this after the qualifier fallbacks so hardware builds retain the
+// [aicore] entry annotation while using simpler's logical SPMD context.
+#include "intrinsic.h"
+
 namespace {
 
 static constexpr int64_t kTileCount = 256;
@@ -50,30 +54,37 @@ AICORE inline void PublishFence() {
   dsb(DSB_DDR);
 }
 
-// N-way barrier on one signal column (row stride `signal_stride`):
-// AtomicAdd(+1) to each peer's cell → Wait(GE 1) on each peer's cell →
-// AtomicAdd(-1) to clear. Used twice per call on column 0 (entry + exit).
-// Reusing the same column is safe: a rank cannot start occurrence K+1 until
-// its own K has wait+cleared, and cannot finish K until peers have entered K,
-// so notifies cannot cross occurrences. (Ring allreduce needs a distinct
-// column per round because it only syncs adjacent ranks.)
+// N-way barrier on a private per-block signal lane at
+// `peer * signal_stride + block_idx` (row stride `signal_stride`; RFC #2521
+// K2 block-aware addressing, mirroring `builtin.tensor.allreduce`'s own
+// per-block-lane clamp): AtomicAdd(+1) to each peer's cell → Wait(GE 1) on
+// each peer's cell → AtomicAdd(-1) to clear. Used twice per call on the same
+// lane (entry + exit). Reusing the same lane is safe: a rank cannot start
+// occurrence K+1 until its own K has wait+cleared, and cannot finish K until
+// peers have entered K, so notifies cannot cross occurrences. (Ring allreduce
+// needs a distinct column per round because it only syncs adjacent ranks.) A
+// block whose `block_idx` is not < `active_blocks` never calls this — see
+// kernel_entry's early return — so `block_idx` here is always in range.
+// Counts do not ride this signal at all (see Phase 2 below) — signal is
+// barrier-only, so the full `signal_stride` is available for block lanes,
+// no column is reserved.
 AICORE inline void ExchangeBarrier(__gm__ CommContext *comm_ctx, __gm__ int32_t *signal_base, int my_rank,
-                                    int nranks, int64_t signal_stride) {
+                                    int nranks, int64_t signal_stride, int32_t block_idx) {
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
     __gm__ int32_t *remote_signal =
-        CommRemotePtr(comm_ctx, signal_base + static_cast<int64_t>(my_rank) * signal_stride, peer);
+        CommRemotePtr(comm_ctx, signal_base + my_rank * signal_stride + block_idx, peer);
     pto::comm::Signal sig(remote_signal);
     pto::comm::TNOTIFY(sig, static_cast<int32_t>(1), pto::comm::NotifyOp::AtomicAdd);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal sig(signal_base + static_cast<int64_t>(peer) * signal_stride);
+    pto::comm::Signal sig(signal_base + peer * signal_stride + block_idx);
     pto::comm::TWAIT(sig, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
   }
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
-    pto::comm::Signal self_sig(signal_base + static_cast<int64_t>(peer) * signal_stride);
+    pto::comm::Signal self_sig(signal_base + peer * signal_stride + block_idx);
     pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
   }
 }
@@ -91,15 +102,35 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // no separate rank-count scalar — keeps one kernel source for both rails.
   __gm__ CommContext *comm_ctx = reinterpret_cast<__gm__ CommContext *>(args[5]);
   int nranks = static_cast<int>(comm_ctx->rankNum);
+  int32_t block_idx = get_block_idx(args);
+  int32_t block_num = get_block_num(args);
 
   // Early returns below must agree on every rank: asymmetric return leaves peers
   // blocked in ExchangeBarrier (hang, not corruption).
-  if (nranks <= 0 || nranks > kMaxSupportedRanks) {
+  if (nranks <= 0 || nranks > kMaxSupportedRanks || block_num <= 0 || block_idx < 0 || block_idx >= block_num) {
     pipe_barrier(PIPE_ALL);
     return;
   }
 
   int my_rank = static_cast<int>(comm_ctx->rankId);
+
+  // Block-aware barrier (RFC #2521 K2): signal is [NR, S] with any S >= 1,
+  // barrier-only — counts publish on recv_counts (Phase 2 below), never on
+  // signal, so the full stride is available for per-block lanes, no column
+  // is reserved. `active_blocks` caps at signal_stride so a block never
+  // races into a lane it does not own; a block whose `block_idx` is not
+  // covered returns immediately rather than calling ExchangeBarrier.
+  int64_t signal_stride = signal_tensor->ndims == 1 ? 1 : static_cast<int64_t>(signal_tensor->shapes[1]);
+  if (signal_stride < 1) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
+  int32_t active_blocks =
+      block_num < static_cast<int32_t>(signal_stride) ? block_num : static_cast<int32_t>(signal_stride);
+  if (block_idx >= active_blocks) {
+    pipe_barrier(PIPE_ALL);
+    return;
+  }
 
   // target is [NR * MAX_RECV, SIZE]; derive MAX_RECV from runtime nranks so an
   // over-provisioned signal cannot silently change the per-dest block size.
@@ -130,16 +161,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *recv_counts_base =
       reinterpret_cast<__gm__ int32_t *>(recv_counts_tensor->buffer.addr) + recv_counts_tensor->start_offset;
 
-  // Signal [NR, 1] (or rank-1 [NR]): barrier only. Counts publish on recv_counts.
-  int64_t signal_cols = 1;
-  if (signal_tensor->ndims >= 2) {
-    signal_cols = static_cast<int64_t>(signal_tensor->shapes[1]);
-  }
-  if (signal_cols < 1) {
-    pipe_barrier(PIPE_ALL);
-    return;
-  }
-
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
@@ -150,9 +171,15 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   TileData send_tile(1, kTileCount);
   TASSIGN(send_tile, 0x0);
 
-  // Entry sync: with reset_persistent_windows=False, round N+1 must not push while a
-  // peer is still in round N. Single-block only; multi-block soft-sync is not here.
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
+  // Start-of-call global sync: under persistent execution with
+  // reset_persistent_windows=False, this call's TPUTs below must not begin
+  // until every rank has actually reached this call — otherwise this rank's
+  // round-N+1 write can race a peer still finishing round N. Each active
+  // block rendezvous-blocks independently on its own signal lane
+  // (signal_base + peer*signal_stride + block_idx), so this remains correct
+  // whether block_num is 1 or many — no per-block ordering (e.g. block 0
+  // leading the rest) is required for this barrier's own correctness.
+  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx);
 
   int32_t self_rows = 0;
 
@@ -194,51 +221,67 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
   }
 
-  // Phase 2: authoritative recv_counts publish on the recv_counts window (not signal).
-  // Never CommRemotePtr(send_counts). Ready-only Wake + GM load of a prior Set still
-  // saw 0 on P=4 (Wait ≠ visibility of a different address). Carry count on the same
-  // AtomicAdd/TWAIT cell: Set(0) clears the previous call's rows, AtomicAdd(rows+1)
-  // wakes Wait(GE 1) even when rows==0. NotifyOp::Set(rows+1) alone timed out on a2a3.
+  // ==================================================================
+  // Phase 2: authoritative recv_counts publish on the recv_counts window
+  // (never signal — signal is barrier-only, see above). block_idx==0's job
+  // only: recv_counts is a single (not per-block) output, every block
+  // computes the identical `rows` per dest (Phase 1's dest loop reads only
+  // send_counts_base, independent of block_idx), so one designated block
+  // filling it exactly once avoids multiple blocks' AtomicAdd(rows+1) piling
+  // onto the same cell (which would corrupt the encoded value, not just
+  // duplicate work). Blocks != 0 have nothing left to synchronize here: their
+  // own start-of-call ExchangeBarrier (own lane) and Phase 1 TPUTs are
+  // already locally fenced; the orchestrator task-join gates any consumer on
+  // ALL blocks completing, not on anything this kernel signals itself.
+  //
+  // Never CommRemotePtr(send_counts). Ready-only Wake + GM load of a prior Set
+  // still saw 0 on P=4 (Wait ≠ visibility of a different address). Carry
+  // count on the same AtomicAdd/TWAIT cell: Set(0) clears the previous call's
+  // rows, AtomicAdd(rows+1) wakes Wait(GE 1) even when rows==0. NotifyOp::Set
+  // (rows+1) alone timed out on a2a3.
+  // ==================================================================
   PublishFence();
-  for (int dest = 0; dest < nranks; ++dest) {
-    if (dest == my_rank) continue;
-    int32_t raw_count = send_counts_base[dest];
-    int64_t rows64 = static_cast<int64_t>(raw_count);
-    if (rows64 > max_recv) rows64 = max_recv;
-    if (rows64 < 0) rows64 = 0;
-    int32_t encoded = static_cast<int32_t>(rows64) + 1;
-    __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
-    pto::comm::Signal count_sig(remote_slot);
-    pto::comm::TNOTIFY(count_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
-    pto::comm::TNOTIFY(count_sig, encoded, pto::comm::NotifyOp::AtomicAdd);
-  }
-  PublishFence();
-  ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
-  // Local fill: self from self_rows; peers Wait/load then AtomicAdd(-1) leaving rows.
-  for (int src = 0; src < nranks; ++src) {
-    int32_t rows;
-    if (src == my_rank) {
-      rows = self_rows;
-      recv_counts_base[src] = rows;
-      pto::comm::Signal count_sig(recv_counts_base + src);
-      pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
-    } else {
-      __gm__ int32_t *count_slot = recv_counts_base + src;
-      pto::comm::Signal count_lane(count_slot);
-      pto::comm::TWAIT(count_lane, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-      dcci((__gm__ void *)count_slot, cache_line_t::SINGLE_CACHE_LINE);
-      // Keep the load after dcci.
-      asm volatile("" ::: "memory");
-      int32_t encoded = *count_slot;
-      // Leave `rows` (= encoded - 1) in the cell for post-collective consumers.
-      pto::comm::TNOTIFY(count_lane, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
-      int64_t rows64 = static_cast<int64_t>(encoded) - 1;
+  if (block_idx == 0) {
+    for (int dest = 0; dest < nranks; ++dest) {
+      if (dest == my_rank) continue;
+      int32_t raw_count = send_counts_base[dest];
+      int64_t rows64 = static_cast<int64_t>(raw_count);
       if (rows64 > max_recv) rows64 = max_recv;
       if (rows64 < 0) rows64 = 0;
-      rows = static_cast<int32_t>(rows64);
-      // Store matches the post-AtomicAdd cell; Set reinforces notify visibility.
-      recv_counts_base[src] = rows;
-      pto::comm::TNOTIFY(count_lane, rows, pto::comm::NotifyOp::Set);
+      int32_t encoded = static_cast<int32_t>(rows64) + 1;
+      __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
+      pto::comm::Signal count_sig(remote_slot);
+      pto::comm::TNOTIFY(count_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
+      pto::comm::TNOTIFY(count_sig, encoded, pto::comm::NotifyOp::AtomicAdd);
+    }
+    PublishFence();
+    ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx);
+    // Local fill: self from self_rows; peers Wait/load then AtomicAdd(-1) leaving rows.
+    for (int src = 0; src < nranks; ++src) {
+      int32_t rows;
+      if (src == my_rank) {
+        rows = self_rows;
+        recv_counts_base[src] = rows;
+        pto::comm::Signal count_sig(recv_counts_base + src);
+        pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
+      } else {
+        __gm__ int32_t *count_slot = recv_counts_base + src;
+        pto::comm::Signal count_lane(count_slot);
+        pto::comm::TWAIT(count_lane, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
+        dcci((__gm__ void *)count_slot, cache_line_t::SINGLE_CACHE_LINE);
+        // Keep the load after dcci.
+        asm volatile("" ::: "memory");
+        int32_t encoded = *count_slot;
+        // Leave `rows` (= encoded - 1) in the cell for post-collective consumers.
+        pto::comm::TNOTIFY(count_lane, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+        int64_t rows64 = static_cast<int64_t>(encoded) - 1;
+        if (rows64 > max_recv) rows64 = max_recv;
+        if (rows64 < 0) rows64 = 0;
+        rows = static_cast<int32_t>(rows64);
+        // Store matches the post-AtomicAdd cell; Set reinforces notify visibility.
+        recv_counts_base[src] = rows;
+        pto::comm::TNOTIFY(count_lane, rows, pto::comm::NotifyOp::Set);
+      }
     }
   }
   PublishFence();
