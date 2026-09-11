@@ -37,8 +37,16 @@ def cal_all_to_all_v_blocks(p: int, l: int) -> int:  # noqa: E741 - RFC's own sy
         exceeding ``L``.
 
     Raises:
+        TypeError: If ``p`` or ``l`` is not a non-boolean ``int`` (``bool`` and
+            floats are rejected so the annotated ``int`` return contract holds).
         ValueError: If ``p`` or ``l`` is not positive.
     """
+    if type(p) is not int:
+        raise TypeError(f"cal_all_to_all_v_blocks: P (rank count) must be int, got {type(p).__name__}")
+    if type(l) is not int:
+        raise TypeError(
+            f"cal_all_to_all_v_blocks: L (requested core_num) must be int, got {type(l).__name__}"
+        )
     if p <= 0:
         raise ValueError(f"cal_all_to_all_v_blocks: P (rank count) must be positive, got {p}")
     if l <= 0:
