@@ -38,6 +38,32 @@ There are **fifteen ops** and **four ABI enums**:
 The seven side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
 
+## Delivery patterns
+
+A collective reaches the device through one of three delivery patterns, in
+increasing order of how much of the schedule the compiler owns:
+
+1. **Hand-rolled InCore** — a kernel composes `pld.system.notify` /
+   `pld.system.wait` / `pld.tile.remote_load` / `pld.tile.put` / local tile ops
+   directly, for a bespoke schedule the composite layer doesn't (yet) express.
+2. **Composite intrinsic** — a single `pld.tensor.*` call (`allreduce`,
+   `allgather`, `reduce_scatter`, `broadcast`, `barrier`, `all_to_all`,
+   `all_to_all_v`) that `LowerCompositeOps` decomposes into the primitive
+   notify/wait/put/get sequence. This is the recommended pattern for new
+   InCore collectives — see [Op reference](#op-reference) below for the
+   per-op phase breakdown.
+3. **HOST-level builtin** — the same `pld.tensor.*` surface, called from a
+   `host_orch` function, lowers through `LowerHostTensorCollectives` to an
+   internal builtin chip dispatch. Use this when the collective spans
+   cross-chip orchestration scheduling rather than a single InCore recipe.
+
+Tracking issue: [#1189](https://github.com/hw-native-sys/pypto/issues/1189)
+("Add orchestration-level collective communication operators").
+
+`pl.new_group(ranks)` (subgroup semantics — a comm domain restricted to a rank
+subset) is not yet implemented; every collective above runs against the full
+window scope a `pld.alloc_window_buffer` call establishes.
+
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
 
 The namespace encodes the IR level the op lives at, not an arbitrary grouping:

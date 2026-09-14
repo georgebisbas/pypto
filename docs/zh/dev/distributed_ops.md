@@ -36,6 +36,28 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 [`UnknownType`](ir/02-types.md)：它们因跨 rank 副作用而存在，而非为消费者读取的
 SSA 值而存在。
 
+## 交付形态
+
+一个集合通信以三种交付形态之一到达设备，按编译器接管调度的程度递增排列：
+
+1. **手写 InCore** —— kernel 直接组合 `pld.system.notify` / `pld.system.wait` /
+   `pld.tile.remote_load` / `pld.tile.put` / 本地 tile 算子，用于 composite 层
+   尚未（或不会）表达的定制调度。
+2. **Composite intrinsic** —— 单个 `pld.tensor.*` 调用（`allreduce`、
+   `allgather`、`reduce_scatter`、`broadcast`、`barrier`、`all_to_all`、
+   `all_to_all_v`），由 `LowerCompositeOps` 分解为 notify/wait/put/get 原语序列。
+   这是新增 InCore 集合通信的推荐写法 —— 各算子的分阶段拆解见下文
+   [算子参考](#算子参考)。
+3. **HOST 级 builtin** —— 同样的 `pld.tensor.*` 表面，从 `host_orch` 函数中
+   调用时，会经由 `LowerHostTensorCollectives` 下降为内部 builtin 芯片派发。
+   当该集合通信跨越芯片间编排调度、而非单一 InCore 写法时使用此形态。
+
+跟踪 issue：[#1189](https://github.com/hw-native-sys/pypto/issues/1189)
+（"Add orchestration-level collective communication operators"）。
+
+`pl.new_group(ranks)`（子组语义——把 comm domain 限制到 rank 子集）尚未实现；
+上述每个集合通信都运行在 `pld.alloc_window_buffer` 建立的完整窗口范围内。
+
 ## 命名空间：为何区分 `tile.*` / `tensor.*` / `system.*`
 
 命名空间编码的是算子所在的 IR 层级，而非随意分组：
