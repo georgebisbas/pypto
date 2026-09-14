@@ -2011,12 +2011,18 @@ def test_wait_async_event_rejects_mismatched_session():
     )
 
     wrong_sess = ir.Var("wrong_sess", ir.AsyncSessionType.get(), kernel.span)
+    _WAIT_ASYNC_EVENT = frozenset(
+        {
+            ir.get_op("pld.tile.wait_async_event").name,
+            ir.get_op("pld.system.wait_async_event").name,
+        }
+    )
 
     class _SwapWaitSession(ir.IRMutator):
         def visit_call(self, op: ir.Call) -> ir.Expr:
             expr = super().visit_call(op)
             call = expr if isinstance(expr, ir.Call) else op
-            if call.op.name not in ("pld.tile.wait_async_event", "pld.system.wait_async_event"):
+            if call.op.name not in _WAIT_ASYNC_EVENT:
                 return expr
             args = list(call.args)
             args[1] = wrong_sess

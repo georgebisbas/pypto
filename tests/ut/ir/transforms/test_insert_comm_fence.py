@@ -236,7 +236,7 @@ def test_async_put_inside_bare_if_gets_no_issue_marker():
         ):
             sess = pld.system.async_session()
             if cond:
-                evt = pld.tensor.put_async(win, peer, src, sess)
+                pld.tensor.put_async(win, peer, src, sess)
 
     ir.assert_structural_equal(_apply(Before), Before)
 
