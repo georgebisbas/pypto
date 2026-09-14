@@ -19,20 +19,22 @@ of these same primitives — the `pld.tensor.*` collectives (`allreduce`,
    │  window base: 0x1000  │  window base: 0x5000  │  window base: 0x9000  │
    └───────────────────────┴───────────────────────┴───────────────────────┘
        ▲ every rank's own base can differ. Each rank also keeps a lookup
-         table, windowsIn[peer], mapping every peer's rank index to that
-         peer's base — so rank 1 reaches rank 0's data as
-         windowsIn[0] + offset, not a shared absolute pointer. "Symmetric"
-         means every window has the same size and layout (offset X is the
-         same slice on every rank), never that ranks share one address.
+         table, windowsIn[peer], holding the local address through which
+         this rank reaches that peer's window — so rank 1 reaches rank 0's
+         data as windowsIn[0] + offset, not a shared absolute pointer.
+         "Symmetric" means every window has the same size and layout
+         (offset X is the same slice on every rank), never that ranks
+         share one address.
 ```
 
 Every rank's window has the same layout — that is the substance of
 "symmetric" — but each rank's own base address can differ. Every rank keeps
-a lookup table (`CommContext.windowsIn[peer]`) of every peer's base, so
-`remote_load`/`remote_store`/`put`/`get` compute `windowsIn[peer] + offset`
-locally rather than asking the peer for its address. Signals (`notify`/
-`wait`) are the separate mechanism that tells a rank *when* that data is
-ready to read — the layout alone doesn't guarantee that.
+a lookup table (`CommContext.windowsIn[peer]`) holding the local address
+that maps each peer's window, so `remote_load`/`remote_store`/`put`/`get`
+compute `windowsIn[peer] + offset` locally rather than asking the peer for
+its address. Signals (`notify`/`wait`) are the separate mechanism that tells
+a rank *when* that data is ready to read — the layout alone doesn't
+guarantee that.
 
 ## L2 vs L3
 
@@ -61,7 +63,7 @@ The distributed chapter covers L3. L2 is covered in the
 | **Device** | One Ascend NPU chip (or die), identified by a `device_id`. One rank maps to one device. |
 | **Node** | A physical machine hosting one or more devices. |
 | **Symmetric memory** | The property that, within a communication domain, every rank's window buffer has the same size and layout — each rank reaches a peer's data via its own `windowsIn[peer]` lookup plus a local offset, not a shared absolute address. See [Symmetric Memory at a Glance](#symmetric-memory-at-a-glance) above. |
-| **Window buffer** | A symmetric per-rank HCCL buffer. Ranks see peers through `CommContext.windowsIn[peer]`/`windowsOut[peer]`. |
+| **Window buffer** | A symmetric per-rank HCCL buffer. A rank reaches a peer's window through its own `CommContext.windowsIn[peer]` entry — the local address that maps that peer's window, not the peer's own base. |
 | **Window buffer address space** | The address range a window buffer occupies within one rank. Every rank's window has the same size and layout within a comm domain — not the same absolute address — which is what makes the buffer "symmetric." |
 | **Comm domain** | A subset of ranks sharing a symmetric window pool. Default: the full world. |
 | **Signal** | A cross-rank synchronisation primitive. Notify/wait counters coordinate access to window buffers. |

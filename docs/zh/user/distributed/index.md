@@ -18,7 +18,7 @@ PyPTO 的分布式模型建立在**对称内存与信号**之上——完整说�
    │  window base: 0x1000  │  window base: 0x5000  │  window base: 0x9000  │
    └───────────────────────┴───────────────────────┴───────────────────────┘
        ▲ 每个 rank 自己的 base 可以不同。每个 rank 还保存一张查找表
-         windowsIn[peer]，把每个对端的 rank 索引映射到该对端的 base——
+         windowsIn[peer]，记录本 rank 访问该对端 window 所用的本地地址——
          因此 rank 1 把 rank 0 的数据访问为 windowsIn[0] + offset，而
          不是共享的绝对指针。"对称"指的是每个 window 有相同的大小和布局
          （偏移量 X 在每个 rank 上都是同一块 slice），而不是所有 rank
@@ -27,8 +27,8 @@ PyPTO 的分布式模型建立在**对称内存与信号**之上——完整说�
 
 每个 rank 的 window 具有相同的布局——这才是"对称"的实质——但每个 rank
 自己的 base 地址可以不同。每个 rank 都保存一张查找表
-（`CommContext.windowsIn[peer]`），记录每个对端的 base，因此
-`remote_load`/`remote_store`/`put`/`get` 在本地就能算出
+（`CommContext.windowsIn[peer]`），记录本 rank 访问每个对端 window 所用的
+本地地址，因此 `remote_load`/`remote_store`/`put`/`get` 在本地就能算出
 `windowsIn[peer] + offset`，无需向对端询问地址。信号（`notify`/`wait`）是
 另一套独立机制，用于告知某个 rank 数据*何时*就绪——仅凭布局本身无法保证
 这一点。
