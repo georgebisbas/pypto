@@ -414,8 +414,13 @@ class InsertCommMarkers : public IRMutator {
     if (auto target = WriteTargetToInvalidate(body)) {
       out.push_back(MakeCacheInvalid(target, body->span_));
       out.push_back(MakeNoArgOp("system.fence", body->span_));
-    } else if (IsRemoteWrite(LeafCall(body))) {
-      out.push_back(MakeNoArgOp("system.fence", body->span_));  // codegen emits the peer cacheinvalid
+    } else if (IsRemoteWrite(LeafCall(body)) || IsAsyncWait(LeafCall(body))) {
+      // Sync remote write: codegen emits the peer-region cacheinvalid; this pass
+      // inserts only the GM release fence. Async wait: the drain point, where the
+      // matching async write's GM release fence belongs.
+      out.push_back(MakeNoArgOp("system.fence", body->span_));
+    } else if (IsAsyncRemoteWrite(LeafCall(body))) {
+      // Async issue: no release marker here; the fence rides the wait.
     } else if (eff == Effect::kWrite) {
       // Opaque write (Submit / unregistered op): conservative whole-GM ci + fence.
       out.push_back(MakeCacheInvalidAll(body->span_));

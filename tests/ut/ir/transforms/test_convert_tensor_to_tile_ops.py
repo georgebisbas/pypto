@@ -1190,6 +1190,30 @@ class TestConvertTensorToTileOps:
         with pytest.raises(ValueError, match=r"pld\.tensor\.put src must be a GM tensor"):
             passes.convert_tensor_to_tile_ops()(Before)
 
+    def test_put_async_rejects_computed_tile_src(self):
+        """pld.tensor.put_async must name itself when src is a computed TileType.
+
+        tput_async is GM→GM; a UB tile has no GM address. Rejecting at the tensor
+        op (before the rename to pld.tile.put_async) keeps the diagnostic on the
+        op the author wrote.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[1, 64], pl.FP16],
+                dst: pld.DistributedTensor[[1, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                scaled = pl.tensor.add(x, x)
+                sess = pld.system.async_session()
+                pld.tensor.put_async(dst, peer, scaled, sess)
+
+        with pytest.raises(ValueError, match=r"pld\.tensor\.put_async src must be a GM tensor"):
+            passes.convert_tensor_to_tile_ops()(Before)
+
     def test_get_subregion_emits_transfer_shape_stage_and_forwards_offsets(self):
         """pld.tensor.get subregion lowers like put: stage sized to shape and offsets forwarded."""
 

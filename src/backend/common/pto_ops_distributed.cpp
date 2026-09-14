@@ -38,6 +38,7 @@
 #include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "src/backend/common/pto_ops_internal.h"
+#include "src/ir/op/distributed/comm_op_utils.h"
 
 namespace pypto {
 namespace backend {
@@ -1028,9 +1029,8 @@ static std::string MakeAsyncSessionCodegenPTO(const CallPtr& op, codegen::Codege
   // Omit means PyPTO's 1 MB default, not PTOAS's silent 32 KB. Always emit the
   // attr: the IR builder drops a zero value, so a missing key is the default
   // path (see pld.system.async_session).
-  constexpr int64_t kDefaultBlockBytes = int64_t{1024} * 1024;
-  const int64_t block_bytes =
-      static_cast<int64_t>(op->GetKwarg<int>("block_bytes", static_cast<int>(kDefaultBlockBytes)));
+  const int64_t block_bytes = static_cast<int64_t>(
+      op->GetKwarg<int>("block_bytes", static_cast<int>(ir::comm_op::kDefaultAsyncSessionBlockBytes)));
 
   std::string session = codegen.GetCurrentResultTarget();
   if (session.empty()) session = codegen.NewTemp();
@@ -1143,7 +1143,9 @@ static std::string MakePutAsyncCodegenPTO(const CallPtr& op, codegen::CodegenBas
                partition_type + ", " + partition_type + ", !pto.async_session) -> !pto.async_event");
 
   // Park the peer-region invalidate for the wait that drains this event.
-  codegen.DeferPeerInvalidate(event, {dst_pview, partition_type});
+  // The issuing session SSA is stored so wait_async_event can reject a mismatched
+  // session before draining / emitting the deferred peer invalidate.
+  codegen.DeferPeerInvalidate(event, {dst_pview, partition_type, session});
   codegen.SetCurrentExprValue(event);
   return "";
 }
@@ -1166,6 +1168,19 @@ static std::string MakeWaitAsyncEventCodegenPTO(const CallPtr& op, codegen::Code
       << "pld.tile.wait_async_event event has no SSA binding; the producing put_async must be "
          "assigned to a named variable";
   INTERNAL_CHECK_SPAN(!session.empty(), op->span_) << "pld.tile.wait_async_event session has no SSA binding";
+
+  // Pairing: a put_async parks its issuing session with the event. Waiting with a
+  // different session would poll the wrong completion word (session.tmpBufAddr)
+  // while still emitting the deferred peer invalidate / release fence — leaving
+  // the transfer undrained and publishing early. Prefetch events have no pending
+  // entry and are unaffected.
+  if (auto pending = codegen.PeekDeferredPeerInvalidate(event)) {
+    CHECK_SPAN(pending->session_ssa == session, op->span_)
+        << "pld.tile.wait_async_event session does not match the session that issued "
+           "pld.tile.put_async for this event (issued with '"
+        << pending->session_ssa << "', waited with '" << session
+        << "'): the wait would drain the wrong SDMA session while still releasing the peer region";
+  }
 
   std::string done = codegen.GetCurrentResultTarget();
   if (done.empty()) done = codegen.NewTemp();

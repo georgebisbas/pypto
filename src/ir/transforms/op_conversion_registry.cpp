@@ -2838,7 +2838,27 @@ void OpConversionRegistry::RegisterDistributedOps() {
   // `buf(...)` operand group — so the tile-level form carries exactly the same
   // operands. The rename still happens because backend codegen registers
   // transfer emitters at the tile level (`reg("pld.tile.put")` / `"pld.tile.get"`).
-  RegisterSimple("pld.tensor.put_async", "pld.tile.put_async");
+  //
+  // Reject a TileType src before the rename: a computed producer already lowered
+  // to a tile has no GM address, and deferring to pld.tile.put_async's deducer
+  // would name the internal op in the diagnostic.
+  RegisterCustom(
+      "pld.tensor.put_async",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 4 || args.size() == 7, span)
+            << "pld.tensor.put_async conversion expects 4 args (dst, peer, src, session) or 7 "
+               "(+ dst_offsets, src_offsets, shape), got "
+            << args.size();
+        CHECK_SPAN(!As<TileType>(args[2]->GetType()), span)
+            << "pld.tensor.put_async src must be a GM tensor, but got a computed value that lowers "
+               "to a tile: tput_async transfers between two GM regions, and a UB tile has no GM "
+               "address. Store the value to a tensor first, or use pld.tensor.remote_store for a "
+               "synchronous tile push.";
+        auto& op_reg = OpRegistry::GetInstance();
+        auto put_call = op_reg.Create("pld.tile.put_async", args, kwargs, span);
+        return ConversionResult{{}, put_call};
+      });
 
   // pld.system.async_session -> tile.create(scratch) + pld.tile.async_session(scratch).
   //

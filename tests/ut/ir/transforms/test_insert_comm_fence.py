@@ -216,6 +216,72 @@ def test_async_put_defers_its_fence_to_the_wait():
     ir.assert_structural_equal(_apply(Before), Expected)
 
 
+def test_async_put_inside_bare_if_gets_no_issue_marker():
+    """A bare ``if`` body whose only statement is ``put_async`` must not get release markers.
+
+    ``SeqStmts`` already no-ops the async issue; ``MarkBody`` must mirror that. Without
+    the async arm, ``put_async`` is ``Effect::kWrite`` and the bare-body path would insert
+    a whole-GM ``cacheinvalid`` + fence while the transfer is still in flight.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            src: pld.DistributedTensor[[1, N], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            sess = pld.system.async_session()
+            if cond:
+                evt = pld.tensor.put_async(win, peer, src, sess)
+
+    ir.assert_structural_equal(_apply(Before), Before)
+
+
+def test_async_wait_inside_bare_if_gets_release_fence():
+    """A bare ``if`` body whose only statement is ``wait_async_event`` gets the GM fence.
+
+    The matching ``put_async`` sits outside the branch (SeqStmts: no marker at issue).
+    ``MarkBody`` must insert the release fence after the wait, same as the SeqStmts path.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            src: pld.DistributedTensor[[1, N], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(win, peer, src, sess)
+            if cond:
+                pld.system.wait_async_event(evt, sess)
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(
+            self,
+            win: pld.DistributedTensor[[1, N], pl.FP32],
+            src: pld.DistributedTensor[[1, N], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+            cond: pl.Scalar[pl.BOOL],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(win, peer, src, sess)
+            if cond:
+                pld.system.wait_async_event(evt, sess)
+                pl.system.fence()
+
+    ir.assert_structural_equal(_apply(Before), Expected)
+
+
 def test_plain_tensor_store_no_markers():
     # A plain (non-window) store is not a publishing write; nothing is inserted.
     @pl.program

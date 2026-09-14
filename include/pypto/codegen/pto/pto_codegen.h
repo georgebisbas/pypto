@@ -557,6 +557,7 @@ class PTOCodegen : public CodegenBase {
   struct PendingPeerInvalidate {
     std::string partition_view;  ///< dst partition-view SSA to invalidate
     std::string partition_type;  ///< its MLIR partition_tensor_view type string
+    std::string session_ssa;     ///< issuing session SSA; wait must pass the same
   };
 
   /// Park the peer invalidate `event_ssa`'s transfer owes, to be emitted after
@@ -581,6 +582,14 @@ class PTOCodegen : public CodegenBase {
     PendingPeerInvalidate pending = std::move(it->second);
     fs_.pending_peer_invalidates.erase(it);
     return pending;
+  }
+
+  /// Peek at the invalidate parked for `event_ssa` without consuming it.
+  [[nodiscard]] std::optional<PendingPeerInvalidate> PeekDeferredPeerInvalidate(
+      const std::string& event_ssa) const {
+    auto it = fs_.pending_peer_invalidates.find(event_ssa);
+    if (it == fs_.pending_peer_invalidates.end()) return std::nullopt;
+    return it->second;
   }
 
   /// Event SSAs whose peer invalidate is still parked — non-empty at the end of a
@@ -1168,6 +1177,7 @@ class PTOCodegen : public CodegenBase {
       ffts_workspace_vars.clear();
 
       sdma_workspace_arg_ssa.clear();
+      pending_peer_invalidates.clear();
       deferred_completion_raw_args_ssa.clear();
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();

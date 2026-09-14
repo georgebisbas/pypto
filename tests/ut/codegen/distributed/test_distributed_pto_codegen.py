@@ -1980,6 +1980,67 @@ def test_two_async_sessions_in_one_kernel_is_rejected():
         _generate_mlir(PTwo)
 
 
+def test_wait_async_event_rejects_mismatched_session():
+    """Waiting an async-put event with a different session SSA is rejected.
+
+    The IR only checks the singleton ``AsyncSessionType``, so a mismatched wait
+    would otherwise emit the supplied session while still replaying the deferred
+    peer invalidate — draining the wrong completion word and publishing early.
+    One session per kernel is already enforced, so this test rewrites the wait's
+    session operand to an extra ``AsyncSessionType`` parameter after Default.
+    """
+
+    @pl.program
+    class PMatch:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[1, 64], pl.FP16],
+            src: pld.DistributedTensor[[1, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            sess = pld.system.async_session()
+            evt = pld.tensor.put_async(dst, peer, src, sess)
+            pld.system.wait_async_event(evt, sess)
+
+    optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PMatch)
+    kernel = next(
+        f
+        for f in optimized.functions.values()
+        if f.func_type not in (pl.FunctionType.Orchestration, pl.FunctionType.Group)
+    )
+
+    wrong_sess = ir.Var("wrong_sess", ir.AsyncSessionType.get(), kernel.span)
+
+    class _SwapWaitSession(ir.IRMutator):
+        def visit_call(self, op: ir.Call) -> ir.Expr:
+            expr = super().visit_call(op)
+            call = expr if isinstance(expr, ir.Call) else op
+            if call.op.name not in ("pld.tile.wait_async_event", "pld.system.wait_async_event"):
+                return expr
+            args = list(call.args)
+            args[1] = wrong_sess
+            return ir.Call(call.op, args, dict(call.kwargs), call.attrs, call.type, call.span)
+
+    new_body = _SwapWaitSession().visit_stmt(kernel.body)
+    new_func = ir.Function(
+        kernel.name,
+        list(kernel.params) + [wrong_sess],
+        list(kernel.return_types),
+        new_body,
+        kernel.span,
+        type=kernel.func_type,
+        level=kernel.level,
+        role=kernel.role,
+        attrs=dict(kernel.attrs) if kernel.attrs is not None else None,
+        requires_runtime_binding=kernel.requires_runtime_binding,
+    )
+    rewritten = ir.Program([new_func], new_func.name, optimized.span)
+
+    with pytest.raises(ValueError, match="does not match the session|wrong SDMA session"):
+        codegen.PTOCodegen().generate(rewritten)
+
+
 def test_put_chunk_shrinks_staging_tile_keeping_full_partition_view():
     """``chunk_rows`` / ``chunk_cols`` shrink the VEC staging tile while the
     partition views keep the full transfer extent — pto-isa TPUT then 2-D-slides

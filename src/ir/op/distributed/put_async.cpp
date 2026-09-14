@@ -94,13 +94,6 @@ using Kwargs = std::vector<std::pair<std::string, std::any>>;
 /// pto-isa `BuildSdmaSession` rejects syncId > 7 (the SDMA sync-flag id is 3 bits).
 constexpr int kMaxSyncId = 7;
 
-/// Default SDMA chunking granularity, in bytes. PTOAS's lowering hardcodes 32 KB
-/// when the attr is absent (PTOToEmitC.cpp), while pto-isa's own
-/// `kDefaultSdmaBlockBytes` is 1 MB and the prefetch context uses 64 MB. For the
-/// multi-hundred-KB chunk pushes this op targets, 32 KB would be an accident
-/// rather than a choice, so PyPTO always emits the attr explicitly.
-constexpr int64_t kDefaultBlockBytes = int64_t{1024} * 1024;
-
 void CheckNonNull(const std::vector<ExprPtr>& args, const std::string& op_name) {
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << op_name << " positional argument #" << i << " must not be null";
@@ -118,8 +111,8 @@ void ValidateSessionAttrs(const Kwargs& kwargs, const std::string& op_name) {
          "PTOAS's build_async_session op silently discards.";
   // Omitting the attr means "use PyPTO's documented default", not "let PTOAS
   // pick" — PTOAS would silently apply 32 KB. Validate the effective value.
-  const int64_t block_bytes =
-      static_cast<int64_t>(GetIntKwarg(kwargs, "block_bytes", static_cast<int>(kDefaultBlockBytes)));
+  const int64_t block_bytes = static_cast<int64_t>(
+      GetIntKwarg(kwargs, "block_bytes", static_cast<int>(comm_op::kDefaultAsyncSessionBlockBytes)));
   CHECK(block_bytes > 0) << op_name << " block_bytes must be positive, got " << block_bytes
                          << ": it is the SDMA chunking granularity passed to BuildSdmaSession.";
 }

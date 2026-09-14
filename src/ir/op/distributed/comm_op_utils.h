@@ -52,6 +52,12 @@ namespace comm_op {
 
 using Kwargs = std::vector<std::pair<std::string, std::any>>;
 
+/// Default SDMA chunking granularity for ``pld.system.async_session`` /
+/// ``pto.comm.build_async_session``, in bytes. PTOAS hardcodes 32 KB when the
+/// attr is absent; pto-isa's ``kDefaultSdmaBlockBytes`` is 1 MB. PyPTO always
+/// emits this value explicitly so chunk pushes do not silently inherit 32 KB.
+inline constexpr int64_t kDefaultAsyncSessionBlockBytes = int64_t{1024} * 1024;
+
 // Reject negative chunk sizes regardless of pipeline / dynamic state. The DSL
 // `_validate_chunk` enforces this at the user surface, but a direct IR-op call
 // (e.g. dist_tensor_ops.put(chunk_rows=-1)) bypasses it and would otherwise feed
