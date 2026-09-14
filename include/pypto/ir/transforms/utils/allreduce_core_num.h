@@ -75,16 +75,16 @@ inline constexpr int64_t kLargePayloadBytes = 2 * 1024 * 1024;  // 2 MiB
 inline constexpr int64_t kMidCoreNum = 8;     // cn8: measured sufficient at every payload >= crossover
 inline constexpr int64_t kLargeCoreNum = 16;  // cn16: top end only (>= 2 MiB)
 
-/// Environment override: `PYPTO_ALLREDUCE_CORE_NUM` forces the width for calls
-/// that do not carry an explicit `core_num=` (explicit DSL wins over the env).
-inline constexpr const char* kCoreNumEnvVar = "PYPTO_ALLREDUCE_CORE_NUM";
-
-/// Value of `PYPTO_ALLREDUCE_CORE_NUM`, or 0 when unset / empty / non-numeric /
-/// not positive. Read at each use (lowering is compile-time and infrequent, so
-/// no per-process cache — keeping it live lets unit tests drive it with
-/// `monkeypatch`).
+/// Value of `PYPTO_ALLREDUCE_CORE_NUM` (env override: forces the width for
+/// calls that do not carry an explicit `core_num=`; explicit DSL wins over the
+/// env), or 0 when unset / empty / non-numeric / not positive. Read at each
+/// use (lowering is compile-time and infrequent, so no per-process cache —
+/// keeping it live lets unit tests drive it with `monkeypatch`). The name is
+/// passed as a literal (not an indirected constant) so
+/// `tests/lint/check_environment_inputs.py`'s static scanner can classify it
+/// against `python/pypto/_environment.json` without a per-callsite exception.
 inline int64_t EnvCoreNumOverride() {
-  const char* value = std::getenv(kCoreNumEnvVar);
+  const char* value = std::getenv("PYPTO_ALLREDUCE_CORE_NUM");
   if (value == nullptr) return 0;
   std::string text(value);
   if (text.empty()) return 0;

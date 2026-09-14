@@ -339,7 +339,7 @@ def allreduce(
         args = [target, signal]
     else:
         raise TypeError(f"pld.tensor.allreduce signal must be an Expr, got {type(signal).__name__}")
-    attrs: dict[str, object] = {"op": int(op), "mode": mode}
+    attrs: dict[str, int | str] = {"op": int(op), "mode": mode}
     if core_num is not None:
         attrs["core_num"] = core_num
     return _ir_core.create_op_call(

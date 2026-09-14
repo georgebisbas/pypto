@@ -106,6 +106,10 @@
       "category": "tool_resolution",
       "reason": "Derived runtime hint; the pinned PTO-ISA resolver owns the actual include root."
     },
+    "PYPTO_ALLREDUCE_CORE_NUM": {
+      "category": "semantic",
+      "reason": "Forces the HOST mesh allreduce SPMD launch width, overriding the auto (payload, world_size) selection; a different value stamps a different core_num onto the compiled builtin, so it must be part of the specialization identity."
+    },
     "PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG": {
       "category": "nonsemantic",
       "reason": "Diagnostic tracing of loop carry dependency analysis only."
