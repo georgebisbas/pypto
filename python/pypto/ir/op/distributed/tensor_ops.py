@@ -492,9 +492,9 @@ def all_to_all_v(
     ``for``/``while`` loop. It is also exchanged twice **within** a single call
     on the HOST/L2 kernel — a start-of-call rendezvous before any payload push,
     then the end-of-call completion barrier — both on the barrier signal.
-    Counts are published on ``recv_counts`` (not on ``signal``): the HOST/L2
-    kernel uses Set(0)+AtomicAdd(rows+1) / Wait on each peer's slot so a zero
-    count still unblocks and prior-call residue cannot accumulate.
+    Counts are published on ``recv_counts`` (not on ``signal``) during the push
+    via ``pld.system.notify`` (Set) of ``clamp(send_counts[dest], 0, MAX_RECV)``
+    into each peer's ``recv_counts[my_rank, 0]``, self included.
 
     .. warning::
 
