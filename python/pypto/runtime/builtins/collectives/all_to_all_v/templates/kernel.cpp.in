@@ -154,14 +154,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // peer is still in round N. Single-block only; multi-block soft-sync is not here.
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
 
-  int32_t self_rows = 0;
-
   // Phase 1: for each dest (including self, HCCL/InCore EmitFor parity):
   //   rows = clamp(send_counts[dest], 0, max_recv)  // same as LowerTensorAllToAllVRule
+  //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set) — self included;
+  //     a local self-notify is the same st_atomic the remote path uses.
   //   TPUT exactly `rows` rows (not full max_recv). Capacity tail past `rows` is untouched
   //     and may be NaN/Inf on reuse — consumers must trim to recv_counts before reducing.
-  // Counts are NOT published here: a remote Set into recv_counts is not proven visible by
-  // a later barrier AtomicAdd on signal. Phase 2 publishes on recv_counts itself.
+  // Never CommRemotePtr(send_counts): send_counts may be a plain L2 Tensor.
   for (int dest = 0; dest < nranks; ++dest) {
     int32_t raw_count = send_counts_base[dest];
     int64_t rows64 = static_cast<int64_t>(raw_count);
@@ -169,9 +168,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    if (dest == my_rank) {
-      self_rows = rows;
-    }
+    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
+    pto::comm::Signal count_sig(remote_recv_slot);
+    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
 
     int64_t src_row_offset = static_cast<int64_t>(dest) * max_recv * row_numel;
     int64_t dst_row_offset = static_cast<int64_t>(my_rank) * max_recv * row_numel;
@@ -194,52 +193,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
   }
 
-  // Phase 2: authoritative recv_counts publish on the recv_counts window (not signal).
-  // Never CommRemotePtr(send_counts). Ready-only Wake + GM load of a prior Set still
-  // saw 0 on P=4 (Wait ≠ visibility of a different address). Carry count on the same
-  // AtomicAdd/TWAIT cell: Set(0) clears the previous call's rows, AtomicAdd(rows+1)
-  // wakes Wait(GE 1) even when rows==0. NotifyOp::Set(rows+1) alone timed out on a2a3.
-  PublishFence();
-  for (int dest = 0; dest < nranks; ++dest) {
-    if (dest == my_rank) continue;
-    int32_t raw_count = send_counts_base[dest];
-    int64_t rows64 = static_cast<int64_t>(raw_count);
-    if (rows64 > max_recv) rows64 = max_recv;
-    if (rows64 < 0) rows64 = 0;
-    int32_t encoded = static_cast<int32_t>(rows64) + 1;
-    __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
-    pto::comm::Signal count_sig(remote_slot);
-    pto::comm::TNOTIFY(count_sig, static_cast<int32_t>(0), pto::comm::NotifyOp::Set);
-    pto::comm::TNOTIFY(count_sig, encoded, pto::comm::NotifyOp::AtomicAdd);
-  }
+  // Phase 2: publish fence then completion barrier. Counts were published in the
+  // push loop via NotifyOp::Set; nothing runs after the barrier.
   PublishFence();
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
-  // Local fill: self from self_rows; peers Wait/load then AtomicAdd(-1) leaving rows.
-  for (int src = 0; src < nranks; ++src) {
-    int32_t rows;
-    if (src == my_rank) {
-      rows = self_rows;
-      recv_counts_base[src] = rows;
-      pto::comm::Signal count_sig(recv_counts_base + src);
-      pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
-    } else {
-      __gm__ int32_t *count_slot = recv_counts_base + src;
-      pto::comm::Signal count_lane(count_slot);
-      pto::comm::TWAIT(count_lane, static_cast<int32_t>(1), pto::comm::WaitCmp::GE);
-      dcci((__gm__ void *)count_slot, cache_line_t::SINGLE_CACHE_LINE);
-      // Keep the load after dcci.
-      asm volatile("" ::: "memory");
-      int32_t encoded = *count_slot;
-      // Leave `rows` (= encoded - 1) in the cell for post-collective consumers.
-      pto::comm::TNOTIFY(count_lane, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
-      int64_t rows64 = static_cast<int64_t>(encoded) - 1;
-      if (rows64 > max_recv) rows64 = max_recv;
-      if (rows64 < 0) rows64 = 0;
-      rows = static_cast<int32_t>(rows64);
-      // Store matches the post-AtomicAdd cell; Set reinforces notify visibility.
-      recv_counts_base[src] = rows;
-      pto::comm::TNOTIFY(count_lane, rows, pto::comm::NotifyOp::Set);
-    }
-  }
-  PublishFence();
 }
