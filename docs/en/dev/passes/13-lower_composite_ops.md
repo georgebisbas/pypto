@@ -28,28 +28,45 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 ## Architecture
 
-The pass is a single translation unit, `src/ir/transforms/lower_composite_ops_pass.cpp`:
+The pass is a thin dispatcher plus one translation unit per collective, under
+`src/ir/transforms/lower_composite/`:
 
 ```text
-src/ir/transforms/lower_composite_ops_pass.cpp
-  LoweringBuilder           — per-call scratchpad (Bind + primitive tile-op builders:
+src/ir/transforms/lower_composite/
+  lower_composite_builder.{h,cpp}
+    LoweringBuilder         — per-call scratchpad (Bind + primitive tile-op builders:
                               tile.muls, tile.adds, tile.add, tile.sub, tile.mul,
                               tile.maximum, tile.minimum, tile.cast
                               + structured control-flow: EmitFor / EmitForReduce
                               / EmitIf / EmitIfExpr + NotEq scalar guard)
-  CompositeLoweringFn       — (call, visited_args, builder) -> result expr
-  Lower<Op>Rule             — one rule function per composite op (LowerSinRule,
-                              LowerCosRule, LowerTensorAllReduceRule, ...)
+  lower_composite_common.{h,cpp}
+    shared collective helpers — chunk geometry, mesh signal-shape validation,
+                              shape collapsing, allreduce target view, and the
+                              self-clearing credit-barrier protocol comment
+  lower_composite_rules.h
+    CompositeLoweringFn     — (call, visited_args, builder) -> result expr
+    LowerTensor<Op>Rule     — one declaration per collective
+  lower_composite_{allreduce,allgather,reduce_scatter,broadcast,barrier,
+                   all_to_all,all_to_all_v}.cpp
+                            — one translation unit per collective
+
+src/ir/transforms/lower_composite_ops_pass.cpp
+  LowerSinRule / LowerCosRule / LowerTileTQuantMxRule
+                            — elementwise + MX rules, file-local (they share no
+                              code with the collectives)
   LookupCompositeRule       — file-local op-name → rule dispatch table (kRules)
   LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
 ```
 
-Adding a new single-result composite op (all edits stay in `lower_composite_ops_pass.cpp`):
+Adding a new single-result composite op. A `tile.*` rule stays in
+`lower_composite_ops_pass.cpp`; a `pld.tensor.*` collective gets its own
+translation unit under `lower_composite/`, a declaration in
+`lower_composite_rules.h`, and a row in `CMakeLists.txt`:
 
 1. Write a `Lower<Op>Rule(call, args, builder)` function. It receives the original `CallPtr` (use `call->span_`, `call->kwargs_`, `call->op_->name_` as needed), the visited arg expressions (var-remap already applied), and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` per intermediate temp. For rules that need control flow, use `builder.EmitFor` / `builder.EmitForReduce` / `builder.EmitIf` / `builder.EmitIfExpr` — each takes a body callback that receives a nested builder sharing the same temp counter, so emitted temps stay uniquely named regardless of nesting depth. `LowerTensorAllReduceRule` is the canonical example of a control-flow-bearing rule (ready barrier plus chunked remote_load+accumulate / barrier / store for mesh; `LowerTensorRingAllReduceRule` adds a chunked RS+AG ring schedule dispatched via a `mode` kwarg).
 2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
 
-Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.
+Multi-result rules return `MakeTuple`; the mutator maps both the original result and ordinary SSA aliases of that tuple, so direct projections and alias-chain projections expose the same destinations. Every collective already has its own translation unit under `src/ir/transforms/lower_composite/`; the dispatch table stays in the pass file.
 
 ## Algorithm (`tile.tquant_mx` rule)
 
