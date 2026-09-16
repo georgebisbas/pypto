@@ -44,6 +44,12 @@ inline constexpr std::size_t kCommCtxSize = sizeof(::CommContext);
 // for an FP16 remote TLOAD rounded to the 32-byte transfer granularity.
 inline constexpr std::size_t kCommBufferAlignmentBytes = 32;
 
+// Cache-line alignment for window sub-buffer offsets. NPU comm primitives
+// (TWait, TNotify) use dcci which operates on whole 64-byte cache lines;
+// adjacent buffers sharing a line can corrupt each other. The window_size
+// calculation must account for this padding between buffers.
+inline constexpr std::size_t kCommBufferCacheLineBytes = 64;
+
 static_assert(kRankIdOffset == 16, "CommContext.rankId offset drift");
 static_assert(kRankNumOffset == 20, "CommContext.rankNum offset drift");
 static_assert(kWindowsInOffset == 32, "CommContext.windowsIn offset drift");

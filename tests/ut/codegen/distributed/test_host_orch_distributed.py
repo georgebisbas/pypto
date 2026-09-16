@@ -369,9 +369,9 @@ def test_comm_group_program_emits_domain_provider_with_block():
     # window_size is the sum of aligned physical slot sizes. Each spec keeps
     # its exact logical size in count and exposes only its physical size via
     # nbytes.
-    # Single slot → `window_size=((((64 * 4) + 31) // 32) * 32),`. The inner
-    # parentheses come from the Mul expression.
-    aligned_size = r"\(\(\(\(64 \* 4\) \+ 31\) // 32\) \* 32\)"
+    # Single slot → `window_size=((((64 * 4) + 63) // 64) * 64),`. The inner
+    # parentheses come from the Mul expression. Alignment is 64B (cache line).
+    aligned_size = r"\(\(\(\(64 \* 4\) \+ 63\) // 64\) \* 64\)"
     assert re.search(rf"window_size=\({aligned_size}\),", code), code
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count=\(64 \* 4\), nbytes={aligned_size}\),',
@@ -408,8 +408,9 @@ def test_comm_buffer_specs_align_each_physical_allocation():
     code = _lower(Prog)
     data_logical = r"\(17 \* 2\)"
     signal_logical = r"\(2 \* 4\)"
-    data_alloc = rf"\(\(\({data_logical} \+ 31\) // 32\) \* 32\)"
-    signal_alloc = rf"\(\(\({signal_logical} \+ 31\) // 32\) \* 32\)"
+    # Alignment is 64B (cache line) to prevent dcci hazards.
+    data_alloc = rf"\(\(\({data_logical} \+ 63\) // 64\) \* 64\)"
+    signal_alloc = rf"\(\(\({signal_logical} \+ 63\) // 64\) \* 64\)"
     assert re.search(
         rf'CommBufferSpec\(name="data_buf", dtype="opaque", count={data_logical}, nbytes={data_alloc}\),',
         code,

@@ -555,28 +555,28 @@ void DistributedCodegen::VisitStmt_(const ir::CommDomainScopeStmtPtr& op) {
   // unwraps to ``world_size * 4`` — the temp isn't yet bound in the
   // emitted Python at the point we write ``window_size=`` (it comes
   // ahead of the rest of the body).
+  //
+  // Buffer sizes are aligned to kCommBufferAlignmentBytes (32) for CCU safety.
+  // Buffer *offsets* are aligned to kCommBufferCacheLineBytes (64) to prevent
+  // cache-line sharing hazards: NPU comm primitives (TWait, TNotify) use dcci
+  // which operates on whole 64-byte cache lines.
   std::vector<std::string> slot_nbytes;
   std::vector<std::string> slot_alloc_nbytes;
   slot_nbytes.reserve(op->slots_.size());
   slot_alloc_nbytes.reserve(op->slots_.size());
+  const auto cache_line = distributed::comm_layout::kCommBufferCacheLineBytes;
   for (const auto& slot : op->slots_) {
     const std::string logical_nbytes = GetCommSlotSizeAsCode(slot->size_);
     slot_nbytes.push_back(logical_nbytes);
-    slot_alloc_nbytes.push_back("(((" + logical_nbytes + " + " +
-                                std::to_string(distributed::comm_layout::kCommBufferAlignmentBytes - 1) +
-                                ") // " +
-                                std::to_string(distributed::comm_layout::kCommBufferAlignmentBytes) + ") * " +
-                                std::to_string(distributed::comm_layout::kCommBufferAlignmentBytes) + ")");
+    // Align each buffer's size to cache-line (64B) so consecutive placement
+    // ensures each buffer starts on a cache-line boundary.
+    slot_alloc_nbytes.push_back("(((" + logical_nbytes + " + " + std::to_string(cache_line - 1) + ") // " +
+                                std::to_string(cache_line) + ") * " + std::to_string(cache_line) + ")");
   }
 
-  // Simpler places CommBufferSpecs consecutively. Round every physical
-  // allocation up to the transfer alignment so signal buffers following an
-  // odd-sized FP16 data buffer remain CCU-safe. ``count`` below retains the
-  // logical byte count, so the padding is not exposed through a
-  // DistributedTensor view. Aligning the final slot also provides safe tail
-  // storage for an FP16 remote TLOAD rounded to the same granularity.
-  // Parenthesise each summand to keep operator precedence safe under any
-  // sub-expression shape.
+  // window_size is the sum of cache-line-aligned buffer sizes. Since each
+  // buffer size is rounded up to 64B, consecutive placement automatically
+  // ensures each buffer starts on a cache-line boundary.
   std::ostringstream window_size_expr;
   for (size_t i = 0; i < slot_alloc_nbytes.size(); ++i) {
     if (i > 0) window_size_expr << " + ";
