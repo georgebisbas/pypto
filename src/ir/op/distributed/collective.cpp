@@ -1239,8 +1239,8 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << kOpName << " target dtype " << target_type->dtype_.ToString() << " must match input dtype "
       << input_type->dtype_.ToString();
 
-  // signal: 2D [NR, 1] barrier only. Matches the public pld.tensor.all_to_all_v
-  // deducer; counts publish on recv_counts.
+  // signal: 2D [NR, 1] — barrier only. Counts publish on recv_counts.
+  // Matches the public pld.tensor.all_to_all_v deducer.
   auto signal_type = As<DistributedTensorType>(args[2]->GetType());
   CHECK(signal_type) << kOpName << " signal must be a DistributedTensor (window-bound), got "
                      << args[2]->GetType()->TypeName();

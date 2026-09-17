@@ -130,7 +130,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   __gm__ int32_t *recv_counts_base =
       reinterpret_cast<__gm__ int32_t *>(recv_counts_tensor->buffer.addr) + recv_counts_tensor->start_offset;
 
-  // Signal [NR, 1] (or rank-1 [NR]): barrier only. Counts publish on recv_counts.
+  // Signal [NR, 1] (or rank-1 [NR]): barrier only. Counts publish on recv_counts
+  // via TNOTIFY(Set) in the push loop — Yunji's spec: rely on Phase B consumer
+  // invalidate for visibility, no AtomicAdd/TWAIT encoding.
   int64_t signal_cols = 1;
   if (signal_tensor->ndims >= 2) {
     signal_cols = static_cast<int64_t>(signal_tensor->shapes[1]);
@@ -154,13 +156,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // peer is still in round N. Single-block only; multi-block soft-sync is not here.
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
 
-  // Phase 1: for each dest (including self, HCCL/InCore EmitFor parity):
-  //   rows = clamp(send_counts[dest], 0, max_recv)  // same as LowerTensorAllToAllVRule
-  //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set) — self included;
-  //     a local self-notify is the same st_atomic the remote path uses.
-  //   TPUT exactly `rows` rows (not full max_recv). Capacity tail past `rows` is untouched
-  //     and may be NaN/Inf on reuse — consumers must trim to recv_counts before reducing.
-  // Never CommRemotePtr(send_counts): send_counts may be a plain L2 Tensor.
+  // Push loop: for each dest (including self), publish count then TPUT payload.
+  // Yunji spec: TNOTIFY(Set, rows) on recv_counts in-loop; rely on Phase B
+  // consumer invalidate for visibility after the completion barrier.
   for (int dest = 0; dest < nranks; ++dest) {
     int32_t raw_count = send_counts_base[dest];
     int64_t rows64 = static_cast<int64_t>(raw_count);
@@ -168,6 +166,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
+    // Publish count to peer's recv_counts[my_rank] (self included per Yunji).
     __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
     pto::comm::Signal count_sig(remote_recv_slot);
     pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
@@ -179,9 +178,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     // Flat [rows * SIZE] transfer; TPUT_IMPL re-chunks above kTileCount. rows==0 skips.
     int64_t block_numel = rows64 * row_numel;
     if (block_numel > 0) {
-      // Reset ColMaskInternal every dest: (1) TputProcessSlice mutates it for ragged
-      // tails and never restores; reuse would shrink later dests. (2) Cap to block_numel
-      // or short payloads DMA the full kTileCount width.
       send_tile.ColMaskInternal =
           static_cast<int>(block_numel <= kTileCount ? block_numel : kTileCount);
       ShapeDyn shape(1, 1, 1, 1, block_numel);
@@ -193,8 +189,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
   }
 
-  // Phase 2: publish fence then completion barrier. Counts were published in the
-  // push loop via NotifyOp::Set; nothing runs after the barrier.
-  PublishFence();
+  // Completion barrier: GM fence + N-way barrier.
+  // Yunji spec: notify(set) + fence(dsb) + barrier(notify+wait) should
+  // make recv_counts visible after consumer cache invalidate.
+  PublishFence();  // pipe_barrier(PIPE_ALL) + dsb(DSB_DDR)
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_cols);
 }
