@@ -631,10 +631,10 @@ Pass InsertCommFence() {
     auto new_body = mutator.MarkTopLevel(func->body_);
     FunctionPtr result = func;
     if (new_body.get() != func->body_.get()) {
-      result = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                          func->return_types_, new_body, func->span_, func->func_type_,
-                                          func->level_, func->role_, func->attrs_,
-                                          func->requires_runtime_binding_, func->ir_stage_);
+      result =
+          std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
+                                     new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                     func->attrs_, func->requires_runtime_binding_, func->ir_stage_);
     }
     if (NeedsConsumePrologue(result)) {
       result = PrependConsumePrologue(result);
