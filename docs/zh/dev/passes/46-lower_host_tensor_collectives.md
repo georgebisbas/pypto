@@ -49,8 +49,9 @@ data = pld.tensor.all_to_all_v(input, target, signal, send_counts, recv_counts)
 每个目的地携带一个 `MAX_RECV` 行容量块，形状为 `[NR*MAX_RECV, SIZE]`。
 `all_to_all` / `all_to_all_v` 两种情况下 `data`/`target` 都是 peer 推入的
 结果窗口。`all_to_all_v` 还额外要求 `send_counts`（在这一层是窗口绑定的，
-仅本地使用）和 `recv_counts`（窗口绑定，通过 `pld.system.notify` 跨 rank
-发布）——五个窗口参数都必须位于同一个 `CommDomainScopeStmt` 中，并且必须
+仅本地使用）和 `recv_counts`（窗口绑定；计数通过每个来源一条 24×INT32 的
+交换行传递——builtin 内核自写本行并对端拉取，composite 通路用
+`pld.system.notify`）——五个窗口参数都必须位于同一个 `CommDomainScopeStmt` 中，并且必须
 两两互不相同（任意一对发生别名都是跨进程竞争，无论是 data 与 data、
 data 与 control，还是 control 与 control 之间）。
 

@@ -409,7 +409,7 @@ def test_builtin_tensor_all_to_all_v_is_internal_only():
     target = _make_distributed_tensor_var("target", [8, 64], DataType.FP32, span)
     signal = _make_distributed_tensor_var("signal", [4, 1], DataType.INT32, span)
     counts = _make_distributed_tensor_var("counts", [4, 1], DataType.INT32, span)
-    recv = _make_distributed_tensor_var("recv", [4, 1], DataType.INT32, span)
+    recv = _make_distributed_tensor_var("recv", [4, _AAV_COUNT_ROW], DataType.INT32, span)
     with pytest.raises(ValueError, match="internal-only"):
         ir.create_op_call(
             "builtin.tensor.all_to_all_v",
@@ -2458,6 +2458,8 @@ _AAV_NR = 2
 _AAV_MAX_RECV = 4
 _AAV_TOTAL = _AAV_NR * _AAV_MAX_RECV
 _AAV_SIZE = 64
+# recv_counts row width: one 96-byte (24 x INT32) exchange row per source.
+_AAV_COUNT_ROW = 24
 
 
 def _make_tensor_var(name: str, shape: list[int], dtype: DataType, span: ir.Span) -> ir.Var:
@@ -2474,13 +2476,17 @@ def _make_all_to_all_v_args(
 ) -> list[ir.Expr]:
     """Build a valid 5-arg operand list, with the counts operands overridable."""
     shape = counts_shape or [_AAV_NR, 1]
-    # recv_counts is always [NR, 1] (same layout as the barrier signal).
+    # recv_counts is the [NR, 24] counts EXCHANGE: one row per source, column 0
+    # the count delivered to the reader, columns [1, 1+NR) the source's
+    # published send vector (valid in the source's own window only).
     return [
         _make_tensor_var("inp", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
         _make_distributed_tensor_var("target", [_AAV_TOTAL, _AAV_SIZE], DataType.FP32, span),
         _make_distributed_tensor_var("signal", [_AAV_NR, 1], DataType.INT32, span),
         _make_tensor_var("counts", shape, counts_dtype, span),
-        _make_distributed_tensor_var("recv_counts", recv_shape or [_AAV_NR, 1], DataType.INT32, span),
+        _make_distributed_tensor_var(
+            "recv_counts", recv_shape or [_AAV_NR, _AAV_COUNT_ROW], DataType.INT32, span
+        ),
     ]
 
 
@@ -2493,7 +2499,7 @@ def test_all_to_all_v_returns_target_window_type():
 
 
 def test_all_to_all_v_accepts_1d_send_counts():
-    """send_counts may be 1D [NR] as well as 2D [NR, 1]; recv_counts stays [NR, 1]."""
+    """send_counts may be 1D [NR] as well as 2D [NR, 1]; recv_counts stays the [NR, 24] exchange row."""
     span = ir.Span.unknown()
     call = ir.create_op_call(
         "pld.tensor.all_to_all_v",
@@ -2540,10 +2546,10 @@ def test_all_to_all_v_requires_recv_counts_operand():
 
 
 def test_all_to_all_v_rejects_recv_counts_bad_width():
-    """recv_counts second dim must be 1 (same layout as the barrier signal)."""
+    """recv_counts second dim must be the 24-INT32 counts-exchange row."""
     span = ir.Span.unknown()
     args = _make_all_to_all_v_args(span, recv_shape=[_AAV_NR, 8])
-    with pytest.raises(ValueError, match="recv_counts second dimension must be 1"):
+    with pytest.raises(ValueError, match="recv_counts second dimension must be 24"):
         ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
 
 
@@ -2654,14 +2660,19 @@ def test_all_to_all_v_rejects_statically_strided_input():
 
 @pytest.mark.parametrize(
     ("index", "role", "shape"),
-    [(2, "signal", [_AAV_NR, 1]), (3, "send_counts", [_AAV_NR, 1]), (4, "recv_counts", [_AAV_NR, 1])],
+    [
+        (2, "signal", [_AAV_NR, 1]),
+        (3, "send_counts", [_AAV_NR, 1]),
+        (4, "recv_counts", [_AAV_NR, _AAV_COUNT_ROW]),
+    ],
 )
 def test_all_to_all_v_rejects_strided_control_operands(index, role, shape):
     """The control operands are indexed as flatly as the payload.
 
-    The kernel reads `send_counts_base[dest]`, `signal_base + peer` and
-    `recv_counts_base + my_rank` without applying declared strides, so a gapped
-    view would read the wrong count or wait on the wrong signal cell.
+    The kernel reads `send_counts_base[dest]`, `signal_base + peer` and the
+    `recv_counts` exchange rows at the fixed 24-INT32 stride without applying
+    declared strides, so a gapped view would read the wrong count or wait on
+    the wrong signal cell.
     """
     span = ir.Span.unknown()
     args = _make_all_to_all_v_args(span)

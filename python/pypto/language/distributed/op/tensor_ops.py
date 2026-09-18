@@ -1038,13 +1038,20 @@ def all_to_all_v(
        masks by ``recv_counts`` afterwards will propagate NaN into
        otherwise-valid rows.  Mask first, then compute.
 
-    During the same push, each rank also publishes
-    ``clamp(send_counts[dest], 0, MAX_RECV)`` into peer ``dest``'s
-    ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set). After the
-    barrier, ``recv_counts[src, 0]`` tells this rank how many rows ``src``
-    sent — which is now also exactly how many were transferred — so use that
-    count to know where to stop reading. This is the MPI_Alltoallv recvcounts
-    side.
+    ``recv_counts`` is the MPI_Alltoallv recvcounts side, as a per-source
+    *exchange row* [NR, 24]: row ``r`` belongs to rank ``r``, whose columns
+    ``[1, 1+NR)`` hold its per-destination send vector in ``r``'s own window,
+    and column 0 receives the count delivered to the reader. Rows are 24 INT32
+    (96 B) wide — a whole number of 32-byte TLOAD units and wider than one
+    64-byte cache line — so no two sources' counts share a line. The
+    hand-written builtin kernel (HOST and managed CHIP/L2 rails) writes its
+    send vector into its **own** row — no rank ever writes into a peer's array
+    — and each receiver pulls its peers' rows, storing the delivered count in
+    column 0; the InCore composite rail pushes the clamped count into peer
+    ``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set).
+    Either way, after the barrier ``recv_counts[src, 0]`` tells this rank how
+    many rows ``src`` sent — which is also exactly how many were transferred —
+    so use that count to know where to stop reading.
 
     The barrier ``signal`` is self-clearing (restored to zero after each call)
     and safe to reuse inside a ``for``/``while`` loop.
@@ -1060,8 +1067,12 @@ def all_to_all_v(
             A plain :class:`pl.Tensor` or a window-bound
             :class:`pld.DistributedTensor` (e.g. counts published by a
             preceding exchange).
-        recv_counts: :class:`pld.DistributedTensor` INT32 [NR, 1] — after the
-            call, ``recv_counts[src, 0]`` holds how many rows ``src`` actually
+        recv_counts: :class:`pld.DistributedTensor` INT32 [NR, 24] — the counts
+            exchange: row ``r`` holds rank ``r``'s per-destination send vector
+            (columns ``[1, 1+NR)``, valid in ``r``'s own window) and column 0
+            the count delivered to the reader; the 24-wide row keeps every
+            source's counts on their own cache line. After the call,
+            ``recv_counts[src, 0]`` holds how many rows ``src`` actually
             sent here, and how many were transferred — the count is clamped
             to ``[0, MAX_RECV]``, so a negative input publishes ``0`` (InOut).
         core_num: Requested AIV block limit for the managed CHIP/L2 rail.

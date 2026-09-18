@@ -1509,7 +1509,7 @@ def test_backend_materializes_all_to_all_v_next_level_files(tmp_path):
             data: pld.DistributedTensor[[8, SIZE], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1519,12 +1519,12 @@ def test_backend_materializes_all_to_all_v_next_level_files(tmp_path):
             data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [8, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1555,7 +1555,7 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
             data: pld.DistributedTensor[[8, SIZE], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1566,7 +1566,7 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
             data: pld.DistributedTensor[[8, SIZE], pl.FP32],
             sig: pld.DistributedTensor[[2, 1], pl.INT32],
             counts: pld.DistributedTensor[[2, 1], pl.INT32],
-            recv: pld.DistributedTensor[[2, 1], pl.INT32],
+            recv: pld.DistributedTensor[[2, 24], pl.INT32],
         ):
             return data
 
@@ -1576,12 +1576,12 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
             data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [8, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1590,12 +1590,12 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
             data_buf2 = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
             signal_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
             counts_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
-            recv_buf2 = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
+            recv_buf2 = pld.alloc_window_buffer(2 * 24 * pl.INT32.get_byte())
             inp2 = pld.window(input_buf2, [8, SIZE], dtype=pl.FP32)
             data2 = pld.window(data_buf2, [8, SIZE], dtype=pl.FP32)
             signal2 = pld.window(signal_buf2, [2, 1], dtype=pl.INT32)
             counts2 = pld.window(counts_buf2, [2, 1], dtype=pl.INT32)
-            recv2 = pld.window(recv_buf2, [2, 1], dtype=pl.INT32)
+            recv2 = pld.window(recv_buf2, [2, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch2(inp2, data2, signal2, counts2, recv2, device=r)
             pld.tensor.all_to_all_v(inp2, data2, signal2, counts2, recv2)

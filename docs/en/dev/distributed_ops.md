@@ -30,7 +30,7 @@ There are **fifteen ops** and **four ABI enums**:
 | `pld.tensor.reduce_scatter` | reduce and scatter chunks across ranks | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.allgather` | gather data from all ranks via window | `DistributedTensorType` (same as src) | builtin collective |
 | `pld.tensor.all_to_all` | push-based symmetric personalized exchange — every rank pushes its per-destination chunks to every peer's window via `pld.tensor.put` (TPUT), returns window as result | `DistributedTensorType` (same as src) | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and publishes that same clamped count into peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set) so the receiver knows which rows are valid; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | variable-size all-to-all (MPI_Alltoallv) — pushes `clamp(send_counts[dest], 0, MAX_RECV)` rows per destination into a flat 2D staging window (transfer size is the runtime row count, so padding never crosses the wire), and exchanges the clamped counts through a 24-INT32-wide per-source row of `recv_counts` (own-row publish + peer pull on the builtin kernel, `pld.system.notify` (Set) on the composite rail) so the receiver knows which rows are valid; returns window as result (same window-as-result pattern as symmetric `all_to_all`) | `DistributedTensorType` (same as target) | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 | `pld.system.defer_wait` | defer this task's logical completion on a local counter | `Unknown` (side effect) | Simpler completion runtime (no PTOAS wait op) |
@@ -409,7 +409,7 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
 - `signal` — DistributedTensor INT32 `[NR, 1]` (self-clearing credit barrier; reusable across calls)
 - `send_counts` — Tensor-like INT32 `[NR]` or `[NR, 1]` (runtime rows per dest)
-- `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
+- `recv_counts` — DistributedTensor INT32 `[NR, 24]` (InOut recvcounts; per-source counts-exchange row — see below)
 
 `input` and `target` are addressed by flat element arithmetic, so both must be
 packed row-major views and must be two distinct buffers. Supported payload
@@ -425,14 +425,26 @@ InCore and CHIP rails the operands arrive as function parameters with no such
 provenance, so distinctness is the caller's obligation.
 
 `MAX_RECV = target.shape[0] // NR`. Lowering reads `send_counts[dest]` at
-runtime, clamps it to `[0, MAX_RECV]`, and publishes the **clamped** count into
-peer `recv_counts[my_rank, 0]` via `pld.system.notify` (Set). The push transfers
-exactly that many rows — the transfer shape is the runtime `[rows, SIZE]`, not
-the compile-time capacity — so padding rows never cross the wire. After the
-barrier the receiver uses `recv_counts[src, 0]` to identify the valid rows; the
-remainder of its capacity slot is never written at all. Window memory is not
-*guaranteed* zeroed and can carry over within a process, so those untouched
-bytes are undefined.
+runtime and clamps it to `[0, MAX_RECV]`. The push transfers exactly that many
+rows — the transfer shape is the runtime `[rows, SIZE]`, not the compile-time
+capacity — so padding rows never cross the wire.
+
+`recv_counts` carries the counts side as a per-source **exchange row**: row `r`
+belongs to rank `r`, whose columns `[1, 1+NR)` hold its per-destination send
+vector in `r`'s own window, and column 0 receives the count delivered to the
+reader. Rows are 24 INT32 (96 B) wide — a whole number of 32-byte TLOAD units
+and wider than one 64-byte cache line — so no two sources' counts can share a
+line (the A2/A3 rule that values concurrently updated from different NPUs must
+own their line). The hand-written builtin kernel (HOST and managed CHIP/L2
+rails) writes its send vector into its **own** row and never touches a peer's
+array; each receiver then pulls its peers' rows and stores the delivered count
+in column 0, flushing it to GM. The InCore composite rail instead publishes the
+**clamped** count into peer `dest`'s `recv_counts[my_rank, 0]` via
+`pld.system.notify` (Set) — the wider row also makes those per-source cells
+line-exclusive. Either way, after the barrier the receiver uses
+`recv_counts[src, 0]` to identify the valid rows; the remainder of its capacity
+slot is never written at all. Window memory is not *guaranteed* zeroed and can
+carry over within a process, so those untouched bytes are undefined.
 
 > [!WARNING]
 > **Trim to `recv_counts` before doing arithmetic over the capacity block.**

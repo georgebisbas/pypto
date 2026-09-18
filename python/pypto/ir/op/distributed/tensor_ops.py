@@ -473,9 +473,13 @@ def all_to_all_v(
     [NR*MAX_RECV, SIZE] input, DistributedTensor [NR*MAX_RECV, SIZE] target
     (staging window / result), INT32 barrier signal [NR, 1], INT32
     ``send_counts`` [NR] / [NR, 1] holding the number of rows to send to each
-    destination, and window-bound INT32 ``recv_counts`` [NR, 1] that receives
-    per-source valid-row counts after the barrier (published via
-    ``pld.system.notify`` as ``clamp(send_counts[dest], 0, MAX_RECV)``). Powered
+    destination, and window-bound INT32 ``recv_counts`` [NR, 24] — the counts
+    *exchange*: row ``r`` belongs to rank ``r`` (columns ``[1, 1+NR)`` hold its
+    per-destination send vector in its own window) and column 0 receives the
+    count delivered to the reader, so after the call ``recv_counts[src, 0]`` is
+    the clamped count rank ``src`` sent here. Rows are 24 INT32 (96 B) wide — a
+    whole number of 32-byte TLOAD units and wider than one 64-byte cache line
+    — so no two sources' counts share a line. Powered
     by LowerCompositeOps into a 2-phase push-based decomposition (push →
     barrier), returning the target window. Each push transfers exactly
     ``clamp(send_counts[dest], 0, MAX_RECV)`` rows — the transfer extent is the

@@ -1437,7 +1437,7 @@ def test_host_all_to_all_v_rejects_aliased_input_target_windows():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1446,12 +1446,12 @@ def test_host_all_to_all_v_rejects_aliased_input_target_windows():
             buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(buf, [8, 256], dtype=pl.FP32)
             data = pld.window(buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1472,7 +1472,7 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1486,12 +1486,12 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1530,7 +1530,7 @@ def test_host_all_to_all_v_rejects_plain_tensor_input():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1539,11 +1539,11 @@ def test_host_all_to_all_v_rejects_plain_tensor_input():
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1567,7 +1567,7 @@ def test_host_all_to_all_v_rejects_plain_tensor_send_counts():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pl.Tensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1576,11 +1576,11 @@ def test_host_all_to_all_v_rejects_plain_tensor_send_counts():
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1607,7 +1607,7 @@ def test_host_all_to_all_v_rejects_unbound_distributed_input():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1616,11 +1616,11 @@ def test_host_all_to_all_v_rejects_unbound_distributed_input():
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1644,7 +1644,7 @@ def test_host_all_to_all_v_rejects_unbound_distributed_send_counts():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1653,11 +1653,11 @@ def test_host_all_to_all_v_rejects_unbound_distributed_send_counts():
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1688,7 +1688,10 @@ def test_host_all_to_all_v_rejects_aliased_signal_recv_counts():
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            # signal_buf is sized for both the [4, 1] signal view and the
+            # [4, 24] recv view, so the test exercises aliasing alone, not a
+            # view-vs-buffer footprint check.
+            signal_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
@@ -1697,7 +1700,7 @@ def test_host_all_to_all_v_rejects_aliased_signal_recv_counts():
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, device=r)
             # recv_counts aliases signal's own window buffer.
-            recv = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(signal_buf, [4, 24], dtype=pl.INT32)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
             return 0
 
@@ -1726,11 +1729,11 @@ def test_host_all_to_all_v_rejects_aliased_send_counts_recv_counts():
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, recv, device=r)
             # send_counts aliases recv_counts's own window buffer.
@@ -1757,7 +1760,7 @@ def test_host_all_to_all_v_rejects_aliased_input_signal_windows():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1768,13 +1771,13 @@ def test_host_all_to_all_v_rejects_aliased_input_signal_windows():
             signal_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             # input aliases signal's own window buffer.
             inp = pld.window(signal_buf, [8, 256], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
@@ -1799,14 +1802,14 @@ def test_host_all_to_all_v_rejects_aliased_target_recv_counts_windows():
             data: pld.DistributedTensor[[8, 256], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self):
             input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
@@ -1814,7 +1817,7 @@ def test_host_all_to_all_v_rejects_aliased_target_recv_counts_windows():
             data = pld.window(recv_buf, [8, 256], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)

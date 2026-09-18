@@ -54,6 +54,14 @@ namespace ir {
 
 namespace {
 
+// The all_to_all_v counts exchange gives every source its own 96-byte row of the
+// window-bound recv_counts tensor: column 0 carries the count delivered to the
+// reader, columns [1, 1+nranks) are the source's published send vector (valid in
+// the source's own window only). Padding rows to whole 32-byte TLOAD units keeps
+// two sources off one cache line. MUST match kRowInts in
+// python/pypto/runtime/builtins/collectives/all_to_all_v/templates/kernel.cpp.in
+constexpr int64_t kAllToAllVCountRowInts = 24;
+
 void CheckSumReduceOp(int op_value, const std::string& op_name) {
   CHECK(op_value == static_cast<int>(ReduceOp::kSum))
       << op_name << " op must be ReduceOp.Sum (got int " << op_value << ")";
@@ -738,24 +746,30 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << "pld.tensor.all_to_all_v send_counts dim 0 (" << counts_dim0->value_
       << ") must equal signal dim 0 (NR = " << signal_dim0->value_ << ")";
 
-  // recv_counts: window where each peer publishes how many rows it sent to me
-  // (MPI_Alltoallv recvcounts).  Same 2D [NR, 1] INT32 layout as ``signal`` —
-  // published via ``pld.system.notify`` (Set) as ``min(send_counts[dest],
-  // MAX_RECV)`` into ``recv_counts[my_rank, 0]``.  After the barrier the
-  // receiver reads ``recv_counts[src, 0]`` to skip the unwritten holes at the
-  // tail of each source's MAX_RECV slot.
+  // recv_counts: the counts EXCHANGE, one 96-byte (24 x INT32) row per source
+  // (MPI_Alltoallv recvcounts).  Row r belongs to rank r: columns [1, 1+NR)
+  // hold r's per-destination send vector — valid in r's OWN window only — and
+  // column 0 receives the count delivered to the reader.  The row is a whole
+  // number of 32-byte TLOAD units AND wider than one 64-byte cache line, so no
+  // two sources' counts can share a line.  The hand-written builtin kernel
+  // (HOST/L2 rails) writes its send vector into its own row and each rank
+  // PULLS the rows it needs from their owners, storing the delivered count in
+  // column 0 - the column consumers read.  No rank writes into another rank's
+  // array.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
   CHECK(recv_type->dtype_ == DataType::INT32)
       << "pld.tensor.all_to_all_v recv_counts must have INT32 element type, got dtype "
       << recv_type->dtype_.ToString();
-  CHECK(recv_type->shape_.size() == 2) << "pld.tensor.all_to_all_v recv_counts must be 2D [NR, 1], got "
-                                       << recv_type->shape_.size() << " dims";
+  CHECK(recv_type->shape_.size() == 2)
+      << "pld.tensor.all_to_all_v recv_counts must be 2D [NR, " << kAllToAllVCountRowInts << "], got "
+      << recv_type->shape_.size() << " dims";
   {
     auto recv_dim1 = As<ConstInt>(recv_type->shape_[1]);
-    CHECK(recv_dim1 && recv_dim1->value_ == 1)
-        << "pld.tensor.all_to_all_v recv_counts second dimension must be 1, got "
+    CHECK(recv_dim1 && recv_dim1->value_ == kAllToAllVCountRowInts)
+        << "pld.tensor.all_to_all_v recv_counts second dimension must be " << kAllToAllVCountRowInts
+        << " (the counts-exchange row: column 0 is the delivered count), got "
         << (recv_dim1 ? std::to_string(recv_dim1->value_) : "<dynamic>");
   }
   auto recv_dim0 = As<ConstInt>(recv_type->shape_[0]);
@@ -789,10 +803,13 @@ REGISTER_OP("pld.tensor.all_to_all_v")
         "the sender's surplus.  Those bytes are UNINITIALISED and may decode as "
         "NaN/Inf, unlike the finite FP32 surplus the old full-capacity push left "
         "there: trim to ``recv_counts`` BEFORE computing over the capacity "
-        "block, or NaN propagates into otherwise-valid rows.  During the same push phase "
-        "each rank publishes that same clamped count into peer ``dest``'s "
-        "``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set) — the "
-        "receive-side count vector (MPI_Alltoallv recvcounts) identifying how "
+        "block, or NaN propagates into otherwise-valid rows.  The counts ride a separate "
+        "2D [NR, 24] INT32 exchange whose rows are wider than one 64 B cache line, one "
+        "row per source: the composite rail pushes the clamped count into peer "
+        "``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set), while "
+        "the hand-written builtin kernel writes its send vector into its own row and "
+        "pulls its peers' rows — either way the receive-side count vector "
+        "(MPI_Alltoallv recvcounts) lands in ``recv_counts[src, 0]``, identifying how "
         "many rows are logically valid, so the receiver skips the rest.  "
         "Returns the target window so the caller can read back via "
         "``tile.load`` — same pattern as the symmetric "
@@ -809,7 +826,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
                   "INT32 Tensor [NR] or [NR, 1] — rows to send to each destination, read at "
                   "runtime and clamped to MAX_RECV (Input)")
     .add_argument("recv_counts",
-                  "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
+                  "Window-bound INT32 DistributedTensor [NR, 24] — the counts exchange: row r holds "
+                  "rank r's per-destination send vector (columns [1, 1+NR), valid in r's own window) "
+                  "and column 0 receives the count delivered to the reader, so after the barrier "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
     .set_attr<int>("core_num")
     .no_memory_spec()
@@ -1292,17 +1311,20 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << kOpName << " send_counts dim 0 (" << counts_dim0->value_
       << ") must equal signal dim 0 (NR = " << signal_dim0->value_ << ")";
 
+  // recv_counts: the [NR, 24] counts-exchange row shared with
+  // pld.tensor.all_to_all_v - see the layout note in DeduceTensorAllToAllVType.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << kOpName << " recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
   CHECK(recv_type->dtype_ == DataType::INT32)
       << kOpName << " recv_counts must have INT32 element type, got dtype " << recv_type->dtype_.ToString();
-  CHECK(recv_type->shape_.size() == 2)
-      << kOpName << " recv_counts must be 2D [NR, 1], got " << recv_type->shape_.size() << " dims";
+  CHECK(recv_type->shape_.size() == 2) << kOpName << " recv_counts must be 2D [NR, " << kAllToAllVCountRowInts
+                                       << "], got " << recv_type->shape_.size() << " dims";
   {
     auto recv_dim1 = As<ConstInt>(recv_type->shape_[1]);
-    CHECK(recv_dim1 && recv_dim1->value_ == 1)
-        << kOpName << " recv_counts second dimension must be 1, got "
+    CHECK(recv_dim1 && recv_dim1->value_ == kAllToAllVCountRowInts)
+        << kOpName << " recv_counts second dimension must be " << kAllToAllVCountRowInts
+        << " (the counts-exchange row: column 0 is the delivered count), got "
         << (recv_dim1 ? std::to_string(recv_dim1->value_) : "<dynamic>");
   }
   auto recv_dim0 = As<ConstInt>(recv_type->shape_[0]);
@@ -1337,7 +1359,9 @@ REGISTER_OP("builtin.tensor.all_to_all_v")
                   "destination, read at runtime and clamped to MAX_RECV (Input, LOCAL only, never "
                   "cross-rank-published)")
     .add_argument("recv_counts",
-                  "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
+                  "Window-bound INT32 DistributedTensor [NR, 24] — the counts exchange: row r holds "
+                  "rank r's per-destination send vector (columns [1, 1+NR), valid in r's own window) "
+                  "and column 0 receives the count delivered to the reader, so after the barrier "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
     .set_attr<DataType>("dtype")
     .no_memory_spec()

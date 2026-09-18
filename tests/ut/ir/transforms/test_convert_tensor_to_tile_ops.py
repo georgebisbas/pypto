@@ -7099,7 +7099,7 @@ class TestWindowSliceIncoreConversion:
                 counts: pl.Tensor[[nr, 1], pl.INT32],
                 target: pld.DistributedTensor[[total, SIZE], pl.FP32],
                 signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-                recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+                recv_counts: pld.DistributedTensor[[nr, 24], pl.INT32],
             ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
                 result = pld.tensor.all_to_all_v(inp, target, signal, counts, recv_counts)  # type: ignore[arg-type]
                 return result

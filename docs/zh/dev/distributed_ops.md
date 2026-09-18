@@ -27,7 +27,7 @@ TPUT/TGET 在该侧只需要一段可读/可写的*本地* GM 区域。窗口绑
 | `pld.tensor.reduce_scatter` | 跨 rank 规约并分散 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.allgather` | 从所有 rank 收集数据到窗口 | `DistributedTensorType`（同 src） | builtin collective |
 | `pld.tensor.all_to_all` | 基于推送的对称个性化交换——每个 rank 通过 `pld.tensor.put`（TPUT）将自己的各目标 block 推送到每个对等方的窗口中，返回窗口作为结果 | `DistributedTensorType`（同 src） | composite / HOST builtin |
-| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），同时通过 `pld.system.notify`（Set）把同一钳制后的计数发布到对端 `recv_counts[my_rank, 0]`，使接收方知道哪些行有效；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
+| `pld.tensor.all_to_all_v` | 变长 all-to-all（MPI_Alltoallv）——按每个目标推送 `clamp(send_counts[dest], 0, MAX_RECV)` 行，写入平面 2D 暂存窗口（传输大小是运行时行数，因此填充不会经过链路），并通过 `recv_counts` 中每个来源一条 24×INT32 宽的交换行交换钳制后的计数（builtin 内核自写本行 + 对端拉取；composite 通路用 `pld.system.notify`（Set）），使接收方知道哪些行有效；返回窗口作为结果（与对称 `all_to_all` 相同的窗口即结果模式） | `DistributedTensorType`（与 target 相同） | composite / HOST builtin / CHIP builtin |
 | `pld.system.notify` | 给 peer 的槽位发信号 | `Unknown`（副作用） | TNOTIFY |
 | `pld.system.wait` | 在自身槽位上阻塞 | `Unknown`（副作用） | TWAIT |
 | `pld.system.defer_wait` | 让本任务的逻辑完成等待本地 counter | `Unknown`（副作用） | Simpler completion runtime（无 PTOAS wait op） |
@@ -361,7 +361,7 @@ pld.tensor.all_to_all_v(
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
 - `signal` — DistributedTensor INT32 `[NR, 1]`（自清理信用屏障；可在多次调用间复用）
 - `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
-- `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
+- `recv_counts` — DistributedTensor INT32 `[NR, 24]`（InOut recvcounts；每来源一条计数交换行，见下文）
 
 `input` 和 `target` 都以扁平元素算术寻址，因此两者都必须是紧凑行主序视图，且必须是
 两个不同的 buffer。HOST / CHIP builtin 通路支持的负载 dtype 为 **FP32 与 INT8**
@@ -373,12 +373,22 @@ shape 更窄的 `valid_shape`，或同一个操作数同时充当两种角色—
 CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的溯源能力，因此互不相同是
 调用方的义务。
 
-`MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
-`[0, MAX_RECV]`，并把**钳制后**的计数通过 `pld.system.notify`（Set）写入对端
-`recv_counts[my_rank, 0]`。推送只传输这么多行——传输形状是运行时的
-`[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。屏障之后接收方用
-`recv_counts[src, 0]` 识别有效行；其容量槽的其余部分根本不会被写入。窗口内存
-不*保证*清零，且可能在同一进程内残留，因此这些未触及的字节是未定义的。
+`MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]` 并钳制到
+`[0, MAX_RECV]`。推送只传输这么多行——传输形状是运行时的
+`[rows, SIZE]`，而非编译期容量——因此填充行不会经过链路。
+
+`recv_counts` 承载计数侧，采用**每来源一条交换行**的布局：第 `r` 行属于 rank
+`r`，其第 `[1, 1+NR)` 列存放它自己的每目标发送向量（仅在其自身窗口中有效），
+第 0 列接收交付给读取方的计数。行宽为 24×INT32（96 B）——是 32 字节 TLOAD 单元的
+整数倍，且宽于一条 64 字节 cache line——因此任意两个来源的计数都不会共享一条
+line（这正是 A2/A3 规则的要求：不同 NPU 并发更新的值必须独占其 line）。手写
+builtin 内核（HOST 与托管 CHIP/L2 通路）只把发送向量写入**自己的**行，从不触碰
+对端数组；每个接收方随后拉取各对端的行，把交付计数写入第 0 列并刷回 GM。InCore
+composite 通路则通过 `pld.system.notify`（Set）把**钳制后**的计数写入对端
+`dest` 的 `recv_counts[my_rank, 0]`——更宽的行同时让这些每来源单元独占 line。
+无论哪条通路，屏障之后接收方都用 `recv_counts[src, 0]` 识别有效行；其容量槽的
+其余部分根本不会被写入。窗口内存不*保证*清零，且可能在同一进程内残留，因此这些
+未触及的字节是未定义的。
 
 > [!WARNING]
 > **先按 `recv_counts` 裁剪，再对容量块做算术运算。**

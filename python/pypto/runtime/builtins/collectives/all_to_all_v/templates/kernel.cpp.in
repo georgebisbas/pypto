@@ -31,6 +31,15 @@ namespace {
 
 static constexpr int64_t kTileCount = 256;
 static constexpr int kMaxSupportedRanks = 16;
+// recv_counts is the counts EXCHANGE, one 96-byte (24 x int32) row per source:
+//   column 0              : count delivered to me from that source (written by
+//                           me, after pulling - see Phase 3)
+//   columns [1, 1+nranks) : the source's published send vector, valid in the
+//                           source's OWN window only
+// Rows are wider than one 64-byte line so no two sources share a line, and
+// 24 x int32 = 96 B is a whole number of 32-byte TLOAD units (a Vec tile's
+// columns must be 32-byte aligned).
+static constexpr int64_t kRowInts = 24;
 
 template <typename T>
 AICORE inline __gm__ T *CommRemotePtr(__gm__ CommContext *ctx, __gm__ T *local_ptr, int pe) {
@@ -110,10 +119,13 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
   using Global = pto::GlobalTensor<{{dtype_cpp}}, ShapeDyn, StrideDyn, pto::Layout::ND>;
+  // The counts exchange is INT32 whatever the payload dtype is.
+  using GlobalI32 = pto::GlobalTensor<int32_t, ShapeDyn, StrideDyn, pto::Layout::ND>;
   using TileData = pto::Tile<pto::TileType::Vec, {{dtype_cpp}}, 1, kTileCount, pto::BLayout::RowMajor, -1, -1>;
 
-  int tile_cols = static_cast<int>(row_numel < kTileCount ? row_numel : kTileCount);
-  TileData send_tile(1, tile_cols);
+  // Staging tile width is kTileCount; TPUT_IMPL chunks larger payloads against
+  // GetValidCol(), so one TPUT per destination is enough (RFC #2521 K1).
+  TileData send_tile(1, kTileCount);
   TASSIGN(send_tile, 0x0);
 
   // ==================================================================
@@ -126,7 +138,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //          MakeMax(MakeMin(cast(count, INDEX), max_recv), 0) exactly, so
   //          HOST and InCore agree bit-for-bit on every input, including a
   //          negative send_counts.
-  //   TNOTIFY(recv_counts[dest]'s window, slot my_rank) = rows  (Set)
+  //   recv_counts[my_rank][1 + dest] = rows   (LOCAL store into MY OWN row)
   //   TPUT input[dest*max_recv : dest*max_recv + rows, :]
   //        -> target[my_rank*max_recv : my_rank*max_recv + rows, :]
   //
@@ -162,31 +174,29 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
     int32_t rows = static_cast<int32_t>(rows64);
 
-    __gm__ int32_t *remote_recv_slot = CommRemotePtr(comm_ctx, recv_counts_base + my_rank, dest);
-    pto::comm::Signal count_sig(remote_recv_slot);
-    pto::comm::TNOTIFY(count_sig, rows, pto::comm::NotifyOp::Set);
+    // Publish MY send vector into MY OWN window row (row my_rank, columns
+    // [1, 1+nranks)). This is a plain local store: no rank ever writes into
+    // another rank's array, so the counts exchange cannot hit the A2/A3
+    // "signals concurrently updated by different NPUs must own a 64 B line"
+    // hazard. Peers pull this row in Phase 3.
+    recv_counts_base[static_cast<int64_t>(my_rank) * kRowInts + 1 + dest] = rows;
 
     int64_t src_row_offset = static_cast<int64_t>(dest) * max_recv * row_numel;
     int64_t dst_row_offset = static_cast<int64_t>(my_rank) * max_recv * row_numel;
     __gm__ {{dtype_cpp}} *remote_block = CommRemotePtr(comm_ctx, target + dst_row_offset, dest);
 
-    // The pushed block [rows, SIZE] is contiguous in the dense row-major
-    // [NR*max_recv, SIZE] layout, so it is flattened into one 1D-chunked TPUT
-    // loop (same tiling shape as symmetric all_to_all's single-row loop,
-    // generalized to rows*row_numel elements). rows == 0 makes block_numel 0
-    // and the loop below simply does not execute, so no TPUT is issued for a
-    // destination getting nothing — matching the InCore rail's rows > 0 guard.
+    // K1: ONE TPUT per destination. TPUT_IMPL re-chunks the flat [rows * SIZE]
+    // block internally against the staging tile, so there is no caller-managed
+    // per-chunk loop and no pipe_barrier pair per chunk. rows == 0 issues no
+    // TPUT at all, matching the InCore rail's rows > 0 guard.
     int64_t block_numel = rows64 * row_numel;
-    for (int64_t base = 0; base < block_numel; base += tile_cols) {
-      int64_t chunk64 = block_numel - base;
-      if (chunk64 > tile_cols) chunk64 = tile_cols;
-      int chunk = static_cast<int>(chunk64);
-      send_tile.ColMaskInternal = chunk;
+    if (block_numel > 0) {
+      send_tile.ColMaskInternal = static_cast<int>(block_numel <= kTileCount ? block_numel : kTileCount);
 
-      ShapeDyn shape(1, 1, 1, 1, chunk);
-      StrideDyn stride(chunk, chunk, chunk, chunk, 1);
-      Global src_g(input_local + src_row_offset + base, shape, stride);
-      Global dst_g(remote_block + base, shape, stride);
+      ShapeDyn shape(1, 1, 1, 1, block_numel);
+      StrideDyn stride(block_numel, block_numel, block_numel, block_numel, 1);
+      Global src_g(input_local + src_row_offset, shape, stride);
+      Global dst_g(remote_block, shape, stride);
 
       pipe_barrier(PIPE_ALL);
       pto::comm::TPUT(dst_g, src_g, send_tile);
@@ -195,9 +205,15 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   }
 
   // ==================================================================
-  // Phase 2: barrier — notify peers and wait for all (NotifyOp::AtomicAdd).
+  // Phase 2: barrier - notify peers and wait for all (NotifyOp::AtomicAdd).
+  // The published row is flushed first: it was written with scalar stores, so
+  // it has to reach GM before any peer's TLOAD can see it.
   // ==================================================================
   pipe_barrier(PIPE_ALL);
+  __asm__ __volatile__("");
+  dcci(static_cast<__gm__ void *>(recv_counts_base + static_cast<int64_t>(my_rank) * kRowInts),
+       cache_line_t::SINGLE_CACHE_LINE);
+  __asm__ __volatile__("");
   dsb(DSB_DDR);
   for (int peer = 0; peer < nranks; ++peer) {
     if (peer == my_rank) continue;
@@ -219,6 +235,50 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (peer == my_rank) continue;
     pto::comm::Signal self_sig(signal_base + peer);
     pto::comm::TNOTIFY(self_sig, static_cast<int32_t>(-1), pto::comm::NotifyOp::AtomicAdd);
+  }
+
+  // ==================================================================
+  // Phase 3: pull. The barrier above guarantees every rank has published its
+  // row and flushed it. Each rank now reads the rows it needs FROM THEIR
+  // OWNERS' windows (bulk TLOAD of the peer-mapped row) and keeps the column
+  // that belongs to it, then stores the delivered count locally in column 0 of
+  // the matching row - the column consumers read. Counts therefore travel by
+  // pull only: no rank writes into another rank's array.
+  // ==================================================================
+  {
+    using PullTile = pto::Tile<pto::TileType::Vec, int32_t, 1, kRowInts, pto::BLayout::RowMajor, -1, -1>;
+    PullTile pull_tile(1, static_cast<int>(kRowInts));
+    TASSIGN(pull_tile, 0x10000);
+
+    const int64_t my_row = static_cast<int64_t>(my_rank) * kRowInts;
+    // Self: my own published send vector is already in my row.
+    recv_counts_base[my_row] = recv_counts_base[my_row + 1 + my_rank];
+
+    for (int src = 0; src < nranks; ++src) {
+      if (src == my_rank) continue;
+      __gm__ int32_t *remote_row =
+          CommRemotePtr(comm_ctx, recv_counts_base + static_cast<int64_t>(src) * kRowInts, src);
+      ShapeDyn rshape(1, 1, 1, 1, kRowInts);
+      StrideDyn rstride(kRowInts, kRowInts, kRowInts, kRowInts, 1);
+      GlobalI32 remote_g(remote_row, rshape, rstride);
+      TLOAD(pull_tile, remote_g);
+      pipe_barrier(PIPE_ALL);
+      recv_counts_base[static_cast<int64_t>(src) * kRowInts] =
+          pull_tile.GetValue(static_cast<uint32_t>(1 + my_rank));
+    }
+
+    // The delivered counts above are plain scalar stores. Flush every row to GM:
+    // a consumer on another AIV invalidates and re-reads the window, so a value
+    // left sitting in this core's cache would read back as stale zero. (The old
+    // push design flushed implicitly - TNOTIFY ends in dcci + dsb.)
+    for (int src = 0; src < nranks; ++src) {
+      __asm__ __volatile__("");
+      dcci(static_cast<__gm__ void *>(recv_counts_base + static_cast<int64_t>(src) * kRowInts),
+           cache_line_t::SINGLE_CACHE_LINE);
+      __asm__ __volatile__("");
+    }
+    dsb(DSB_DDR);
+    pipe_barrier(PIPE_ALL);
   }
   pipe_barrier(PIPE_ALL);
 }

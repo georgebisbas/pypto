@@ -19,10 +19,11 @@ The intrinsic takes five arguments with flat 2D layouts for ptoas compatibility:
   - ``signal`` (DistributedTensor INT32 [NR, 1]) — barrier
   - ``send_counts`` (Tensor INT32 [NR, 1]) — rows to send to each destination,
     read at runtime and clamped to MAX_RECV
-  - ``recv_counts`` (DistributedTensor INT32 [NR, 1]) — after the barrier,
-    ``recv_counts[src, 0]`` holds how many rows ``src`` sent here (MPI_Alltoallv
-    recvcounts, published via ``pld.system.notify``), so the receiver can skip
-    unwritten holes without hardcoding
+  - ``recv_counts`` (DistributedTensor INT32 [NR, 24]) — the counts exchange,
+    one 96-byte row per source: after the barrier ``recv_counts[src, 0]`` holds
+    how many rows ``src`` sent here (MPI_Alltoallv recvcounts, published via
+    ``pld.system.notify``), so the receiver can skip unwritten holes without
+    hardcoding
 
 Window-as-result pattern: the intrinsic returns the target window, and the caller
 reads back with ``pl.load`` — exactly the same pattern as the symmetric
@@ -72,7 +73,7 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int, size: int = SIZE):
         recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
     ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
         """Push variable rows per peer, then read the window via published counts."""
         result = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
@@ -106,7 +107,7 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int, size: int = SIZE):
         recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
         signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
     ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
         return exchange_step(inp, counts, out, recv_out, data, signal, recv_counts)
 
@@ -119,12 +120,12 @@ def _build_all_to_all_v_program(n_ranks: int, max_recv: int, size: int = SIZE):
     ) -> tuple[pl.Tensor[[nr, total, SIZE], pl.FP32], pl.Tensor[[nr, nr, 1], pl.INT32]]:
         data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
         signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
-        recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+        recv_buf = pld.alloc_window_buffer(nr * 24 * pl.INT32.get_byte())
 
         for r in pl.range(pld.world_size()):
             data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
             sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 24], dtype=pl.INT32)
             chip_orch(
                 inputs[r],
                 send_counts[r],

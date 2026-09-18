@@ -777,7 +777,7 @@ def _build_all_to_all_v_before(size: int = _AAV_SIZE):
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
         ) -> pl.Tensor[[total, SIZE], pl.FP32]:
             result = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
             row = pl.load(result, [0, 0], [1, SIZE])
@@ -981,7 +981,7 @@ def test_all_to_all_v_in_host_orchestrator_is_left_for_host_collective_lowering(
             counts: pl.Tensor[[nr, 1], pl.INT32],
             data: pld.DistributedTensor[[total, SIZE], pl.FP32],
             signal: pld.DistributedTensor[[nr, 1], pl.INT32],
-            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            recv_counts: pld.DistributedTensor[[nr, 24], pl.INT32],
         ):
             data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)  # type: ignore[arg-type]
             return 0
@@ -1014,7 +1014,7 @@ def test_all_to_all_v_in_chip_orchestrator_is_left_for_l2_collective_lowering():
             counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
             return pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
 
@@ -1046,7 +1046,7 @@ def test_incore_all_to_all_v_rejects_multi_core_request():
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
         ) -> pl.Tensor[[total, SIZE], pl.FP32]:
             result = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts, core_num=4)
             row = pl.load(result, [0, 0], [1, SIZE])
@@ -1201,7 +1201,7 @@ def test_all_to_all_v_in_for_loop_now_succeeds():
             counts: pl.Tensor[[nr, 1], pl.INT32],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
             for _ in pl.range(2):
                 data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)
@@ -1225,7 +1225,7 @@ def test_all_to_all_v_in_while_loop_now_succeeds():
             counts: pl.Tensor[[nr, 1], pl.INT32],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv_counts: pl.InOut[pld.DistributedTensor[[nr, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[total, SIZE], pl.FP32]:
             while True:
                 data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv_counts)

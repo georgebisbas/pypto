@@ -122,7 +122,9 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
         def consume_step(
             self,
             data: pld.DistributedTensor[[total, SIZE], pl.FP32],
-            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            # Counts exchange row: 24 x INT32 (96 B, one row per source);
+            # column 0 is the delivered count the consumer reads.
+            recv_counts: pld.DistributedTensor[[nr, 24], pl.INT32],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
@@ -154,7 +156,7 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
         def consume_orch(
             self,
             data: pld.DistributedTensor[[total, SIZE], pl.FP32],
-            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            recv_counts: pld.DistributedTensor[[nr, 24], pl.INT32],
             out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
@@ -172,7 +174,7 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(nr * 24 * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
                 stage = pld.window(input_buf, [total, SIZE], dtype=pl.FP32)
@@ -186,7 +188,7 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
             data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
             signal = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 24], dtype=pl.INT32)
             data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
 
             for r in pl.range(pld.world_size()):

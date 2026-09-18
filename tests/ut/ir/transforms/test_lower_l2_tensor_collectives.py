@@ -70,7 +70,7 @@ def _build_program(core_num: int = 1):
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pl.Tensor[[TOTAL, SIZE], pl.FP32]:
             stage = self.stage_step(inp, stage)
             data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
@@ -180,11 +180,11 @@ def test_one_kernel_is_shared_by_repeated_calls():
             data_a: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal_a: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts_a: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv_a: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv_a: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
             data_b: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal_b: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts_b: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv_b: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv_b: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             data_a = pld.tensor.all_to_all_v(stage, data_a, signal_a, counts_a, recv_a)
             data_b = pld.tensor.all_to_all_v(data_a, data_b, signal_b, counts_b, recv_b)
@@ -215,7 +215,7 @@ def test_collective_embedded_in_a_return_is_lowered():
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
 
@@ -239,7 +239,7 @@ def test_incore_collective_is_left_alone():
             counts: pl.Tensor[[NR, 1], pl.INT32],
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             return pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
 
@@ -273,7 +273,7 @@ def test_kernel_signature_is_canonical_not_call_site_typed():
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
 
@@ -310,7 +310,7 @@ def test_collective_in_a_graph_body_is_lowered():
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.FP32]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
 
@@ -364,7 +364,7 @@ def test_int8_synthesizes_int8_variant():
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], pl.INT8]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], pl.INT8]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv)
 

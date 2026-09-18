@@ -86,6 +86,8 @@ def _build_chip_rail_program(dtype_name: str = "fp32"):
     dtype = _dtype_of(dtype_name)
     payload_bytes = TOTAL * SIZE * dtype.get_byte()
     i32_bytes = NR * pl.INT32.get_byte()
+    # recv_counts is the [NR, 24] counts exchange: a 96-byte row per source.
+    recv_bytes = NR * 24 * pl.INT32.get_byte()
 
     @pl.program
     class ChipRail:
@@ -96,7 +98,7 @@ def _build_chip_rail_program(dtype_name: str = "fp32"):
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
             return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=1)
 
@@ -106,14 +108,14 @@ def _build_chip_rail_program(dtype_name: str = "fp32"):
             data_buf = pld.alloc_window_buffer(payload_bytes)
             signal_buf = pld.alloc_window_buffer(i32_bytes)
             counts_buf = pld.alloc_window_buffer(i32_bytes)
-            recv_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(recv_bytes)
 
             for r in pl.range(pld.world_size()):
                 stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
                 data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
                 sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
-                recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [NR, 24], dtype=pl.INT32)
                 self.chip_pipeline(stage, data, sig, counts, recv, device=r)
 
     return ChipRail
@@ -131,6 +133,8 @@ def _build_host_rail_program(dtype_name: str = "fp32"):
     dtype = _dtype_of(dtype_name)
     payload_bytes = TOTAL * SIZE * dtype.get_byte()
     i32_bytes = NR * pl.INT32.get_byte()
+    # recv_counts is the [NR, 24] counts exchange: a 96-byte row per source.
+    recv_bytes = NR * 24 * pl.INT32.get_byte()
 
     @pl.program
     class HostRail:
@@ -141,7 +145,7 @@ def _build_host_rail_program(dtype_name: str = "fp32"):
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[NR, 1], pl.INT32]:
             """Touch every window, so each one has an inferable comm domain."""
             row = pl.load(stage, [0, 0], [1, SIZE])
@@ -162,7 +166,7 @@ def _build_host_rail_program(dtype_name: str = "fp32"):
             data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
-            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 24], pl.INT32]],
         ) -> pld.DistributedTensor[[NR, 1], pl.INT32]:
             return self.touch_step(stage, data, signal, counts, recv)
 
@@ -172,20 +176,20 @@ def _build_host_rail_program(dtype_name: str = "fp32"):
             data_buf = pld.alloc_window_buffer(payload_bytes)
             signal_buf = pld.alloc_window_buffer(i32_bytes)
             counts_buf = pld.alloc_window_buffer(i32_bytes)
-            recv_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(recv_bytes)
 
             stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
             data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
             sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [NR, 24], dtype=pl.INT32)
 
             for r in pl.range(pld.world_size()):
                 r_stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
                 r_data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
                 r_sig = pld.window(signal_buf, [NR, 1], dtype=pl.INT32)
                 r_counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
-                r_recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+                r_recv = pld.window(recv_buf, [NR, 24], dtype=pl.INT32)
                 self.touch_orch(r_stage, r_data, r_sig, r_counts, r_recv, device=r)
 
             pld.tensor.all_to_all_v(stage, data, sig, counts, recv)

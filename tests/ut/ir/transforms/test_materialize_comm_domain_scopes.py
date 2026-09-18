@@ -1286,14 +1286,14 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, counts, device=r)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
             return 0
 
@@ -1309,7 +1309,7 @@ def test_all_to_all_v_signal_and_recv_counts_inherit_data_comm_domain():
             _expected_slot("data_buf", _mul(8 * 64, 4)),
             _expected_slot("signal_buf", _mul(4, 4)),
             _expected_slot("counts_buf", _mul(4, 4)),
-            _expected_slot("recv_buf", _mul(4, 4)),
+            _expected_slot("recv_buf", _mul(4 * 24, 4)),
         ],
     )
 
@@ -1324,7 +1324,7 @@ def test_all_to_all_v_in_loop_is_rejected():
             data: pld.DistributedTensor[[8, 64], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1334,12 +1334,12 @@ def test_all_to_all_v_in_loop_is_rejected():
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             for _ in pl.range(2):
@@ -1360,7 +1360,7 @@ def test_all_to_all_v_in_while_loop_is_rejected():
             data: pld.DistributedTensor[[8, 64], pl.FP32],
             sig: pld.DistributedTensor[[4, 1], pl.INT32],
             counts: pld.DistributedTensor[[4, 1], pl.INT32],
-            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 24], pl.INT32],
         ):
             return data
 
@@ -1370,12 +1370,12 @@ def test_all_to_all_v_in_while_loop_is_rejected():
             data_buf = pld.alloc_window_buffer(8 * 64 * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
             counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
-            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * 24 * pl.INT32.get_byte())
             inp = pld.window(input_buf, [8, 64], dtype=pl.FP32)
             data = pld.window(data_buf, [8, 64], dtype=pl.FP32)
             signal = pld.window(signal_buf, [4, 1], dtype=pl.INT32)
             counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
-            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 24], dtype=pl.INT32)
             for r in pl.range(pld.world_size()):
                 self.chip_orch(inp, data, signal, counts, recv, device=r)
             while True:
