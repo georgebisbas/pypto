@@ -353,6 +353,17 @@ class DispatchAnalyzer : public IRVisitor {
     return window->alloc;
   }
 
+  // Nullable variant of ResolveWindowAlloc for operands that are window-bound
+  // on the builtin rails but may legally stay plain Tensors on the InCore
+  // composite rail (send_counts today): returns nullptr instead of failing
+  // when the expression is not a pld.tensor.window view.
+  [[nodiscard]] AllocRecord* TryResolveWindowAlloc(const ExprPtr& expr) {
+    auto view_var = AsVarLike(expr);
+    if (!view_var) return nullptr;
+    auto window = ResolveWindowRecord(view_var);
+    return window ? window->alloc : nullptr;
+  }
+
   void AnalyzeCollective(const CallPtr& op) {
     if (!op || !op->op_) return;
 
@@ -410,9 +421,12 @@ class DispatchAnalyzer : public IRVisitor {
       // args[0] = input        (window-bound on HOST path; distinct from target)
       // args[1] = target       (DistributedTensor, window-bound, window-as-result)
       // args[2] = signal       (DistributedTensor, window-bound, barrier)
-      // args[3] = send_counts  (window-bound on HOST path; LOCAL only, never
-      //                          cross-rank-notified — no consumer entry,
-      //                          same rationale as `input` above)
+      // args[3] = send_counts  (window-bound on the builtin rails; peers READ
+      //                          it remotely via the counts pull, so — like
+      //                          `signal` and `recv_counts` — it inherits
+      //                          target's device coverage; conditional,
+      //                          because the InCore composite rail may pass a
+      //                          plain Tensor, written locally only)
       // args[4] = recv_counts  (DistributedTensor, window-bound; published
       //                          cross-rank via notify, so needs target's
       //                          device coverage exactly like `signal` does)
@@ -432,11 +446,14 @@ class DispatchAnalyzer : public IRVisitor {
       auto* data_alloc = ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all_v", "target");
       auto* signal_alloc = ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all_v", "signal");
       auto* recv_counts_alloc = ResolveWindowAlloc(op->args_[4], "pld.tensor.all_to_all_v", "recv_counts");
-      // Two consumer entries sharing the same data_alloc: both signal and
-      // recv_counts need to inherit target's device coverage (Phase 3 loop
-      // below merges generically per entry).
+      // Consumer entries sharing the same data_alloc: signal, recv_counts and
+      // (when window-bound) send_counts inherit target's device coverage
+      // (Phase 3 loop below merges generically per entry).
       collective_consumers.push_back({data_alloc, signal_alloc, op->span_});
       collective_consumers.push_back({data_alloc, recv_counts_alloc, op->span_});
+      if (auto* send_counts_alloc = TryResolveWindowAlloc(op->args_[3])) {
+        collective_consumers.push_back({data_alloc, send_counts_alloc, op->span_});
+      }
       return;
     }
   }
