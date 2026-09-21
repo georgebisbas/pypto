@@ -816,7 +816,10 @@ REGISTER_OP("pld.tensor.all_to_all_v")
                   "reset); calls inside for/while loops are not supported yet")
     .add_argument("send_counts",
                   "INT32 Tensor [NR] or [NR, 1] — rows to send to each destination, read at "
-                  "runtime and clamped to MAX_RECV (Input)")
+                  "runtime and clamped to MAX_RECV (Input). On the HOST/CHIP builtin rails it "
+                  "must be a window-bound DistributedTensor (peers read this rank's entry "
+                  "through CommRemotePtr); a plain Tensor is accepted only on the InCore "
+                  "composite rail")
     .add_argument("recv_counts",
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")

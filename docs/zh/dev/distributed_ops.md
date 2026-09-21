@@ -366,7 +366,10 @@ pld.tensor.all_to_all_v(
 - `input` — Tensor 或 DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]`（窗口即结果）
 - `signal` — DistributedTensor INT32 `[NR, 1]`（信用式两轮屏障；可在连续多次调用间复用——初始化一次置零，切勿重置）
-- `send_counts` — Tensor-like INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）
+- `send_counts` — INT32 `[NR]` 或 `[NR, 1]`（运行时每目标行数）。在 HOST/CHIP
+builtin 通路上必须是窗口绑定的 `DistributedTensor`（每个对端通过
+`CommRemotePtr` 读取本 rank 的条目）；纯 `Tensor` 仅在 InCore composite
+通路上被接受
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]`（InOut recvcounts）
 
 `input` 和 `target` 都以扁平元素算术寻址，因此两者都必须是紧凑行主序视图，且必须是

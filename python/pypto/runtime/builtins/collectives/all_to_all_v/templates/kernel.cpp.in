@@ -246,7 +246,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int64_t rows64 = static_cast<int64_t>(raw_count);
     if (rows64 > max_recv) rows64 = max_recv;
     if (rows64 < 0) rows64 = 0;
-    int32_t rows = static_cast<int32_t>(rows64);
 
     int64_t src_row_offset = static_cast<int64_t>(dest) * max_recv * row_numel;
     int64_t dst_row_offset = static_cast<int64_t>(my_rank) * max_recv * row_numel;

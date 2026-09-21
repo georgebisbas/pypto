@@ -418,7 +418,10 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 - `input` — Tensor or DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
 - `signal` — DistributedTensor INT32 `[NR, 1]` (credit-based two-round barrier; reusable across consecutive calls — zero-init once, never reset)
-- `send_counts` — Tensor-like INT32 `[NR]` or `[NR, 1]` (runtime rows per dest)
+- `send_counts` — INT32 `[NR]` or `[NR, 1]` (runtime rows per dest). On the
+HOST/CHIP builtin rails it must be a window-bound `DistributedTensor` (each
+peer reads this rank's entry through `CommRemotePtr`); a plain `Tensor` is
+accepted only on the InCore composite rail
 - `recv_counts` — DistributedTensor INT32 `[NR, 1]` (InOut recvcounts)
 
 `input` and `target` are addressed by flat element arithmetic, so both must be
