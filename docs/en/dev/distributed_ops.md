@@ -409,7 +409,7 @@ keyword attributes.
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts, *, core_num: int = 1
+    input, target, signal, send_counts, recv_counts, core_num: int | Scalar[INDEX] = 1
 ) -> DistributedTensorType(target)
 ```
 
@@ -417,7 +417,13 @@ Variable-size all-to-all (MPI_Alltoallv). Flat 2D layouts:
 
 - `input` — Tensor or DistributedTensor `[NR*MAX_RECV, SIZE]`
 - `target` — DistributedTensor `[NR*MAX_RECV, SIZE]` (window-as-result)
-- `signal` — DistributedTensor INT32 `[NR, 1]` (credit-based two-round barrier; reusable across consecutive calls — zero-init once, never reset)
+- `signal` — DistributedTensor INT32 `[NR, S]` (credit-based two-round barrier;
+reusable across consecutive calls — zero-init once, never reset). Any positive
+compile-time `S` is accepted. `S` is the per-block lane count of the block-aware
+barrier (RFC #2521 K2): each admitted block owns the private lane
+`peer * S + block_idx`, so the barrier supports any launch width up to `S`.
+Counts never ride the signal — they are pulled from the `send_counts` windows —
+so no lane is reserved for them
 - `send_counts` — INT32 `[NR]` or `[NR, 1]` (runtime rows per dest). On the
 HOST/CHIP builtin rails it must be a window-bound `DistributedTensor` (each
 peer reads this rank's entry through `CommRemotePtr`); a plain `Tensor` is
@@ -488,10 +494,18 @@ actually running. Both rails apply the identical two-sided clamp and the same
 **InCore composite** (`LowerCompositeOps`): the primitive above, decomposed
 into `pld.tile.put` + `pld.system.notify`/`wait` inside a chip kernel.
 
-`core_num` is the requested AIV block limit. Every rail is single-block today,
-so only `core_num=1` is accepted; the parameter exists because the managed CHIP
-rail is where a multi-AIV launch will land. The InCore rail rejects anything
-else outright, naming the CHIP rail in the diagnostic.
+`core_num` is the requested AIV block limit `L` — a maximum, not a promise: the
+admitted block count `B` is `L` rounded down to a multiple of the rank count
+(`cal_all_to_all_v_blocks(L, NR)`). It is a genuine dynamic argument
+(`int | Scalar[INDEX]`, mirroring `pld.tensor.remote_store`'s `peer` parameter)
+on the HOST rail, but that mapping is not applied at the HOST entry yet: every
+rail is still single-block today, so only `core_num=1` is accepted at each of
+the InCore, HOST, and CHIP gates. Lifting the HOST gate to admit `core_num>1` is
+RFC #2521 work item K2's own follow-up PR in this same stack. The InCore rail rejects anything else outright, naming the CHIP rail in
+the diagnostic. The CHIP/L2 rail (below) is deliberately left gated at
+`core_num=1` even once the HOST gate lifts — wiring a genuine multi-block
+launch into the L2-managed path is a separate, not-yet-started roadmap item
+(O2), not part of K2.
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
 down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten

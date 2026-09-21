@@ -563,6 +563,15 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
     if (IsOp(call, "pld.tensor.allreduce")) {
       CheckAllReduceSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(),
                                    /*world_size_known=*/true);
+    } else if (IsOp(call, "pld.tensor.all_to_all_v")) {
+      // Signal is [NR, S] for any positive compile-time S (the op deducer
+      // enforces positivity). S must cover this op's admitted block count B,
+      // and B depends on the runtime rank count, so it is not knowable here —
+      // the generic branch below requires exactly one lane, which would reject
+      // every S > 1. Accept any S and let the runtime entry reject an S smaller
+      // than the B it actually admits.
+      CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size(), /*required_lanes=*/1,
+                                /*allow_wider_lanes=*/true);
     } else {
       CheckStaticSignalCapacity(call, rule.signal_expr(call), scope->devices_.size());
     }
@@ -588,6 +597,11 @@ StmtPtr EmitPerDeviceBuiltinCalls(const CallPtr& call, const HostCollectiveRule&
   // checked; pass 0 so only the world-size-independent constraints apply.
   if (IsOp(call, "pld.tensor.allreduce")) {
     CheckAllReduceSignalCapacity(call, rule.signal_expr(call), 0, /*world_size_known=*/false);
+  } else if (IsOp(call, "pld.tensor.all_to_all_v")) {
+    // Same [NR, S] acceptance as the device-list path above: S must cover the
+    // op's admitted block count, which is a runtime value.
+    CheckStaticSignalCapacity(call, rule.signal_expr(call), 0, /*required_lanes=*/1,
+                              /*allow_wider_lanes=*/true);
   } else {
     CheckStaticSignalCapacity(call, rule.signal_expr(call), 0);
   }

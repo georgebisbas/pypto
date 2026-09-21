@@ -1532,6 +1532,65 @@ def test_host_all_to_all_v_lowers_to_namesake_builtin():
     )
 
 
+def test_host_all_to_all_v_accepts_signal_wider_than_one_lane():
+    """Signal may be [NR, S] for any positive compile-time S on the HOST rail.
+
+    The lane count S has to cover this op's admitted block count B, and B comes
+    from the runtime rank count, so no compile-time check can bound it. The
+    device-list and loop paths therefore accept any S and leave the S >= B
+    reject to the runtime entry.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, 256], pl.FP32],
+            data: pld.DistributedTensor[[8, 256], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * 256 * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, 256], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, 256], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 4], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            data = pld.tensor.all_to_all_v(inp, data, signal, counts, recv)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(P)
+    result = passes.lower_host_tensor_collectives()(program)
+    _assert_builtin_dispatch(
+        result,
+        "builtin.tensor.all_to_all_v",
+        arg_names=["inp", "data", "signal", "counts", "recv"],
+        arg_directions=[
+            ir.ArgDirection.Input,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.Input,
+            ir.ArgDirection.InOut,
+            ir.ArgDirection.Input,
+        ],
+        kwargs={"dtype": pl.FP32},
+        attrs={"dtype": pl.FP32},
+        trailing_scalar_const=1,
+    )
+
+
 def test_host_all_to_all_v_rejects_plain_tensor_input():
     """pld.tensor.all_to_all_v's public deducer accepts a plain Tensor for
     `input` (legitimate on the InCore composite path), but the HOST builtin
