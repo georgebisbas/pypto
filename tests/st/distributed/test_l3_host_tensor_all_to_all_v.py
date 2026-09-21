@@ -72,6 +72,11 @@ from pypto.ir import DistributedConfig
 
 SIZE = 64
 MAX_RECV = 4
+# Multi-tile payloads: K1 pushes with ONE TPUT per destination and delegates
+# re-chunking to the intrinsic against the kernel's staging tile, so a case
+# with blocks wider than ``kTileCount`` is needed to catch truncation.
+WIDE_MAX_RECV = 16
+_KTILE_COUNT = 256
 
 
 def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
@@ -274,6 +279,71 @@ class TestL3HostTensorAllToAllV:
                     got_row = outputs[rank, base + k, :]
                     assert torch.allclose(got_row, expected_row, atol=1e-5), (
                         f"P={nr} rank={rank} src={src} row={k}: "
+                        f"max diff = {(got_row - expected_row).abs().max().item()}"
+                    )
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_host_all_to_all_v_blocks_beyond_one_tile(self, test_config, device_ids, n_ranks):
+        """Payload blocks wider than the kernel's one-tile staging window.
+
+        K1 pushes with ONE ``TPUT`` per destination and relies on ``TPUT_IMPL``
+        to re-chunk the flat ``rows * SIZE`` block internally against the
+        staging tile (``kTileCount = 256``). The default cases top out at
+        ``4 * 64 = 256`` elements -- exactly one tile -- so a truncating
+        regression would stay invisible there. ``WIDE_MAX_RECV = 16`` with the
+        counts matrix below yields blocks of 0, 256, 512, 768 and 1024 elements:
+        exact tile multiples and non-multiple tails (e.g. 15 rows = 960
+        elements = 3 tiles + 192) alike.
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"host all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr = n_ranks
+        mr = WIDE_MAX_RECV
+        total = nr * mr
+        counts = [[((r + 2 * d) * 4) % (mr + 1) for d in range(nr)] for r in range(nr)]
+        # The point of this case: at least one transfer must exceed one tile.
+        assert any(counts[r][d] * SIZE > _KTILE_COUNT for r in range(nr) for d in range(nr))
+
+        compiled = ir.compile(
+            _build_host_all_to_all_v_program(nr, mr),
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:nr],
+                num_sub_workers=0,
+            ),
+        )
+
+        # Same payload formula as the default case; blocks up to 15 rows.
+        inputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        send_counts = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        for r in range(nr):
+            for d in range(nr):
+                n_rows = counts[r][d]
+                send_counts[r, d, 0] = n_rows
+                base = d * mr
+                for k in range(n_rows):
+                    for j in range(SIZE):
+                        inputs[r, base + k, j] = float(r * 1000 + d * 100 + k * 10 + j % 10)
+
+        outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        compiled(inputs, send_counts, outputs, recv_outputs)
+
+        for rank in range(nr):
+            for src in range(nr):
+                n_rows = counts[src][rank]
+                assert int(recv_outputs[rank, src, 0].item()) == n_rows, (
+                    f"P={nr} rank={rank} src={src}: recv_counts="
+                    f"{int(recv_outputs[rank, src, 0].item())} != expected {n_rows}"
+                )
+                base = src * mr
+                for k in range(n_rows):
+                    expected_row = inputs[src, rank * mr + k, :]
+                    got_row = outputs[rank, base + k, :]
+                    assert torch.allclose(got_row, expected_row, atol=1e-5), (
+                        f"P={nr} rank={rank} src={src} row={k} "
+                        f"({n_rows} rows = {n_rows * SIZE} elements, > one tile): "
                         f"max diff = {(got_row - expected_row).abs().max().item()}"
                     )
 

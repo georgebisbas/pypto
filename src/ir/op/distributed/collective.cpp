@@ -744,10 +744,11 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // skip the unwritten holes at the tail of each source's MAX_RECV slot.  The
   // hand-written builtin kernel fills it by pulling ONE scalar word per peer
   // from that peer's own ``send_counts`` window (non-cacheable ld_dev read,
-  // clamped reader-side); the InCore composite rail keeps publishing it with
-  // ``pld.system.notify`` (Set) as ``clamp(send_counts[dest], 0, MAX_RECV)``
-  // into ``recv_counts[my_rank, 0]``.  Either way no rank writes into another
-  // rank's recv_counts array.
+  // clamped reader-side); only the builtin rails avoid cross-rank writes into
+  // ``recv_counts``.  The InCore composite rail is unchanged by this
+  // redesign: it still publishes ``clamp(send_counts[dest], 0, MAX_RECV)``
+  // with ``pld.system.notify`` (Set) into every peer's
+  // ``recv_counts[my_rank, 0]``, i.e. a cross-rank write.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
