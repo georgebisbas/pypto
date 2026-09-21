@@ -740,13 +740,14 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
 
   // recv_counts: window where this rank stores how many rows each source sent
   // to it (MPI_Alltoallv recvcounts).  Same 2D [NR, 1] INT32 layout as
-  // ``signal``.  After the barrier ``recv_counts[src, 0]`` lets the receiver
+  // ``signal``.  After Barrier A ``recv_counts[src, 0]`` lets the receiver
   // skip the unwritten holes at the tail of each source's MAX_RECV slot.  The
-  // hand-written builtin kernel fills it by PULLING each peer's own
-  // ``send_counts`` window and clamping the value reader-side; the InCore
-  // composite rail keeps publishing it with ``pld.system.notify`` (Set) as
-  // ``min(send_counts[dest], MAX_RECV)`` into ``recv_counts[my_rank, 0]``.
-  // Either way no rank writes into another rank's recv_counts array.
+  // hand-written builtin kernel fills it by pulling ONE scalar word per peer
+  // from that peer's own ``send_counts`` window (non-cacheable ld_dev read,
+  // clamped reader-side); the InCore composite rail keeps publishing it with
+  // ``pld.system.notify`` (Set) as ``clamp(send_counts[dest], 0, MAX_RECV)``
+  // into ``recv_counts[my_rank, 0]``.  Either way no rank writes into another
+  // rank's recv_counts array.
   auto recv_type = As<DistributedTensorType>(args[4]->GetType());
   CHECK(recv_type) << "pld.tensor.all_to_all_v recv_counts must be a DistributedTensor (window-bound), got "
                    << args[4]->GetType()->TypeName();
@@ -795,10 +796,11 @@ REGISTER_OP("pld.tensor.all_to_all_v")
         "block, or NaN propagates into otherwise-valid rows.  The receive-side count "
         "vector (MPI_Alltoallv recvcounts) lands in ``recv_counts[src, 0]``, "
         "identifying how many rows are logically valid, so the receiver skips the "
-        "rest: the hand-written builtin kernel PULLS every peer's own "
-        "``send_counts`` window after the barrier and clamps the value reader-side, "
-        "while the InCore composite rail publishes the clamped count into peer "
-        "``dest``'s ``recv_counts[my_rank, 0]`` via ``pld.system.notify`` (Set).  "
+        "rest: the hand-written builtin kernel pulls ONE scalar word per peer from "
+        "that peer's own ``send_counts`` window after BARRIER A (a non-cacheable "
+        "read) and clamps the value reader-side, while the InCore composite rail "
+        "publishes the clamped count into peer ``dest``'s ``recv_counts[my_rank, 0]`` "
+        "via ``pld.system.notify`` (Set).  "
         "Returns the target window so the caller can read back via "
         "``tile.load`` — same pattern as the symmetric "
         "``pld.tensor.all_to_all`` intrinsic.")
@@ -808,8 +810,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     .add_argument("target",
                   "Window-bound DistributedTensor [NR*MAX_RECV, SIZE] — staging area for exchange (InOut)")
     .add_argument("signal",
-                  "Window-bound INT32 DistributedTensor [NR, 1] used as a self-clearing cross-rank "
-                  "barrier (InOut); reusable across calls and inside for/while loops")
+                  "Window-bound INT32 DistributedTensor [NR, 1] used as a credit-based cross-rank "
+                  "barrier (InOut); reusable across sequential calls (zero-initialise once; do not "
+                  "reset); calls inside for/while loops are not supported yet")
     .add_argument("send_counts",
                   "INT32 Tensor [NR] or [NR, 1] — rows to send to each destination, read at "
                   "runtime and clamped to MAX_RECV (Input)")
@@ -1273,10 +1276,11 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
       << kOpName << " signal dim 0 (" << signal_dim0->value_ << ") must divide target dim 0 ("
       << target_dim0->value_ << ")";
 
-  // send_counts: narrowed from AsTensorTypeLike to a STRICT window-bound
-  // DistributedTensor — same codegen-forced rationale as `input` above.
-  // LOCAL-only: read by this rank, never cross-rank-notified into (unlike
-  // recv_counts).
+  // send_counts: STRICT window-bound DistributedTensor — beyond the
+  // codegen-forced rationale shared with `input` above, the builtin kernel
+  // resolves each peer's copy through CommRemotePtr (the counts pull), so a
+  // non-window address would be garbage.  Written only by this rank; peers
+  // only READ it remotely — no rank ever writes another rank's send_counts.
   auto counts_type = As<DistributedTensorType>(args[3]->GetType());
   CHECK(counts_type) << kOpName << " send_counts must be a DistributedTensor (window-bound), got "
                      << args[3]->GetType()->TypeName();
@@ -1336,11 +1340,13 @@ REGISTER_OP("builtin.tensor.all_to_all_v")
                   "destination)")
     .add_argument("target",
                   "Window-bound DistributedTensor [NR*MAX_RECV, SIZE] result window (TPUT destination)")
-    .add_argument("signal", "Window-bound INT32 DistributedTensor [NR, 1] signal buffer (single-use barrier)")
+    .add_argument("signal",
+                  "Window-bound INT32 DistributedTensor [NR, 1] credit-based barrier — +1/+1 rounds "
+                  "with wait thresholds 1 and 2, then AtomicAdd(-2) per slot; zero-init once, never reset")
     .add_argument("send_counts",
                   "Window-bound INT32 DistributedTensor [NR] or [NR, 1] — rows to send to each "
-                  "destination, read at runtime and clamped to MAX_RECV (Input, LOCAL only, never "
-                  "cross-rank-published)")
+                  "destination, read at runtime and clamped to MAX_RECV (Input; written only by this "
+                  "rank, READ by peers via the counts pull, never cross-rank-published)")
     .add_argument("recv_counts",
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")

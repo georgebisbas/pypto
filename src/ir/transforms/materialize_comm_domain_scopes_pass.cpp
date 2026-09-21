@@ -425,9 +425,10 @@ class DispatchAnalyzer : public IRVisitor {
       // overrides above).
       CHECK_SPAN(repeating_scope_depth_ == 0, op->span_)
           << "pld.tensor.all_to_all_v is not supported inside a for/while loop in a HOST "
-             "orchestrator. The signal protocol is single-use and cannot reuse a signal "
-             "across dynamic invocations (same restriction LowerCompositeOps enforces on "
-             "the InCore path via CheckAllReduceLoopUse).";
+             "orchestrator yet: dynamic re-invocation needs loop-carried comm-domain window "
+             "lifetime management this compiler does not model (the credit-based signal "
+             "itself is reusable across sequential calls). Same restriction LowerCompositeOps "
+             "enforces on the InCore path via CheckAllReduceLoopUse.";
       auto* data_alloc = ResolveWindowAlloc(op->args_[1], "pld.tensor.all_to_all_v", "target");
       auto* signal_alloc = ResolveWindowAlloc(op->args_[2], "pld.tensor.all_to_all_v", "signal");
       auto* recv_counts_alloc = ResolveWindowAlloc(op->args_[4], "pld.tensor.all_to_all_v", "recv_counts");

@@ -33,10 +33,13 @@ push-based TPUT pattern with FIVE window-bound resources:
   3. **All-to-all-v** (``builtin.tensor.all_to_all_v``): the kernel pushes only
      ``rows = clamp(send_counts[dest], 0, MAX_RECV)`` rows per destination into
      ``data_buf`` — the padding up to ``MAX_RECV`` never crosses the wire —
-     pulls each peer's own ``send_counts`` window after the barrier and clamps
-     the raw value reader-side into ``recv_counts[src, 0]`` (so every rank's
-     ``send_counts`` window must own >= 64 B), and synchronises with one
-     barrier. The clamp is two-sided and identical to
+     pulls ONE scalar word per peer from that peer's own ``send_counts`` window
+     after Barrier A and clamps the raw value reader-side into
+     ``recv_counts[src, 0]``, then synchronises a second time: a credit-based
+     barrier pair (+1 / wait >= 1 before the pull; +1 / wait >= 2 before
+     return, with a single -2 per slot at the end) that also protects the
+     counts' lifetime and the receive-window reuse across back-to-back
+     invocations. The clamp is two-sided and identical to
      ``LowerTensorAllToAllVRule``'s, keeping the HOST and InCore rails
      bit-for-bit identical on the wire for every input.
   4. **Consume** (``consume_step``): each rank reads ``recv_counts`` to learn
@@ -175,10 +178,10 @@ def _build_host_all_to_all_v_program(n_ranks: int, max_recv: int):
             input_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
-            # Peers pull this rank's counts from this window, so the buffer must
-            # own one 64-byte TLOAD unit set (16 x INT32); the [NR, 1] view is
-            # all the op needs.
-            counts_buf = pld.alloc_window_buffer(16 * pl.INT32.get_byte())
+            # Peers pull ONE word per rank from this window (scalar ld_dev read),
+            # so the [NR, 1] INT32 vector is the whole requirement — no fixed-
+            # width TLOAD unit set.
+            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
             recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
             for r in pl.range(pld.world_size()):
