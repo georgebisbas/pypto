@@ -218,8 +218,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
   // Each admitted block rendezvous-blocks independently on its own signal lane
   // (signal_base + peer*signal_stride + block_idx), so this remains correct
   // whether block_num is 1 or many — no per-block ordering (e.g. block 0
@@ -349,8 +347,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   // ==================================================================
   pipe_barrier(PIPE_ALL);
   dsb(DSB_DDR);
-  for (int peer = 0; peer < nranks; ++peer) {
-    if (peer == my_rank) continue;
   // Second credit round: credits accumulate across the call's two barrier
   // phases, so this rendezvous waits for GE(2) rather than GE(1).
   ExchangeBarrier(comm_ctx, signal_base, my_rank, nranks, signal_stride, block_idx, static_cast<int32_t>(2));

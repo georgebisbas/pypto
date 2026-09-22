@@ -1739,6 +1739,10 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
     # ... and B — not L — is what gets validated and launched.
     assert "signal_stride < admitted_blocks" in entry_cpp, entry_cpp
     assert ".launch_spec." in entry_cpp and "(admitted_blocks)" in entry_cpp, entry_cpp
+    # ... and both observables RFC #2521 frozen item #10 requires are reported,
+    # by the one site that knows them.
+    assert "requested_core_num=" in entry_cpp, entry_cpp
+    assert "launched_core_num=" in entry_cpp, entry_cpp
 
 
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):

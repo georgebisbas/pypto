@@ -495,17 +495,26 @@ actually running. Both rails apply the identical two-sided clamp and the same
 into `pld.tile.put` + `pld.system.notify`/`wait` inside a chip kernel.
 
 `core_num` is the requested AIV block limit `L` — a maximum, not a promise: the
-admitted block count `B` is `L` rounded down to a multiple of the rank count
-(`cal_all_to_all_v_blocks(L, NR)`). It is a genuine dynamic argument
-(`int | Scalar[INDEX]`, mirroring `pld.tensor.remote_store`'s `peer` parameter)
-on the HOST rail, but that mapping is not applied at the HOST entry yet: every
-rail is still single-block today, so only `core_num=1` is accepted at each of
-the InCore, HOST, and CHIP gates. Lifting the HOST gate to admit `core_num>1` is
-RFC #2521 work item K2's own follow-up PR in this same stack. The InCore rail rejects anything else outright, naming the CHIP rail in
-the diagnostic. The CHIP/L2 rail (below) is deliberately left gated at
-`core_num=1` even once the HOST gate lifts — wiring a genuine multi-block
-launch into the L2-managed path is a separate, not-yet-started roadmap item
-(O2), not part of K2.
+admitted block count `B` is `cal_all_to_all_v_blocks(NR, L)`, i.e. `L` itself
+while `L < NR`, and otherwise the largest multiple of `NR` not exceeding `L`.
+It is a genuine dynamic argument (`int | Scalar[INDEX]`, mirroring
+`pld.tensor.remote_store`'s `peer` parameter), so one compiled binary serves any
+`L` without recompilation: neither `L` nor `B` enters the builtin variant name.
+
+On the HOST rail (RFC #2521 K2) that mapping is applied at the materialised
+entry, which is the single `L -> B` site: the entry derives `B` from the rank
+count and `core_num`, rejects a signal narrower than `B` with an explicit
+runtime argument error **before** submitting the AIV task, and launches exactly
+`B` blocks with `require_sync_start`. The block-aware signal lanes above are
+what make `B > 1` correct. The entry also reports both values to DFX — one
+`LOG_TIMING` line per call carrying `requested_core_num=L launched_core_num=B`
+plus the rank count, at the default log threshold.
+
+The InCore composite rail rejects any `core_num` other than a compile-time `1`,
+naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) is deliberately
+left gated at `core_num=1` — wiring a genuine multi-block launch into the
+L2-managed path is a separate, not-yet-started roadmap item (O2), not part of
+K2.
 
 **CHIP builtin** (`LowerL2TensorCollectives`): the same call written one level
 down, in a CHIP `Orchestration` body rather than in `host_orch`. It is rewritten

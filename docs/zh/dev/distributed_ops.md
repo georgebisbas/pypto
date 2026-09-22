@@ -427,15 +427,22 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 `pld.tile.put` + `pld.system.notify`/`wait`。
 
 `core_num` 是请求的 AIV block 上限 `L`——它是一个上限，而非承诺：已准入的 block
-数 `B` 是 `L` 向下取整到 rank 数的倍数（`cal_all_to_all_v_blocks(L, NR)`）。
-在 HOST 路径上，它是一个真正的动态参数（`int | Scalar[INDEX]`，与
-`pld.tensor.remote_store` 的 `peer` 参数模式一致），但该映射尚未在 HOST 入口处应用：
-目前所有路径仍是单 block，因此
-InCore、HOST、CHIP 三处的门控都只接受 `core_num=1`；放开 HOST 门控以准入
-`core_num>1` 正是 RFC #2521 工作项 K2 在同一系列 PR 中的后续 PR。InCore 路径会
-直接拒绝其他取值，并在诊断信息中指明 CHIP 路径。即便 HOST 门控放开之后，下文的
-CHIP/L2 路径仍会刻意保持在 `core_num=1`——把真正的多 block 启动接入 L2 托管路径
-是一个独立的、尚未启动的路线图项（O2），不属于 K2 范围。
+数 `B` 是 `cal_all_to_all_v_blocks(NR, L)`，即当 `L < NR` 时就是 `L` 本身，否则是
+不超过 `L` 的 `NR` 的最大倍数。它是真正的动态参数（`int | Scalar[INDEX]`，与
+`pld.tensor.remote_store` 的 `peer` 参数模式一致），因此同一个编译产物可服务任意
+`L`，无需重新编译：`L` 与 `B` 都不会进入 builtin 变体名。
+
+在 HOST 路径上（RFC #2521 K2），该映射在具化后的入口处应用——入口是唯一的
+`L -> B` 位置：它由 rank 数与 `core_num` 推导 `B`，在提交 AIV 任务**之前**以显式
+运行时参数错误拒绝宽度小于 `B` 的 signal，并严格启动 `B` 个 block
+（`require_sync_start`）。上文按 block 划分的 signal 车道正是为 `B > 1` 服务。入口还会把
+这两个值上报给 DFX——每次调用一行 `LOG_TIMING`，携带 `requested_core_num=L
+launched_core_num=B` 以及 rank 数，位于默认日志阈值。
+
+InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直接拒绝，并在诊断
+信息中指明 CHIP 路径。下文的 CHIP/L2 路径仍刻意保持在 `core_num=1`——把真正的
+多 block 启动接入 L2 托管路径是一个独立的、尚未启动的路线图项（O2），不属于
+K2 范围。
 
 **CHIP builtin**（`LowerL2TensorCollectives`）：同样的调用写在下一层——CHIP
 `Orchestration` 函数体中，而不是 `host_orch` 中。它会被改写成对合成 AIV kernel 的

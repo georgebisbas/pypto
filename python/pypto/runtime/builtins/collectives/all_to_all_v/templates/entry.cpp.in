@@ -74,6 +74,19 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   params.add_scalar(orch_args.scalar(1));  // CommContext device pointer
   params.launch_spec.{{launch_core_count_method}}(admitted_blocks);
   params.launch_spec.set_require_sync_start(true);
+
+  // RFC #2521 frozen item #10 / §13.3: the requested limit L and the admitted
+  // block count B must both be observable, and this entry is the single `L -> B`
+  // site, so it is the only place that knows both. LOG_TIMING sits at the
+  // default log threshold. The guard covers a rail whose DFX sink is compiled
+  // out -- the ops table is not contractually required to carry one.
+  if (current_runtime()->ops->log_timing != nullptr) {
+    LOG_TIMING(
+        "all_to_all_v: requested_core_num=%d launched_core_num=%d nranks=%d", core_num, admitted_blocks,
+        nranks
+    );
+  }
+
   rt_submit_aiv_task(0, params);
 }
 
