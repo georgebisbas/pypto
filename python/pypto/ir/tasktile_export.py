@@ -93,6 +93,9 @@ def export_tasktile_checkpoint(
                     "engine": engine,
                     "start": attrs.get("tasktile_start"),
                     "witness": attrs.get("tasktile_witness"),
+                    "reads": attrs.get("tasktile_reads", []),
+                    "writes": attrs.get("tasktile_writes", []),
+                    "shape": attrs.get("tasktile_shape", []),
                 }
             )
             if "tasktile_stage_id" in attrs:
