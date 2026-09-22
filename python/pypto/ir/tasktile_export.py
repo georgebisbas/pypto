@@ -97,6 +97,8 @@ def export_tasktile_checkpoint(
                     "writes": attrs.get("tasktile_writes", []),
                     "shape": attrs.get("tasktile_shape", []),
                     "generated_witness": attrs.get("tasktile_generated_witness"),
+                    "reductions": attrs.get("tasktile_reductions", []),
+                    "atomics": attrs.get("tasktile_atomics", []),
                 }
             )
             if "tasktile_stage_id" in attrs:
