@@ -1,0 +1,11 @@
+.git
+.pytest_cache
+.pyright
+.ruff_cache
+build
+dist
+*.egg-info
+__pycache__
+runtime/build
+runtime/.cache
+docs/_build
