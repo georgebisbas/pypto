@@ -59,6 +59,7 @@ from .pass_manager import OptimizationStrategy, PassDumpLevel, PassManager
 
 # Import python_print utility
 from .printer import python_print
+from .tasktile_export import TaskTileExportError, export_tasktile_checkpoint
 
 # Import TensorType and TileType with enhanced __init__ that supports integer shapes
 # This patches the native TensorType and TileType classes to accept integer shapes
@@ -104,6 +105,8 @@ __all__ = [
     "TileType",
     "TileView",
     "python_print",
+    "TaskTileExportError",
+    "export_tasktile_checkpoint",
     "compile",
     "CompiledProgram",
     "DistributedCompiledProgram",
