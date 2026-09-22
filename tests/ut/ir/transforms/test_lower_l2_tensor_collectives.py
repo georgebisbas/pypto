@@ -111,11 +111,13 @@ def test_collective_becomes_a_local_builtin_kernel_call():
 
 
 def test_synthesized_kernel_signature_and_directions():
-    """The kernel is an AIV function carrying the collective operands plus core_num.
+    """The kernel is an AIV function carrying the five collective operands.
 
-    core_num carries no new behavior on this rail (still gated to a compile-time
-    1) — the parameter exists purely so this rail's ABI matches the HOST rail's
-    shared entry.cpp.in/kernel.cpp.in.
+    ``core_num`` is the public op's 6th argument but is gated (compile-time 1)
+    and dropped by this rail, because a kernel parameter would become a dispatch
+    slot ahead of the CommCtx suffix and shift the shared `kernel.cpp.in`'s
+    fixed ``args[5]`` CommContext read. The ABI stays exactly the HOST rail's
+    entry-built one.
     """
     result = passes.lower_l2_tensor_collectives()(_build_program())
 
@@ -128,7 +130,6 @@ def test_synthesized_kernel_signature_and_directions():
         "signal",
         "send_counts",
         "recv_counts",
-        "core_num",
     ]
     # Directions are what orders compute -> collective -> consume once
     # DeriveCallDirections and AutoDeriveTaskDependencies run over the call.
@@ -138,7 +139,6 @@ def test_synthesized_kernel_signature_and_directions():
         ir.ParamDirection.InOut,
         ir.ParamDirection.In,
         ir.ParamDirection.InOut,
-        ir.ParamDirection.In,
     ]
 
 
@@ -289,14 +289,15 @@ def test_kernel_signature_is_canonical_not_call_site_typed():
     kinds = [type(p.type).__name__ for p in kernel.params]
     # input and send_counts canonical to plain Tensor even though the call site
     # passed DistributedTensors; the other three stay distributed, which is what
-    # supplies the CommCtx parameters. core_num is a plain scalar, uncanonicalized.
+    # supplies the CommCtx parameters. core_num is not a parameter at all: the
+    # kernel ABI is five operands plus the ctx suffix, so `args[5]` stays the
+    # CommContext the shared kernel template reads.
     assert kinds == [
         "TensorType",
         "DistributedTensorType",
         "DistributedTensorType",
         "TensorType",
         "DistributedTensorType",
-        "ScalarType",
     ], kinds
 
 

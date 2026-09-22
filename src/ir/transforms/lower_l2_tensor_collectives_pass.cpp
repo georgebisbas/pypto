@@ -172,8 +172,8 @@ struct BuiltinKernelSpec {
       *template_dir,
       std::move(template_vars),
       {ParamDirection::In, ParamDirection::InOut, ParamDirection::InOut, ParamDirection::In,
-       ParamDirection::InOut, ParamDirection::In},
-      {"input", "target", "signal", "send_counts", "recv_counts", "core_num"},
+       ParamDirection::InOut},
+      {"input", "target", "signal", "send_counts", "recv_counts"},
       // `input` stays Tensor-like on the public op (plain Tensor or
       // DistributedTensor — the kernel only reads it locally as the TPUT
       // source). `send_counts` is required to be window-bound at the call site
@@ -183,11 +183,19 @@ struct BuiltinKernelSpec {
       // three genuinely window-bound operands stay distributed, which is also
       // what gives MaterializeDistTensorCtx the CommCtx parameters the kernel
       // needs.
-      // `core_num`'s entry here is unused (MakeBuiltinKernelFunction special-
-      // cases scalar-typed params before consulting this vector) — kept
-      // `false` as a harmless placeholder so every vector stays the same
-      // length as `param_names`/`param_directions`.
-      {false, true, true, false, true, false},
+      //
+      // The public op's trailing `core_num` arg is deliberately NOT a kernel
+      // parameter. This rail's kernel args come from the managed pipeline's own
+      // dispatch (see LowerCollective), where every parameter becomes an
+      // `add_scalar` slot *ahead* of the CommCtx suffix that
+      // MaterializeDistTensorCtx appends, and the shared `kernel.cpp.in` reads
+      // its CommContext from `args[5]` — the first ctx. Making `core_num` part
+      // of the kernel ABI pushed every ctx one slot to the right, so the kernel
+      // reinterpreted the integer `1` as a `CommContext*` and derived a garbage
+      // rankNum/rankId on every rank (one AIV block then spins in
+      // `ExchangeBarrier` until the scheduler's watchdog fires). Kernel ABI
+      // parity with the HOST rail is five operands plus the ctx, nothing more.
+      {false, true, true, false, true},
   };
 }
 
@@ -218,22 +226,18 @@ struct BuiltinKernelSpec {
 
 /// Build the header-only AIV function that stands in for the builtin kernel.
 ///
-/// A scalar-typed arg (e.g. `all_to_all_v`'s `core_num`) uses its own type
-/// directly rather than `CanonicalParamType` — that helper's Tensor-vs-
-/// DistributedTensor canonicalization doesn't apply to a plain scalar, and a
-/// `Scalar[INDEX]` param carries no ambiguity to canonicalize away. This rail
-/// still requires `core_num` to be a compile-time `1` (see `LowerCollective`'s
-/// own `CHECK_SPAN`) — the parameter exists purely so this rail's synthesized
-/// ABI matches the HOST rail's, since both render the same shared
-/// `entry.cpp.in`/`kernel.cpp.in`. The value itself is unused here.
+/// The signature covers the five kernel operands only. `core_num` is the public
+/// op's 6th argument, but it stops at this rail's gate (LowerCollective): every
+/// parameter here becomes a dispatch slot ahead of the CommCtx suffix
+/// MaterializeDistTensorCtx appends, and the shared `kernel.cpp.in` reads its
+/// CommContext from the fixed index `args[5]`.
 [[nodiscard]] FunctionPtr MakeBuiltinKernelFunction(const BuiltinKernelSpec& spec, const CallPtr& call) {
   std::vector<VarPtr> params;
-  params.reserve(call->args_.size());
-  for (size_t i = 0; i < call->args_.size(); ++i) {
-    TypePtr param_type = As<ScalarType>(call->args_[i]->GetType())
-                             ? call->args_[i]->GetType()
-                             : CanonicalParamType(spec.param_distributed[i], call->args_[i], call->span_);
-    params.push_back(std::make_shared<Var>(spec.param_names[i], param_type, call->span_));
+  params.reserve(spec.param_names.size());
+  for (size_t i = 0; i < spec.param_names.size(); ++i) {
+    params.push_back(std::make_shared<Var>(
+        spec.param_names[i], CanonicalParamType(spec.param_distributed[i], call->args_[i], call->span_),
+        call->span_));
   }
   std::vector<std::pair<std::string, std::any>> attrs = {
       {kAttrBuiltinTemplateDir, spec.template_dir},
@@ -316,10 +320,9 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // core_num (args_[5]) is the requested block limit L, carried as a
     // Scalar[INDEX] argument. This rail supports only a single block: a dynamic
     // core_num can't even be range-checked here, so only the statically-known
-    // case is rejected explicitly. The synthesized function carries a core_num
-    // parameter (below) purely to keep this rail's ABI identical to the HOST
-    // rail's — both render the same entry.cpp.in/kernel.cpp.in — and this rail
-    // does nothing with the value beyond the gate here.
+    // case is rejected explicitly. The value is consumed by this gate and then
+    // dropped — it never reaches the kernel, whose argument layout must stay
+    // identical to the HOST rail's.
     auto core_num_const = As<ConstInt>(call->args_[5]);
     CHECK_SPAN(core_num_const && core_num_const->value_ == 1, call->span_)
         << "CHIP pld.tensor.all_to_all_v currently supports only a compile-time core_num=1, got "
@@ -372,7 +375,16 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     if (inserted == kernels_->end()) {
       kernels_->emplace(spec.function_name, MakeBuiltinKernelFunction(spec, call));
     }
-    return std::make_shared<Call>(std::make_shared<GlobalVar>(spec.function_name), call->args_,
+    // Drop the public op's trailing `core_num` from the kernel call: the kernel
+    // sees the five operands (plus the CommCtx suffix MaterializeDistTensorCtx
+    // appends from the callee's params), exactly as the HOST rail's entry-built
+    // dispatch passes them.
+    INTERNAL_CHECK_SPAN(call->args_.size() == spec.param_names.size() + 1, call->span_)
+        << "LowerL2TensorCollectives: kernel signature must cover every call argument except the "
+           "trailing core_num scalar";
+    std::vector<ExprPtr> kernel_args(
+        call->args_.begin(), call->args_.begin() + static_cast<std::ptrdiff_t>(spec.param_names.size()));
+    return std::make_shared<Call>(std::make_shared<GlobalVar>(spec.function_name), std::move(kernel_args),
                                   call->args_[1]->GetType(), call->span_);
   }
 
