@@ -196,7 +196,10 @@ def test_export_is_repeatable_and_read_only(tmp_path: Path) -> None:
 def test_export_fanout_collective_fixture(tmp_path: Path) -> None:
     output = tmp_path / "fanout.tasktile.json"
     ir.export_tasktile_checkpoint(
-        _fanout_program(), pass_name="post:MaterializeValidShapeSymbols", revision="fixture-rev", output=output
+        _fanout_program(),
+        pass_name="post:MaterializeValidShapeSymbols",
+        revision="fixture-rev",
+        output=output,
     )
     payload = json.loads(output.read_text())
     assert [task["id"] for task in payload["tasktile"]["tasks"]] == [
