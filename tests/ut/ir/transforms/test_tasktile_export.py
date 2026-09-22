@@ -26,10 +26,12 @@ def _program():
                         "tasktile_duration": 7,
                         "tasktile_engine": "aic",
                         "tasktile_witness": "source:producer",
+                        "tasktile_generated_witness": "pto:submit:producer",
                         "tasktile_stage_id": "stage0",
                         "tasktile_stage_task": "producer",
                         "tasktile_stage_duration": 3,
                         "tasktile_stage_buffer": "buf0",
+                        "tasktile_stage_generated_witness": "pto:stage:0",
                         "tasktile_buffer_id": "buf0",
                         "tasktile_buffer_bytes": 4096,
                         "tasktile_buffer_slots": 2,
@@ -139,6 +141,7 @@ def test_export_two_submit_fixture(tmp_path: Path) -> None:
             "buffer": "buf0",
             "bytes": None,
             "duration": 3,
+            "generated_witness": "pto:stage:0",
             "id": "stage0",
             "slot": 0,
             "start": None,
@@ -159,6 +162,8 @@ def test_export_two_submit_fixture(tmp_path: Path) -> None:
         task["reads"] == [] and task["writes"] == [] and task["shape"] == []
         for task in payload["tasktile"]["tasks"]
     )
+    assert tasks[1]["generated_witness"] == "pto:submit:producer"
+    assert payload["tasktile"]["stages"][0]["generated_witness"] == "pto:stage:0"
     assert payload["tasktile"]["communication"] == [
         {
             "bytes": 1024,

@@ -96,6 +96,7 @@ def export_tasktile_checkpoint(
                     "reads": attrs.get("tasktile_reads", []),
                     "writes": attrs.get("tasktile_writes", []),
                     "shape": attrs.get("tasktile_shape", []),
+                    "generated_witness": attrs.get("tasktile_generated_witness"),
                 }
             )
             if "tasktile_stage_id" in attrs:
@@ -109,6 +110,7 @@ def export_tasktile_checkpoint(
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
                         "bytes": attrs.get("tasktile_stage_bytes"),
+                        "generated_witness": attrs.get("tasktile_stage_generated_witness"),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
@@ -162,6 +164,7 @@ def export_tasktile_checkpoint(
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
                         "bytes": attrs.get("tasktile_stage_bytes"),
+                        "generated_witness": attrs.get("tasktile_stage_generated_witness"),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
