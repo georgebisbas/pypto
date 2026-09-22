@@ -36,6 +36,16 @@ def _as_int(value: Any, *, key: str, task: str) -> int:
     return value
 
 
+def _optional_text(value: Any, *, key: str, task: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise TaskTileExportError(
+            f"Submit {task!r} attribute {key!r} must be a non-empty string"
+        )
+    return value
+
+
 def export_tasktile_checkpoint(
     program: _ir.Program,
     *,
@@ -96,7 +106,11 @@ def export_tasktile_checkpoint(
                     "reads": attrs.get("tasktile_reads", []),
                     "writes": attrs.get("tasktile_writes", []),
                     "shape": attrs.get("tasktile_shape", []),
-                    "generated_witness": attrs.get("tasktile_generated_witness"),
+                    "generated_witness": _optional_text(
+                        attrs.get("tasktile_generated_witness"),
+                        key="tasktile_generated_witness",
+                        task=task_id,
+                    ),
                     "reductions": attrs.get("tasktile_reductions", []),
                     "atomics": attrs.get("tasktile_atomics", []),
                 }
@@ -112,7 +126,11 @@ def export_tasktile_checkpoint(
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
                         "bytes": attrs.get("tasktile_stage_bytes"),
-                        "generated_witness": attrs.get("tasktile_stage_generated_witness"),
+                        "generated_witness": _optional_text(
+                            attrs.get("tasktile_stage_generated_witness"),
+                            key="tasktile_stage_generated_witness",
+                            task=task_id,
+                        ),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
@@ -166,7 +184,11 @@ def export_tasktile_checkpoint(
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
                         "bytes": attrs.get("tasktile_stage_bytes"),
-                        "generated_witness": attrs.get("tasktile_stage_generated_witness"),
+                        "generated_witness": _optional_text(
+                            attrs.get("tasktile_stage_generated_witness"),
+                            key="tasktile_stage_generated_witness",
+                            task="<call>",
+                        ),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
