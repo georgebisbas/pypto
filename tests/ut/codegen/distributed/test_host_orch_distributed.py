@@ -1612,6 +1612,135 @@ def test_host_all_to_all_v_builtin_variant_shared_across_max_recv():
         assert "max_recv_cpp" not in spec.template_vars, spec
 
 
+def test_host_all_to_all_v_builtin_variant_shared_across_core_num():
+    """RFC #2521 K2: two host_orch all_to_all_v calls requesting different
+    core_num (2 vs 4) emit ONE shared next-level variant — core_num is a
+    runtime scalar, not baked into the variant key, so one compiled binary
+    serves both requests without recompilation. That is only possible because
+    the value flows as an IR argument and the entry derives B from it at
+    launch time."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4, 4], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 4 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 4], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            pld.tensor.all_to_all_v(inp, data, signal, counts, recv, core_num=2)
+
+            input_buf2 = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            data_buf2 = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            signal_buf2 = pld.alloc_window_buffer(4 * 4 * pl.INT32.get_byte())
+            counts_buf2 = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf2 = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp2 = pld.window(input_buf2, [8, SIZE], dtype=pl.FP32)
+            data2 = pld.window(data_buf2, [8, SIZE], dtype=pl.FP32)
+            signal2 = pld.window(signal_buf2, [4, 4], dtype=pl.INT32)
+            counts2 = pld.window(counts_buf2, [4, 1], dtype=pl.INT32)
+            recv2 = pld.window(recv_buf2, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp2, data2, signal2, counts2, recv2, device=r)
+            pld.tensor.all_to_all_v(inp2, data2, signal2, counts2, recv2, core_num=4)
+            return 0
+
+    generated, cg = _lower_host_collectives(Prog)
+
+    assert 'callables["builtin.tensor.all_to_all_v__fp32"]' in generated, generated
+    # Both requested core_num values reach codegen as real scalar values —
+    # neither is folded into the variant name or the template.
+    assert ".add_scalar(2)" in generated, generated
+    assert ".add_scalar(4)" in generated, generated
+
+    specs = cg.get_builtin_next_level_specs()
+    variants = {spec.variant for spec in specs}
+    assert variants == {"builtin.tensor.all_to_all_v__fp32"}, specs
+    for spec in specs:
+        assert "core_num" not in spec.variant, spec
+
+
+def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
+    """RFC #2521 K2: the materialised entry owns the `L -> B` step and launches B.
+
+    Built at P=4 (the signal's dim 0) with a requested limit L=10, so the frozen
+    mapping gives B=(10//4)*4=8 and a signal at least 8 lanes wide is admissible.
+    The numeric mapping itself is pinned by the Python function's own
+    worked-example table; what this test pins is that the entry is the
+    single point that computes B — from `nranks` and `core_num`, using that same
+    formula — and that both the signal-stride reject and the launch-width call
+    consume `admitted_blocks` rather than the raw `core_num`, so a request of 10
+    can never launch 10.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            data: pld.DistributedTensor[[8, SIZE], pl.FP32],
+            sig: pld.DistributedTensor[[4, 8], pl.INT32],
+            counts: pld.DistributedTensor[[4, 1], pl.INT32],
+            recv: pld.DistributedTensor[[4, 1], pl.INT32],
+        ):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            input_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(8 * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(4 * 8 * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(4 * pl.INT32.get_byte())
+            inp = pld.window(input_buf, [8, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [8, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [4, 8], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [4, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [4, 1], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(inp, data, signal, counts, recv, device=r)
+            pld.tensor.all_to_all_v(inp, data, signal, counts, recv, core_num=10)
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    program = _finalize_chip_program_for_generate(program)
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
+
+    entry_cpp = files[
+        "next_levels/builtin.tensor.all_to_all_v__fp32/orchestration/builtin_tensor_all_to_all_v__fp32.cpp"
+    ]
+
+    # B is computed once, from the rank count and the requested limit ...
+    assert "CalAllToAllVBlocks(nranks, core_num)" in entry_cpp, entry_cpp
+    # ... with the frozen formula, mirrored from launch_width.py ...
+    assert "l < p ? l : (l / p) * p" in entry_cpp, entry_cpp
+    # ... and B — not L — is what gets validated and launched.
+    assert "signal_stride < admitted_blocks" in entry_cpp, entry_cpp
+    assert ".launch_spec." in entry_cpp and "(admitted_blocks)" in entry_cpp, entry_cpp
+
+
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):
     program = passes.materialize_comm_domain_scopes()(program_cls)
     program = passes.lower_host_tensor_collectives()(program)

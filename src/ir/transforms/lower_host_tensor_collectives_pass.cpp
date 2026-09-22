@@ -410,13 +410,13 @@ void CheckHostWindowBoundArg(const ExprPtr& expr, const char* op_name, const cha
       << "LowerHostTensorCollectives: pld.tensor.all_to_all_v target must be DistributedTensorType";
 
   // core_num (args_[5]) is the requested block limit L, carried as a
-  // Scalar[INDEX] argument. This rail is still gated to a compile-time 1:
-  // multi-AIV AllToAllV enablement is not implemented here.
+  // Scalar[INDEX] argument. Any positive value is admitted on this rail
+  // (RFC #2521 K2): entry.cpp.in computes the admitted block count
+  // B = CalAllToAllVBlocks(nranks, L) and rejects an insufficient signal
+  // stride at the runtime entry, before submitting the AIV task.
   auto core_num_const = As<ConstInt>(call->args_[5]);
-  CHECK_SPAN(core_num_const && core_num_const->value_ == 1, call->span_)
-      << "HOST pld.tensor.all_to_all_v does not support core_num > 1, got "
-      << (core_num_const ? std::to_string(core_num_const->value_) : std::string("a dynamic value"))
-      << "; call it from a CHIP Orchestration function for the multi-AIV managed path";
+  CHECK_SPAN(!core_num_const || core_num_const->value_ > 0, call->span_)
+      << "HOST pld.tensor.all_to_all_v core_num must be positive, got " << core_num_const->value_;
 
   return MakeBuiltinCallWithAttrs(
       "builtin.tensor.all_to_all_v", call,
