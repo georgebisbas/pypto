@@ -137,6 +137,7 @@ def test_export_two_submit_fixture(tmp_path: Path) -> None:
     assert payload["tasktile"]["stages"] == [
         {
             "buffer": "buf0",
+            "bytes": None,
             "duration": 3,
             "id": "stage0",
             "slot": 0,
@@ -154,6 +155,10 @@ def test_export_two_submit_fixture(tmp_path: Path) -> None:
             "witness": None,
         }
     ]
+    assert all(
+        task["reads"] == [] and task["writes"] == [] and task["shape"] == []
+        for task in payload["tasktile"]["tasks"]
+    )
     assert payload["tasktile"]["communication"] == [
         {
             "bytes": 1024,

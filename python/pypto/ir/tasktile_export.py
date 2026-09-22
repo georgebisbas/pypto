@@ -108,6 +108,7 @@ def export_tasktile_checkpoint(
                         "slot": attrs.get("tasktile_stage_slot", 0),
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
+                        "bytes": attrs.get("tasktile_stage_bytes"),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
@@ -160,6 +161,7 @@ def export_tasktile_checkpoint(
                         "slot": attrs.get("tasktile_stage_slot", 0),
                         "start": attrs.get("tasktile_stage_start"),
                         "witness": attrs.get("tasktile_stage_witness"),
+                        "bytes": attrs.get("tasktile_stage_bytes"),
                     }
                 )
             if "tasktile_buffer_id" in attrs:
