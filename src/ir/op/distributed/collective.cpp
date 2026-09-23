@@ -604,9 +604,41 @@ void CheckStaticContiguousPayload(const TensorTypePtr& type, const char* role) {
   }
 }
 
+// The documented all_to_all_v contract for core_num is `int | Scalar[INDEX]`:
+// the argument's type must be an integer Scalar. A float-typed scalar would
+// otherwise be forwarded verbatim to the entry by the builtin dispatch, and a
+// tensor-typed one would surface only as an INTERNAL_CHECK deep inside codegen
+// rather than as a user-facing diagnostic. Both the public op and the builtin
+// share this check so the two rails cannot drift apart.
+//
+// The predicate is IsInt() rather than IsIndexLike(): an INT32 Scalar handle is
+// accepted today and narrowing to INDEX-only would reject working programs.
+// Compare pld.*.remote_store, whose `peer` deliberately takes the looser
+// IsA<ScalarType> because dtype narrowing is codegen's job.
+void CheckAllToAllVCoreNumType(const ExprPtr& core_num, const char* op_name) {
+  auto core_num_scalar = As<ScalarType>(core_num->GetType());
+  CHECK(core_num_scalar && core_num_scalar->dtype_.IsInt())
+      << op_name << " core_num must be an integer Scalar, got " << core_num->GetType()->TypeName();
+  if (auto core_num_const = As<ConstInt>(core_num)) {
+    CHECK(core_num_const->value_ > 0)
+        << op_name << " core_num must be positive, got " << core_num_const->value_;
+  }
+}
+
 TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
                                   const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)kwargs;
+  // core_num is the 6th *operand*, never a kwarg. The op used to declare it as
+  // `.set_attr<int>("core_num")`; a caller passing it that way would be silently
+  // ignored here while lowering read the operand, and the printer would emit
+  // `core_num=` twice (once for the operand, once for the attr) producing IR that
+  // cannot be re-parsed. Rejecting the schema alone is not enough: ValidateKwargs
+  // is skipped for an op with no declared attrs, so the check belongs here.
+  for (const auto& [key, value] : kwargs) {
+    (void)value;
+    CHECK(key != "core_num") << "pld.tensor.all_to_all_v does not accept a 'core_num' keyword "
+                                "argument; pass it as the 6th positional operand "
+                                "(int | Scalar[INDEX])";
+  }
   CHECK(args.size() == 6) << "pld.tensor.all_to_all_v requires 6 args "
                              "(input, target, signal, send_counts, recv_counts, core_num), but got "
                           << args.size();
@@ -625,17 +657,7 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // The InCore composite rail requires a compile-time core_num == 1;
   // LowerCompositeOps enforces that, so this deducer only rejects a
   // statically-provable non-positive value no rail could ever honour.
-  // The documented contract is `int | Scalar[INDEX]`, so the argument's type
-  // must be an integer Scalar: a float-typed scalar would otherwise be
-  // silently forwarded to the entry, and a tensor-typed argument would only
-  // fail much later inside the builtin dispatch.
-  auto core_num_scalar = As<ScalarType>(args[5]->GetType());
-  CHECK(core_num_scalar && core_num_scalar->dtype_.IsInt())
-      << "pld.tensor.all_to_all_v core_num must be an integer Scalar, got " << args[5]->GetType()->TypeName();
-  if (auto core_num_const = As<ConstInt>(args[5])) {
-    CHECK(core_num_const->value_ > 0)
-        << "pld.tensor.all_to_all_v core_num must be positive, got " << core_num_const->value_;
-  }
+  CheckAllToAllVCoreNumType(args[5], "pld.tensor.all_to_all_v");
 
   // input: flattened send buffer [NR*MAX_RECV, SIZE] — Tensor or DistributedTensor
   // (same Tensor-like contract as symmetric all_to_all / send_counts).
@@ -842,7 +864,9 @@ REGISTER_OP("pld.tensor.all_to_all_v")
     .add_argument("recv_counts",
                   "Window-bound INT32 DistributedTensor [NR, 1] — after the barrier, "
                   "recv_counts[src, 0] holds how many rows src sent to this rank (InOut)")
-    .set_attr<int>("core_num")
+    .add_argument("core_num",
+                  "Scalar[INDEX] requested AIV block limit L (a maximum, not a promise — the "
+                  "admitted block count B is computed at the entry from L)")
     .no_memory_spec()
     // stays read-only.
     // Composite collective — the data destination is overwritten, not updated:
@@ -1238,6 +1262,7 @@ TypePtr DeduceBuiltinTensorAllToAllVType(const std::vector<ExprPtr>& args,
   for (size_t i = 0; i < args.size(); ++i) {
     CHECK(args[i]) << kOpName << " positional argument #" << i << " must not be null";
   }
+  CheckAllToAllVCoreNumType(args[5], kOpName);
   // input and target must be different windows (same-expression guard; two
   // distinct pld.window(...) views over one alloc are caught later, at
   // lowering time, by CheckDistinctInputTargetWindows against the
