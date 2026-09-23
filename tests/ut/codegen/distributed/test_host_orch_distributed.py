@@ -1748,6 +1748,7 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
     assert "requested_core_num=" in entry_cpp, entry_cpp
     assert "launched_core_num=" in entry_cpp, entry_cpp
     assert "active_lanes=" in entry_cpp, entry_cpp
+    assert "lanes_per_peer=" in entry_cpp, entry_cpp
 
 
 _RFC_2521_BLOCK_TABLE = (
