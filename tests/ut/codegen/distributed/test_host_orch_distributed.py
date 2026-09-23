@@ -32,7 +32,10 @@ Plus regressions:
   ``allocate_domain`` wrapper.
 """
 
+import os
 import re
+import shutil
+import subprocess
 from importlib import resources
 
 import pypto.language as pl
@@ -1684,8 +1687,9 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
 
     Built at P=4 (the signal's dim 0) with a requested limit L=10, so the frozen
     mapping gives B=(10//4)*4=8 and a signal at least 8 lanes wide is admissible.
-    The numeric mapping itself is pinned by the Python function's own
-    worked-example table; what this test pins is that the entry is the
+    The numeric mapping itself is pinned by
+    ``test_entry_cal_all_to_all_v_blocks_matches_the_rfc_table``, which compiles
+    and runs this very function; what this test pins is that the entry is the
     single point that computes B — from `nranks` and `core_num`, using that same
     formula — and that both the signal-stride reject and the launch-width call
     consume `admitted_blocks` rather than the raw `core_num`, so a request of 10
@@ -1734,7 +1738,7 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
 
     # B is computed once, from the rank count and the requested limit ...
     assert "CalAllToAllVBlocks(nranks, core_num)" in entry_cpp, entry_cpp
-    # ... with the frozen formula, mirrored from launch_width.py ...
+    # ... with the frozen formula ...
     assert "l < p ? l : (l / p) * p" in entry_cpp, entry_cpp
     # ... and B — not L — is what gets validated and launched.
     assert "signal_stride < admitted_blocks" in entry_cpp, entry_cpp
@@ -1744,6 +1748,71 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
     assert "requested_core_num=" in entry_cpp, entry_cpp
     assert "launched_core_num=" in entry_cpp, entry_cpp
     assert "active_lanes=" in entry_cpp, entry_cpp
+
+
+_RFC_2521_BLOCK_TABLE = (
+    (8, 1, 1),
+    (8, 7, 7),
+    (8, 8, 8),
+    (8, 10, 8),
+    (8, 15, 8),
+    (8, 16, 16),
+    (16, 7, 7),
+    (16, 16, 16),
+)
+
+
+def test_entry_cal_all_to_all_v_blocks_matches_the_rfc_table(tmp_path):
+    """Run the entry's own ``CalAllToAllVBlocks`` against RFC #2521's table.
+
+    The formula has exactly one implementation — the C++ one in
+    ``entry.cpp.in`` — because the template is compiled standalone and cannot
+    link against the compiler's sources. A Python transcription of it could
+    drift from the code that ships without any test noticing, so this extracts
+    the real function from the template, compiles it, and runs the frozen
+    worked-example table through it.
+    """
+    template = (
+        resources.files("pypto.runtime.builtins.collectives.all_to_all_v") / "templates" / "entry.cpp.in"
+    )
+    source = template.read_text(encoding="utf-8")
+    match = re.search(r"^int32_t CalAllToAllVBlocks\(.*$", source, re.MULTILINE)
+    assert match, "CalAllToAllVBlocks is no longer a one-line definition in entry.cpp.in"
+    definition = match.group(0)
+    assert "{{" not in definition, f"definition now needs template substitution: {definition}"
+
+    candidates = (os.environ.get("CXX"), "g++-15", "g++", "c++")
+    compiler = next((found for name in candidates if name and (found := shutil.which(name))), None)
+    if compiler is None:
+        pytest.skip("no C++ compiler available")
+
+    cases = "\n".join(
+        f'  if (CalAllToAllVBlocks({p}, {req_l}) != {b}) '
+        f'{{ std::printf("%d %d\\n", {p}, {req_l}); ok = false; }}'
+        for p, req_l, b in _RFC_2521_BLOCK_TABLE
+    )
+    program = f"""#include <cstdint>
+#include <cstdio>
+{definition}
+int main() {{
+  bool ok = true;
+{cases}
+  return ok ? 0 : 1;
+}}
+"""
+    src = tmp_path / "cal_blocks.cpp"
+    src.write_text(program, encoding="utf-8")
+    binary = tmp_path / "cal_blocks"
+    build = subprocess.run(
+        [compiler, "-std=c++17", str(src), "-o", str(binary)], capture_output=True, text=True, check=False
+    )
+    assert build.returncode == 0, f"entry formula does not compile standalone:\n{build.stderr}"
+
+    run = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0, (
+        "the entry's CalAllToAllVBlocks disagrees with RFC #2521's worked-example table "
+        f"for these (P, L) pairs:\n{run.stdout}"
+    )
 
 
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):

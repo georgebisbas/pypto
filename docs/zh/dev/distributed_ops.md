@@ -427,7 +427,7 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 `pld.tile.put` + `pld.system.notify`/`wait`。
 
 `core_num` 是请求的 AIV block 上限 `L`——它是一个上限，而非承诺：已准入的 block
-数 `B` 是 `cal_all_to_all_v_blocks(NR, L)`，即当 `L < NR` 时就是 `L` 本身，否则是
+数 `B` 由 entry 的 `CalAllToAllVBlocks(NR, L)` 给出，即当 `L < NR` 时就是 `L` 本身，否则是
 不超过 `L` 的 `NR` 的最大倍数。它是真正的动态参数（`int | Scalar[INDEX]`，与
 `pld.tensor.remote_store` 的 `peer` 参数模式一致），因此同一个编译产物可服务任意
 `L`，无需重新编译：`L` 与 `B` 都不会进入 builtin 变体名。

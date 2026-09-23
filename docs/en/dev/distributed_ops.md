@@ -495,8 +495,9 @@ actually running. Both rails apply the identical two-sided clamp and the same
 into `pld.tile.put` + `pld.system.notify`/`wait` inside a chip kernel.
 
 `core_num` is the requested AIV block limit `L` — a maximum, not a promise: the
-admitted block count `B` is `cal_all_to_all_v_blocks(NR, L)`, i.e. `L` itself
-while `L < NR`, and otherwise the largest multiple of `NR` not exceeding `L`.
+admitted block count `B` is the entry's `CalAllToAllVBlocks(NR, L)`, i.e. `L`
+itself while `L < NR`, and otherwise the largest multiple of `NR` not exceeding
+`L`.
 It is a genuine dynamic argument (`int | Scalar[INDEX]`, mirroring
 `pld.tensor.remote_store`'s `peer` parameter), so one compiled binary serves any
 `L` without recompilation: neither `L` nor `B` enters the builtin variant name.
