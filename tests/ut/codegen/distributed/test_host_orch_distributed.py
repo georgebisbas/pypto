@@ -1787,7 +1787,7 @@ def test_entry_cal_all_to_all_v_blocks_matches_the_rfc_table(tmp_path):
         pytest.skip("no C++ compiler available")
 
     cases = "\n".join(
-        f'  if (CalAllToAllVBlocks({p}, {req_l}) != {b}) '
+        f"  if (CalAllToAllVBlocks({p}, {req_l}) != {b}) "
         f'{{ std::printf("%d %d\\n", {p}, {req_l}); ok = false; }}'
         for p, req_l, b in _RFC_2521_BLOCK_TABLE
     )

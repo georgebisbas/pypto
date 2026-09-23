@@ -2687,9 +2687,7 @@ def test_builtin_all_to_all_v_rejects_non_integer_core_num():
     args = _make_all_to_all_v_args(span)
     args[5] = ir.Var("core_num", ir.ScalarType(DataType.FP32), span)
     with pytest.raises(ValueError, match="core_num must be an integer Scalar"):
-        _ir._create_internal_op_call(
-            "builtin.tensor.all_to_all_v", args, {"dtype": DataType.FP32}, span
-        )
+        _ir._create_internal_op_call("builtin.tensor.all_to_all_v", args, {"dtype": DataType.FP32}, span)
 
 
 def test_all_to_all_v_rejects_input_target_alias():
