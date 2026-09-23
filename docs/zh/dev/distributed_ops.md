@@ -357,7 +357,7 @@ full-slice `get` 要求 `dst` / `src` 形状一致；subregion `get` 允许完�
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts, core_num: int | Scalar[INDEX] = 1
+    input, target, signal, send_counts, recv_counts, *, core_num: int | Scalar[INDEX] = 1
 ) -> DistributedTensorType(target)
 ```
 

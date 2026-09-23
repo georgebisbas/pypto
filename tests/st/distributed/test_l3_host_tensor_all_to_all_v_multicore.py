@@ -294,25 +294,32 @@ def _make_send_counts(n_ranks: int) -> torch.Tensor:
     return send_counts
 
 
-def _snapshot_logs() -> tuple[Path | None, set[Path]]:
+def _snapshot_logs() -> tuple[Path | None, dict[Path, int]]:
     """Snapshot the exported device-log dir (``ASCEND_PROCESS_LOG_PATH``), if any.
 
     The ST runner exports one, so the DFX lines below are checkable on hardware;
-    without it the cases fall back to whatever non-log evidence they have.
+    without it the cases fall back to whatever non-log evidence they have. Each
+    file's current size is recorded, not just its path, so a log file that an
+    earlier case in the same process already created still contributes the lines
+    this case appended to it.
     """
     root = os.environ.get("ASCEND_PROCESS_LOG_PATH")
     if not root or not Path(root).is_dir():
-        return None, set()
+        return None, {}
     base = Path(root)
-    return base, set(base.rglob("*.log"))
+    return base, {path: path.stat().st_size for path in base.rglob("*.log")}
 
 
-def _new_log_lines(root: Path | None, before: set[Path]) -> list[str]:
+def _new_log_lines(root: Path | None, before: dict[Path, int]) -> list[str]:
     """Every line written into the device-log dir since ``before`` was taken."""
     if root is None:
         return []
-    new_logs = sorted(set(root.rglob("*.log")) - before)
-    return [line for path in new_logs for line in path.read_text(errors="ignore").splitlines()]
+    lines: list[str] = []
+    for path in sorted(root.rglob("*.log")):
+        with path.open("rb") as stream:
+            stream.seek(before.get(path, 0))
+            lines.extend(stream.read().decode(errors="ignore").splitlines())
+    return lines
 
 
 class TestL3HostTensorAllToAllVMulticore:

@@ -625,6 +625,13 @@ TypePtr DeduceTensorAllToAllVType(const std::vector<ExprPtr>& args,
   // The InCore composite rail requires a compile-time core_num == 1;
   // LowerCompositeOps enforces that, so this deducer only rejects a
   // statically-provable non-positive value no rail could ever honour.
+  // The documented contract is `int | Scalar[INDEX]`, so the argument's type
+  // must be an integer Scalar: a float-typed scalar would otherwise be
+  // silently forwarded to the entry, and a tensor-typed argument would only
+  // fail much later inside the builtin dispatch.
+  auto core_num_scalar = As<ScalarType>(args[5]->GetType());
+  CHECK(core_num_scalar && core_num_scalar->dtype_.IsInt())
+      << "pld.tensor.all_to_all_v core_num must be an integer Scalar, got " << args[5]->GetType()->TypeName();
   if (auto core_num_const = As<ConstInt>(args[5])) {
     CHECK(core_num_const->value_ > 0)
         << "pld.tensor.all_to_all_v core_num must be positive, got " << core_num_const->value_;

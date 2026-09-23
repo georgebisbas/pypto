@@ -409,7 +409,7 @@ keyword attributes.
 
 ```text
 pld.tensor.all_to_all_v(
-    input, target, signal, send_counts, recv_counts, core_num: int | Scalar[INDEX] = 1
+    input, target, signal, send_counts, recv_counts, *, core_num: int | Scalar[INDEX] = 1
 ) -> DistributedTensorType(target)
 ```
 

@@ -2571,6 +2571,16 @@ def test_all_to_all_v_accepts_dynamic_core_num():
     assert isinstance(call.type, ir.DistributedTensorType)
 
 
+def test_all_to_all_v_rejects_non_integer_core_num():
+    """core_num must be an integer Scalar: a float-typed scalar is rejected at
+    the IR boundary instead of being silently forwarded to the entry."""
+    span = ir.Span.unknown()
+    args = _make_all_to_all_v_args(span)
+    args[5] = ir.Var("core_num", ir.ScalarType(DataType.FP32), span)
+    with pytest.raises(ValueError, match="core_num must be an integer Scalar"):
+        ir.create_op_call("pld.tensor.all_to_all_v", args, {}, span)
+
+
 def test_all_to_all_v_requires_recv_counts_operand():
     """The 4-arg form is rejected — recv_counts exposes the receive-side counts."""
     span = ir.Span.unknown()
