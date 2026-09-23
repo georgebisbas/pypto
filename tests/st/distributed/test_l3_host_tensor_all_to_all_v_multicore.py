@@ -81,6 +81,165 @@ def _admitted_blocks(n_ranks: int, core_num: int) -> int:
     return core_num if core_num < n_ranks else (core_num // n_ranks) * n_ranks
 
 
+def _build_host_all_to_all_v_multicore_reuse_program(
+    n_ranks: int,
+    max_recv: int,
+    core_num: int,
+    signal_stride: int,
+):
+    """Two straight-line ``all_to_all_v`` calls sharing ONE signal, at ``B > 1``.
+
+    The two calls live in a single HOST orchestration, over the same
+    ``stage`` / ``data`` / ``signal`` / ``counts`` / ``recv`` windows, so round 2
+    meets whatever credits round 1 left behind. Two separate ``compiled(...)``
+    invocations cannot test that: each builds and tears down its own worker and
+    re-runs window allocation, so no state survives to leak.
+
+    The rounds are written out rather than looped — the HOST rail rejects a
+    collective nested in a ``for``/``while`` — and every window is re-bound
+    (``pld.window(...)`` again over the same buffer) before each use, because the
+    InOut-use discipline kills a variable once a user function has consumed it
+    as ``Out``.
+
+    Unlike the single-round program this one does **not** read the signal back.
+    The multicore allreduce reuse ST documents why: a ``TWAIT(Eq 0)`` between
+    dispatches can observe a stale cached lane. Output correctness is the
+    definitive proof anyway — if the per-lane epilogue fails to drop round 1's
+    credits, round 2's barrier passes spuriously and reads peers' data before it
+    lands, so round 2's payload will not match its golden.
+    """
+    nr = n_ranks
+    mr = max_recv
+    total = nr * mr
+    cores = core_num
+    stride = signal_stride
+
+    @pl.program
+    class HostTensorAllToAllVMulticoreReuse:
+        """N-rank HOST-orchestrated ``all_to_all_v``, twice through one signal."""
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def stage_step(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            stage: pl.Out[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+        ):
+            for row in pl.range(total):
+                chunk = pl.load(inp, [row, 0], [1, SIZE])
+                stage = pl.store(chunk, [row, 0], stage)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def stage_orch(
+            self,
+            inp: pl.Tensor[[total, SIZE], pl.FP32],
+            stage: pl.Out[pld.DistributedTensor[[total, SIZE], pl.FP32]],
+        ):
+            self.stage_step(inp, stage)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def fill_counts_step(
+            self,
+            counts_row: pl.Tensor[[nr, 1], pl.INT32],
+            counts: pl.Out[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ):
+            for d in pl.range(nr):
+                v = pl.read(counts_row, [d, 0])
+                pl.write(counts, [d, 0], v)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def fill_counts_orch(
+            self,
+            counts_row: pl.Tensor[[nr, 1], pl.INT32],
+            counts: pl.Out[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        ):
+            self.fill_counts_step(counts_row, counts)
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consume_step(
+            self,
+            data: pld.DistributedTensor[[total, SIZE], pl.FP32],
+            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
+            recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
+        ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
+            # Same partition-the-slot discipline as the single-round program: a
+            # pl.Out tensor is write-only on the device, so every row must be
+            # written or it returns undefined memory instead of window content.
+            for src in pl.range(nr):
+                n_rows_i32 = pl.read(recv_counts, [src, 0])
+                pl.write(recv_out, [src, 0], n_rows_i32)
+                n_rows = pl.cast(n_rows_i32, pl.INDEX)
+                base = src * mr
+                for r in pl.range(n_rows):
+                    flat_row = base + r
+                    chunk = pl.load(data, [flat_row, 0], [1, SIZE])
+                    out = pl.store(chunk, [flat_row, 0], out)
+                for r in pl.range(n_rows, mr):
+                    flat_row = base + r
+                    chunk = pl.load(data, [flat_row, 0], [1, SIZE])
+                    out = pl.store(chunk, [flat_row, 0], out)
+            return out, recv_out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def consume_orch(
+            self,
+            data: pld.DistributedTensor[[total, SIZE], pl.FP32],
+            recv_counts: pld.DistributedTensor[[nr, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[total, SIZE], pl.FP32]],
+            recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
+        ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
+            return self.consume_step(data, recv_counts, out, recv_out)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, nr, total, SIZE], pl.FP32],
+            send_counts: pl.Tensor[[nr, nr, 1], pl.INT32],
+            outputs: pl.Out[pl.Tensor[[2, nr, total, SIZE], pl.FP32]],
+            recv_outputs: pl.Out[pl.Tensor[[2, nr, nr, 1], pl.INT32]],
+        ) -> tuple[pl.Tensor[[2, nr, total, SIZE], pl.FP32], pl.Tensor[[2, nr, nr, 1], pl.INT32]]:
+            input_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
+            data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(nr * stride * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+
+            for r in pl.range(pld.world_size()):
+                counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
+                self.fill_counts_orch(send_counts[r], counts, device=r)
+
+            # Round 1.
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(input_buf, [total, SIZE], dtype=pl.FP32)
+                self.stage_orch(inputs[0, r], stage, device=r)
+            stage = pld.window(input_buf, [total, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=cores)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, recv, outputs[0, r], recv_outputs[0, r], device=r)
+
+            # Round 2 — the SAME signal, never reset. Stale credits from round 1
+            # would let this call's barrier fall through early.
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(input_buf, [total, SIZE], dtype=pl.FP32)
+                self.stage_orch(inputs[1, r], stage, device=r)
+            stage = pld.window(input_buf, [total, SIZE], dtype=pl.FP32)
+            data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
+            counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
+            recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+            data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=cores)
+            for r in pl.range(pld.world_size()):
+                self.consume_orch(data, recv, outputs[1, r], recv_outputs[1, r], device=r)
+
+            return outputs, recv_outputs
+
+    return HostTensorAllToAllVMulticoreReuse
+
+
 def _build_host_all_to_all_v_multicore_program(
     n_ranks: int,
     max_recv: int,
@@ -402,13 +561,20 @@ class TestL3HostTensorAllToAllVMulticore:
         ],
     )
     def test_multicore_signal_reuse(self, test_config, device_ids, n_ranks, core_num, signal_stride):
-        """Two back-to-back calls through ONE signal at ``B > 1``.
+        """Two back-to-back collectives through ONE signal at ``B > 1``.
+
+        Both rounds run inside a SINGLE HOST orchestration on the same signal
+        window, with the inputs restaged in between and the signal never reset,
+        so round 2 actually meets round 1's leftover credits. (Driving two
+        ``compiled(...)`` calls from a Python loop would not: each one stands up
+        and tears down its own worker and redoes window allocation, so there is
+        no residue to observe.)
 
         Output correctness is the definitive proof: if the per-lane epilogue
         fails to drop round 1's credits, round 2's barrier passes spuriously on
         stale credits and the receive reads peers' data too early. Each round
         carries a distinct value offset so a stale round-1 result cannot match
-        its own golden.
+        round 2's golden.
         """
         if len(device_ids) < n_ranks:
             pytest.skip(f"multicore host all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
@@ -421,7 +587,7 @@ class TestL3HostTensorAllToAllVMulticore:
         label = f"reuse P={nr} L={core_num} B={admitted} stride={signal_stride}"
 
         compiled = ir.compile(
-            _build_host_all_to_all_v_multicore_program(nr, mr, core_num, signal_stride),
+            _build_host_all_to_all_v_multicore_reuse_program(nr, mr, core_num, signal_stride),
             platform=test_config.platform,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:nr],
@@ -430,28 +596,27 @@ class TestL3HostTensorAllToAllVMulticore:
         )
 
         send_counts = _make_send_counts(nr)
+        inputs = torch.stack([_make_inputs(nr, mr, round_offset=rd * 10000.0) for rd in range(rounds)])
+        outputs = torch.zeros((rounds, nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((rounds, nr, nr, 1), dtype=torch.int32)
+
+        compiled(inputs, send_counts, outputs, recv_outputs)
+
         for rd in range(rounds):
-            inputs = _make_inputs(nr, mr, round_offset=rd * 10000.0)
-            outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
-            recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
-            signal_outputs = torch.zeros((nr, nr, signal_stride), dtype=torch.int32)
-
-            compiled(inputs, send_counts, outputs, recv_outputs, signal_outputs)
-
             for rank in range(nr):
                 for src in range(nr):
                     n_rows = int(send_counts[src, rank, 0].item())
-                    assert int(recv_outputs[rank, src, 0].item()) == n_rows, (
+                    assert int(recv_outputs[rd, rank, src, 0].item()) == n_rows, (
                         f"{label} round {rd}: rank={rank} src={src}: recv_counts="
-                        f"{int(recv_outputs[rank, src, 0].item())} != expected={n_rows}"
+                        f"{int(recv_outputs[rd, rank, src, 0].item())}, expected {n_rows}"
                     )
                     base = src * mr
                     for k in range(n_rows):
-                        expected_row = inputs[src, rank * mr + k, :]
-                        got_row = outputs[rank, base + k, :]
+                        expected_row = inputs[rd, src, rank * mr + k, :]
+                        got_row = outputs[rd, rank, base + k, :]
                         assert torch.allclose(got_row, expected_row, atol=1e-5), (
                             f"{label} round {rd}: rank={rank} src={src} row={k}: "
-                            f"max diff = {(got_row - expected_row).abs().max().item()}"
+                            f"got {got_row[:4]}, expected {expected_row[:4]}"
                         )
 
     @pytest.mark.parametrize(
