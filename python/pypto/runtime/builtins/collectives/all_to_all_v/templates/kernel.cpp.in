@@ -168,7 +168,10 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   //   B >= P : K = B / P lanes per peer; this block owns one (peer, lane):
   //            peer = block_idx / K, lane = block_idx % K.
   //   B <  P : no lanes (K == 0); this block owns every B-th peer.
-  // Mirrors python/pypto/ir/op/distributed/lane_mapping.py (UT-pinned).
+  // This is the only implementation of the mapping; the geometry and the
+  // per-lane slice below are extracted from this template, compiled and run
+  // by test_kernel_lane_geometry_* in
+  // tests/ut/codegen/distributed/test_host_orch_distributed.py.
   // ==================================================================
   int32_t lanes_per_peer = active_blocks >= nranks ? active_blocks / nranks : 0;
   if (lanes_per_peer > 0 && lanes_per_peer * nranks != active_blocks) {

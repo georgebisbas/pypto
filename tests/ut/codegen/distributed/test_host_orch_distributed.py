@@ -1816,6 +1816,140 @@ int main() {{
     )
 
 
+# Lane geometry (RFC #2521 K3). Same discipline as the admission-formula test
+# above: the kernel template is the only implementation of this mapping, so the
+# properties are checked by compiling and running the kernel's own statements
+# rather than a Python transcription of them.
+_GEOMETRY_ANCHOR = "int32_t lanes_per_peer = active_blocks >= nranks ? active_blocks / nranks : 0;"
+_PEER_LANE_ANCHOR = "int32_t peer_of_block = lanes_per_peer > 0 ? block_idx / lanes_per_peer : 0;"
+_SLICE_ANCHOR = "int64_t lane_elems = (valid_numel + lanes_per_peer - 1) / lanes_per_peer;"
+
+# (P, B): admitted widths the entry can produce, plus the B < P stride regime.
+_GEOMETRY_POINTS = ((8, 8), (8, 16), (16, 16), (4, 8), (4, 4), (2, 8), (4, 2), (8, 4))
+# (valid_numel, K), including payloads smaller than K and ragged divisions.
+_SLICE_POINTS = ((0, 2), (1, 1), (2, 4), (10, 3), (9, 3), (7, 4), (100, 7), (4096, 2))
+
+
+def _extract_kernel_statements(source: str, anchor: str, count: int) -> str:
+    """Take ``count`` consecutive statements from the kernel body at ``anchor``."""
+    lines = source.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == anchor), None)
+    assert start is not None, f"kernel.cpp.in no longer contains the anchor: {anchor}"
+    block = "\n".join(line.strip() for line in lines[start : start + count])
+    assert "{{" not in block, f"extracted block needs template substitution:\n{block}"
+    return block
+
+
+def _run_kernel_lane_probe(tmp_path):
+    """Compile the kernel's own geometry and slice statements, and run them."""
+    template = (
+        resources.files("pypto.runtime.builtins.collectives.all_to_all_v") / "templates" / "kernel.cpp.in"
+    )
+    source = template.read_text(encoding="utf-8")
+    geometry = _extract_kernel_statements(source, _GEOMETRY_ANCHOR, 1)
+    peer_lane = _extract_kernel_statements(source, _PEER_LANE_ANCHOR, 2)
+    slice_stmts = _extract_kernel_statements(source, _SLICE_ANCHOR, 5)
+
+    geometry_cases = "\n".join(
+        f"  for (int32_t i = 0; i < {b}; ++i) emit_geometry({p}, {b}, i);" for p, b in _GEOMETRY_POINTS
+    )
+    slice_cases = "\n".join(f"  emit_slices({valid}, {k});" for valid, k in _SLICE_POINTS)
+    program = f"""#include <cstdint>
+#include <cstdio>
+
+static void emit_geometry(int32_t nranks, int32_t active_blocks, int32_t block_idx) {{
+{geometry}
+{peer_lane}
+  std::printf("geo %d %d %d %d %d %d\\n", nranks, active_blocks, block_idx, lanes_per_peer,
+              peer_of_block, lane_in_group);
+}}
+
+static void emit_slices(int64_t valid_numel, int32_t lanes_per_peer) {{
+  for (int32_t lane_in_group = 0; lane_in_group < lanes_per_peer; ++lane_in_group) {{
+{slice_stmts}
+    std::printf("slice %lld %d %d %lld %lld\\n", static_cast<long long>(valid_numel), lanes_per_peer,
+                lane_in_group, static_cast<long long>(begin), static_cast<long long>(end));
+  }}
+}}
+
+int main() {{
+{geometry_cases}
+{slice_cases}
+  return 0;
+}}
+"""
+    candidates = (os.environ.get("CXX"), "g++-15", "g++", "c++")
+    compiler = next((found for name in candidates if name and (found := shutil.which(name))), None)
+    if compiler is None:
+        pytest.skip("no C++ compiler available")
+
+    src = tmp_path / "lane_probe.cpp"
+    src.write_text(program, encoding="utf-8")
+    binary = tmp_path / "lane_probe"
+    build = subprocess.run(
+        [compiler, "-std=c++17", str(src), "-o", str(binary)], capture_output=True, text=True, check=False
+    )
+    assert build.returncode == 0, f"kernel lane statements do not compile standalone:\n{build.stderr}"
+    run = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+    assert run.returncode == 0, run.stderr
+
+    geometry_rows: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+    slice_rows: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for line in run.stdout.splitlines():
+        kind, *fields = line.split()
+        values = [int(f) for f in fields]
+        if kind == "geo":
+            nranks, blocks, _idx, k, peer, lane = values
+            geometry_rows.setdefault((nranks, blocks), []).append((k, peer, lane))
+        else:
+            valid, k, _lane, begin, end = values
+            slice_rows.setdefault((valid, k), []).append((begin, end))
+    return geometry_rows, slice_rows
+
+
+def test_kernel_lane_geometry_is_a_bijection_over_admitted_blocks(tmp_path):
+    """Every admitted block owns exactly one (peer, lane), and together they tile P x K.
+
+    Two blocks sharing a (peer, lane) would push the same sub-range twice and
+    leave another unsent; a gap would silently drop payload.
+    """
+    geometry_rows, _ = _run_kernel_lane_probe(tmp_path)
+    for (nranks, blocks), rows in geometry_rows.items():
+        k = rows[0][0]
+        assert all(row[0] == k for row in rows), f"P={nranks} B={blocks}: K is not uniform"
+        if blocks < nranks:
+            # Stride regime: no lanes; the kernel walks the peer set in its own loop.
+            assert k == 0, f"P={nranks} B={blocks}: expected K == 0"
+            assert all(row[1:] == (0, 0) for row in rows), f"P={nranks} B={blocks}"
+            continue
+        assert k == blocks // nranks, f"P={nranks} B={blocks}: K={k}"
+        pairs = [(peer, lane) for _k, peer, lane in rows]
+        assert len(set(pairs)) == len(pairs), f"P={nranks} B={blocks}: two blocks share a (peer, lane)"
+        assert set(pairs) == {(p, lane) for p in range(nranks) for lane in range(k)}, (
+            f"P={nranks} B={blocks}: blocks do not tile peer x lane"
+        )
+
+
+def test_kernel_lane_slice_partitions_each_peers_payload(tmp_path):
+    """The K lane ranges tile [0, valid_numel) exactly - adjacent, no overlap, no gap."""
+    _, slice_rows = _run_kernel_lane_probe(tmp_path)
+    for (valid, k), parts in slice_rows.items():
+        assert len(parts) == k
+        assert parts[0][0] == 0, f"valid={valid} K={k}: first lane does not start at 0"
+        for (_begin, end), (next_begin, _next_end) in zip(parts, parts[1:]):
+            assert end == next_begin, f"valid={valid} K={k}: lanes are not adjacent"
+        for begin, end in parts:
+            assert 0 <= begin <= end <= valid, f"valid={valid} K={k}: bad range ({begin}, {end})"
+        assert parts[-1][1] == valid, f"valid={valid} K={k}: last lane does not reach the payload end"
+
+
+def test_kernel_lane_slice_worked_examples(tmp_path):
+    """Ragged division, and a payload smaller than K so trailing lanes send nothing."""
+    _, slice_rows = _run_kernel_lane_probe(tmp_path)
+    assert slice_rows[(10, 3)] == [(0, 4), (4, 8), (8, 10)]
+    assert slice_rows[(2, 4)] == [(0, 1), (1, 2), (2, 2), (2, 2)]
+
+
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):
     program = passes.materialize_comm_domain_scopes()(program_cls)
     program = passes.lower_host_tensor_collectives()(program)
