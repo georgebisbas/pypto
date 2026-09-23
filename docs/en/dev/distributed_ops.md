@@ -513,6 +513,15 @@ launched_core_num=B active_lanes=min(B, stride)` plus the rank count, at the
 default log threshold — so the launch width is observable from the device log
 alone instead of being inferred from the data path.
 
+`B > 1` is correct but not yet faster. K2 makes the *launch width* dynamic and
+the barrier block-aware; it does not partition the payload, so every admitted
+block runs the whole exchange — it pushes this rank's full payload to every
+peer and writes every `recv_counts` entry. The writes are idempotent, so the
+result is right, but the interconnect traffic scales with `B` and `core_num > 1`
+costs a little more than `core_num = 1` rather than less. Splitting each peer's
+payload across the admitted blocks is the separate K3 work item; until it lands,
+raise `core_num` only to exercise the launch path, not for throughput.
+
 The InCore composite rail rejects any `core_num` other than a compile-time `1`,
 naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) is deliberately
 left gated at `core_num=1` — wiring a genuine multi-block launch into the

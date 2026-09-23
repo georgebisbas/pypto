@@ -260,6 +260,15 @@ def _build_host_all_to_all_v_multicore_program(
     # The lanes the kernel actually uses: `active_blocks = min(block_num, stride)`
     # with `block_num == B` and `stride >= B`, so exactly B.
     admitted = _admitted_blocks(nr, cores)
+    # The signal row is `stride` wide, so the readback may only wait on lanes the
+    # row actually has. `stride >= admitted` in every case the entry admits, but
+    # test_rejects_signal_stride_below_admitted_blocks builds this program with
+    # `stride < admitted` on purpose: without the clamp that case would address
+    # past the end of its own peer row and into the next peer's counters. It is
+    # masked today only because the entry aborts the dispatch before consume
+    # runs, so the clamp is what keeps that negative test failing cleanly rather
+    # than corrupting the window if the entry's stride reject ever regresses.
+    waited_lanes = min(admitted, signal_stride)
 
     @pl.program
     class HostTensorAllToAllVMulticore:
@@ -349,7 +358,7 @@ def _build_host_all_to_all_v_multicore_program(
             my_rank = pld.rank(ctx)
             for peer in pl.range(nr):
                 if peer != my_rank:
-                    for lane in pl.range(admitted):
+                    for lane in pl.range(waited_lanes):
                         pld.system.wait(
                             signal=signal,
                             offsets=[peer, lane],

@@ -172,8 +172,12 @@ void EmitBuiltinWindowCollectiveDispatch(DistributedCodegen& codegen, const Call
   // dynamic core_num support was added) can't be emitted inline here — TaskArgs
   // requires every tensor added before any scalar, and the ordering-token
   // tensor below still has to follow every window/tile arg. Collect their code
-  // in arg order and emit them after that token, ahead of the fixed
-  // domain_size/device_ctx/core_num-attr scalars below.
+  // in arg order and emit them after that token AND after the fixed
+  // domain_size/device_ctx scalars, but ahead of the out-of-band core_num
+  // *attr* scalar below. That exact order is load-bearing: entry.cpp.in reads
+  // its slots positionally (scalar(0)=nranks, scalar(1)=CommContext,
+  // scalar(2)=core_num), so reordering these emissions silently shifts every
+  // slot — see ad30598d for what that costs to debug.
   std::vector<std::string> deferred_scalar_args;
   for (size_t i = 0; i < call->args_.size(); ++i) {
     const std::string tag = ArgDirectionToTensorArgType(arg_directions[i]);

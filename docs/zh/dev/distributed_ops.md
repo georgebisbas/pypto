@@ -440,6 +440,13 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 launched_core_num=B active_lanes=min(B, stride)` 以及 rank 数，位于默认日志阈值——
 因此启动宽度可直接从设备日志读出，而无需从数据通路上推断。
 
+`B > 1` 目前正确但并不更快。K2 让*启动宽度*成为动态量，并使 barrier 按 block
+划分，但它并不切分负载：每个被准入的 block 都会执行完整的交换——把本 rank 的
+全量负载推送给每个 peer，并写入全部 `recv_counts` 条目。这些写入是幂等的，因此
+结果正确，但互连流量随 `B` 增长，`core_num > 1` 反而比 `core_num = 1` 略慢。把
+每个 peer 的负载按准入 block 切分是独立的 K3 工作项；在它落地之前，提高
+`core_num` 只用于验证启动路径，而非提升吞吐。
+
 InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直接拒绝，并在诊断
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径仍刻意保持在 `core_num=1`——把真正的
 多 block 启动接入 L2 托管路径是一个独立的、尚未启动的路线图项（O2），不属于
