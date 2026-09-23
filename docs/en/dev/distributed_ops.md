@@ -506,9 +506,11 @@ entry, which is the single `L -> B` site: the entry derives `B` from the rank
 count and `core_num`, rejects a signal narrower than `B` with an explicit
 runtime argument error **before** submitting the AIV task, and launches exactly
 `B` blocks with `require_sync_start`. The block-aware signal lanes above are
-what make `B > 1` correct. The entry also reports both values to DFX — one
-`LOG_TIMING` line per call carrying `requested_core_num=L launched_core_num=B`
-plus the rank count, at the default log threshold.
+what make `B > 1` correct. The entry also reports the three quantities §13.3
+names to DFX — one `LOG_TIMING` line per call carrying `requested_core_num=L
+launched_core_num=B active_lanes=min(B, stride)` plus the rank count, at the
+default log threshold — so the launch width is observable from the device log
+alone instead of being inferred from the data path.
 
 The InCore composite rail rejects any `core_num` other than a compile-time `1`,
 naming the CHIP rail in the diagnostic. The CHIP/L2 rail (below) is deliberately

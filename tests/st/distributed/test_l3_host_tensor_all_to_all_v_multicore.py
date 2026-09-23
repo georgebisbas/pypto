@@ -35,21 +35,29 @@ What each case proves, and what it does not:
   ``L`` that maps to more blocks than the signal is wide must fail explicitly
   rather than hang or silently under-deliver.
 
-Deliberately NOT checked here: **the launch width itself.** Setting
-``launch_spec(B)`` is pinned at codegen level by
-``test_host_orch_distributed.py``, and the data path cannot distinguish
-"launched B" from "launched L and let the tail return", because
-``active_blocks = min(block_num, stride)`` makes the extra blocks
-indistinguishable from never-launched ones. Observing the actual launch width
-needs the runtime's DFX surface — RFC #2521 §13.3's "requested L, launched B,
-and active lanes are observable", which is frozen item #10 and not implemented.
-Until it is, this ST is the strongest available evidence and not a substitute
-for that observation.
+Two further cases close RFC #2521 §13.3's observability ask from the device log:
+
+* **The three quantities are reported** —
+  ``test_reports_requested_admitted_and_active_lanes`` asserts the entry's one
+  ``LOG_TIMING`` line per call, carrying ``requested_core_num=L`` /
+  ``launched_core_num=B`` / ``active_lanes=min(B, stride)``.
+* **The submit width is ``B``, never ``L``, and over-capacity is atomic** —
+  ``test_rejects_over_capacity_admission`` asks for a ``B`` above the device's
+  AIV count with ``L != B``, and asserts the runtime's own submit-time message:
+  ``require_sync_start block_num=B > limit=<aiv_count>`` with ``FATAL(code=7)``.
+  That is the width the runtime was about to launch, and the failure happens *at
+  submit*, before any block is admitted.
+
+``dep_gen``'s ``tasks[].block_num`` is **not** a surface for the width: on this
+rail's submit path it records the default ``1`` regardless of the launch spec, so
+the evidence above comes from the runtime's submit-time check instead.
 
 ST coverage: P=2 and P=4 (skips when fewer devices are available).
 """
 
+import os
 import sys
+from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -286,6 +294,27 @@ def _make_send_counts(n_ranks: int) -> torch.Tensor:
     return send_counts
 
 
+def _snapshot_logs() -> tuple[Path | None, set[Path]]:
+    """Snapshot the exported device-log dir (``ASCEND_PROCESS_LOG_PATH``), if any.
+
+    The ST runner exports one, so the DFX lines below are checkable on hardware;
+    without it the cases fall back to whatever non-log evidence they have.
+    """
+    root = os.environ.get("ASCEND_PROCESS_LOG_PATH")
+    if not root or not Path(root).is_dir():
+        return None, set()
+    base = Path(root)
+    return base, set(base.rglob("*.log"))
+
+
+def _new_log_lines(root: Path | None, before: set[Path]) -> list[str]:
+    """Every line written into the device-log dir since ``before`` was taken."""
+    if root is None:
+        return []
+    new_logs = sorted(set(root.rglob("*.log")) - before)
+    return [line for path in new_logs for line in path.read_text(errors="ignore").splitlines()]
+
+
 class TestL3HostTensorAllToAllVMulticore:
     """L3 distributed runtime: HOST ``all_to_all_v`` with ``core_num > 1`` (RFC #2521 K2)."""
 
@@ -461,6 +490,139 @@ class TestL3HostTensorAllToAllVMulticore:
 
         with pytest.raises(RuntimeError):
             compiled(inputs, send_counts, outputs, recv_outputs, signal_outputs)
+
+    @pytest.mark.parametrize(
+        ("n_ranks", "core_num", "signal_stride"),
+        [
+            pytest.param(2, 5, 4, id="p2-l5-b4"),
+            pytest.param(4, 10, 8, id="p4-l10-b8"),
+            pytest.param(2, 2, 3, id="p2-l2-b2-stride-wider-than-b"),
+        ],
+    )
+    def test_reports_requested_admitted_and_active_lanes(
+        self, test_config, device_ids, n_ranks, core_num, signal_stride
+    ):
+        """RFC #2521 §13.3: ``L``, ``B`` and the active lane count are observable.
+
+        The entry is the single ``L -> B`` site, so it reports all three quantities
+        on one ``LOG_TIMING`` line per call. Asserted from the device log rather
+        than from the generated source, so the check covers the runtime's log sink
+        wiring too. ``active_lanes`` is ``min(B, stride)`` — the kernel's own
+        ``active_blocks`` under the launch contract (``block_num == B``; an
+        over-capacity request is rejected at submit, see the case below).
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"multicore host all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr = n_ranks
+        mr = MAX_RECV
+        total = nr * mr
+        admitted = _admitted_blocks(nr, core_num)
+        active = min(admitted, signal_stride)
+        label = f"dfx P={nr} L={core_num} B={admitted} stride={signal_stride}"
+
+        compiled = ir.compile(
+            _build_host_all_to_all_v_multicore_program(nr, mr, core_num, signal_stride),
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:nr],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = _make_inputs(nr, mr)
+        send_counts = _make_send_counts(nr)
+        outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        signal_outputs = torch.zeros((nr, nr, signal_stride), dtype=torch.int32)
+
+        log_root, before = _snapshot_logs()
+        compiled(inputs, send_counts, outputs, recv_outputs, signal_outputs)
+        lines = _new_log_lines(log_root, before)
+        if log_root is None:
+            pytest.skip("no ASCEND_PROCESS_LOG_PATH exported: the entry's DFX line cannot be read")
+
+        expected = (
+            f"requested_core_num={core_num} launched_core_num={admitted} active_lanes={active} nranks={nr}"
+        )
+        assert any(expected in line for line in lines), (
+            f"{label}: no entry DFX line carrying '{expected}' among {len(lines)} new log line(s)"
+        )
+
+    @pytest.mark.parametrize(
+        ("n_ranks", "core_num", "signal_stride"),
+        [pytest.param(2, 51, 50, id="p2-l51-b50-over-capacity")],
+    )
+    def test_rejects_over_capacity_admission(self, test_config, device_ids, n_ranks, core_num, signal_stride):
+        """``B`` above the device's AIV count fails at submit, never partially starts.
+
+        K2 §11.2's *"failure to admit ``B`` atomically raises rather than partially
+        starting"* criterion, and — because the runtime prints the width it is about
+        to launch — the *"launches only ``B``, never ``L``"* criterion with it.
+
+        The case picks ``L = 51`` at ``P = 2``: ``B = 50`` clears this device's 48
+        AIVs while ``L != B``, so the runtime's own submit-time message
+        (``require_sync_start block_num=B > limit=<aiv_count>``, ``FATAL(code=7)``,
+        raised by the deadlock guard before any block is admitted) is a
+        discriminating statement about the launch width: it names ``B``, and no log
+        line names ``L`` as a width. The runtime repo covers the same guard in
+        ``tests/st/runtime_fatal_codes`` (``core_num=1000``); this drives it through
+        this rail's own entry, whose ``L`` must first clear the stride check.
+
+        Evidence: the dispatch raises, and — when the caller exported
+        ``ASCEND_PROCESS_LOG_PATH`` (the ST runner does) — the device log carries
+        the guard's message and the entry's ``requested_core_num`` /
+        ``launched_core_num`` / ``active_lanes`` line.
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"multicore host all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr = n_ranks
+        mr = MAX_RECV
+        total = nr * mr
+        admitted = _admitted_blocks(nr, core_num)
+        assert signal_stride >= admitted, "case is malformed: our own stride check must pass"
+        label = f"over-capacity P={nr} L={core_num} B={admitted}"
+
+        compiled = ir.compile(
+            _build_host_all_to_all_v_multicore_program(nr, mr, core_num, signal_stride),
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:nr],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = _make_inputs(nr, mr)
+        send_counts = _make_send_counts(nr)
+        outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
+        signal_outputs = torch.zeros((nr, nr, signal_stride), dtype=torch.int32)
+
+        log_root, before = _snapshot_logs()
+
+        with pytest.raises(RuntimeError):
+            compiled(inputs, send_counts, outputs, recv_outputs, signal_outputs)
+
+        lines = _new_log_lines(log_root, before)
+        if log_root is None:
+            return  # the raise itself is the evidence when no log dir was exported
+
+        assert any("FATAL(code=7)" in line and "require_sync_start" in line for line in lines), (
+            f"{label}: no 'FATAL(code=7) ... require_sync_start' line among {len(lines)} new log line(s)"
+        )
+        assert any(f"require_sync_start block_num={admitted} > limit=" in line for line in lines), (
+            f"{label}: the rejected width is not B={admitted}; "
+            f"expected 'require_sync_start block_num={admitted} > limit='"
+        )
+        assert not any(f"block_num={core_num}" in line for line in lines), (
+            f"{label}: the runtime saw L={core_num} as a launch width"
+        )
+        expected = (
+            f"requested_core_num={core_num} launched_core_num={admitted} "
+            f"active_lanes={min(admitted, signal_stride)} nranks={nr}"
+        )
+        assert any(expected in line for line in lines), f"{label}: no entry DFX line carrying '{expected}'"
 
 
 if __name__ == "__main__":

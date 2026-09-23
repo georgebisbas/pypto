@@ -1743,6 +1743,7 @@ def test_host_all_to_all_v_entry_computes_b_and_launches_only_b(tmp_path):
     # by the one site that knows them.
     assert "requested_core_num=" in entry_cpp, entry_cpp
     assert "launched_core_num=" in entry_cpp, entry_cpp
+    assert "active_lanes=" in entry_cpp, entry_cpp
 
 
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):

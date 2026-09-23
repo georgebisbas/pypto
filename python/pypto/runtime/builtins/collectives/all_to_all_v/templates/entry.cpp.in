@@ -75,15 +75,28 @@ void submit_all_to_all_v_kernel(const ChipTaskArgs &orch_args) {
   params.launch_spec.{{launch_core_count_method}}(admitted_blocks);
   params.launch_spec.set_require_sync_start(true);
 
-  // RFC #2521 frozen item #10 / §13.3: the requested limit L and the admitted
-  // block count B must both be observable, and this entry is the single `L -> B`
-  // site, so it is the only place that knows both. LOG_TIMING sits at the
-  // default log threshold. The guard covers a rail whose DFX sink is compiled
-  // out -- the ops table is not contractually required to carry one.
+  // RFC #2521 frozen item #10 / §13.3 asks for three quantities to be observable:
+  // the requested limit L, the admitted block count B, and the active lane count
+  // `min(block_num, signal_stride)`. This entry is the single `L -> B` site, so it
+  // is the only place that knows all three before the submit: `admitted_blocks` is
+  // what the launch spec asks the scheduler for, and the stride check above
+  // guarantees `signal_stride >= admitted_blocks`, so the kernel's own clamp
+  // `active_blocks = min(block_num, signal_stride)` agrees with this value whenever
+  // the launch is honoured -- which it always is, because the runtime rejects a
+  // `require_sync_start` task whose `block_num` exceeds the core count
+  // (`SIMPLER_ERROR_REQUIRE_SYNC_START_INVALID`). A launch width that silently
+  // differed from `admitted_blocks` would show up here as `active_lanes !=
+  // launched_core_num`, i.e. as a defect, not as a clamp.
+  // LOG_TIMING sits at the default log threshold. The guard covers a rail whose
+  // DFX sink is compiled out -- the ops table is not contractually required to
+  // carry one.
   if (current_runtime()->ops->log_timing != nullptr) {
+    const int32_t active_lanes = admitted_blocks < static_cast<int32_t>(signal_stride)
+                                     ? admitted_blocks
+                                     : static_cast<int32_t>(signal_stride);
     LOG_TIMING(
-        "all_to_all_v: requested_core_num=%d launched_core_num=%d nranks=%d", core_num, admitted_blocks,
-        nranks
+        "all_to_all_v: requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d", core_num,
+        admitted_blocks, active_lanes, nranks
     );
   }
 

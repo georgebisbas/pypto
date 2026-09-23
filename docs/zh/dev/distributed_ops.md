@@ -436,8 +436,9 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 `L -> B` 位置：它由 rank 数与 `core_num` 推导 `B`，在提交 AIV 任务**之前**以显式
 运行时参数错误拒绝宽度小于 `B` 的 signal，并严格启动 `B` 个 block
 （`require_sync_start`）。上文按 block 划分的 signal 车道正是为 `B > 1` 服务。入口还会把
-这两个值上报给 DFX——每次调用一行 `LOG_TIMING`，携带 `requested_core_num=L
-launched_core_num=B` 以及 rank 数，位于默认日志阈值。
+§13.3 列出的三个量上报给 DFX——每次调用一行 `LOG_TIMING`，携带 `requested_core_num=L
+launched_core_num=B active_lanes=min(B, stride)` 以及 rank 数，位于默认日志阈值——
+因此启动宽度可直接从设备日志读出，而无需从数据通路上推断。
 
 InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直接拒绝，并在诊断
 信息中指明 CHIP 路径。下文的 CHIP/L2 路径仍刻意保持在 `core_num=1`——把真正的
