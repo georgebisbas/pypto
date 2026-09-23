@@ -247,62 +247,59 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
   // ==================================================================
   // Phase 2 - scalar counts pull. Barrier A guarantees every peer's send
-  // vector is staged and visible, so the admitted blocks collectively read the ONE
-  // word each peer owes this rank: peer_send_counts[my_rank] (K3 partitions who
-  // pulls what - see below). ld_dev is the non-cacheable
+  // vector is staged and visible, so this rank reads the ONE word each peer
+  // owes it: peer_send_counts[my_rank]. ld_dev is the non-cacheable
   // remote-word read idiom (the a2a3 TNotify NotifyOp::Set fix and the A2A3
   // soft-SYNCALL poll read remote words the same way), so no bulk TLOAD, no
-  // dcci, and no fixed-width requirement on the send_counts buffer - the
-  // [NR] INT32 vector at the start of a window is all the op needs.
-  // The RAW value is clamped two-sided reader-side - the same clamp the sender
-  // applies to its transfer - so HOST and InCore stay bit-for-bit identical.
-  // No rank writes into another rank's array, and no NotifyOp::Set is
-  // involved anywhere.
+  // dcci on the read path, and no fixed-width requirement on the send_counts
+  // buffer - the [NR] INT32 vector at the start of a window is all the op
+  // needs. The RAW value is clamped two-sided reader-side - the same clamp
+  // the sender applies to its transfer - so HOST and InCore stay bit-for-bit
+  // identical. No rank writes into another rank's array, and no NotifyOp::Set
+  // is involved anywhere. In K3 exactly ONE block per rank owns this phase
+  // (see the body for the cache-line reason it is not block-partitioned).
   // ==================================================================
   {
-    // K3: the pulls are partitioned so each recv_counts entry has exactly ONE
-    // writer, while the admitted blocks together still cover every source:
-    //   K > 0 (B >= P): the lane-0 block of each peer group pulls its group's
-    //     source; every other lane skips the pull entirely.
-    //   K == 0 (B < P): each block pulls its stride set (src = block_idx,
-    //     block_idx + active_blocks, ...).
-    // The pull exists only to populate the consumer-visible window (the Phase 3
-    // pushes read the LOCAL send_counts_base[dest]), so this is hazard-free.
-    if (lanes_per_peer > 0) {
-      if (lane_in_group == 0) {
-        int src = peer_of_block;
-        int32_t pulled;
-        if (src == my_rank) {
-          pulled = send_counts_base[my_rank];
-        } else {
-          __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
-          pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t *>(remote_slot), 0));
-        }
+    // K3: exactly ONE block per rank owns this entire phase, and that is a
+    // correctness requirement, not a simplification. recv_counts is P
+    // adjacent INT32 words - one 64-byte cache line at any realistic P - and
+    // a dcci write-back flushes the whole LINE, not just the touched word
+    // (cache-line write-back clobbers concurrent same-line writes). If
+    // several blocks each wrote a different word of that one line, one
+    // block's write-back could clobber a neighbour's fresh word with a stale
+    // zero - observed on silicon as intermittent recv_counts=0. With block 0
+    // writing every word, each write-back carries only this core's own
+    // correct values. Aggregate pulls still drop from K2's B*P to P; the
+    // payload partition (the actual K3 win) is Phase 3 and stays lane-scoped.
+    if (block_idx == 0) {
+      // Self: my own send vector is local.
+      {
+        int32_t self_rows = send_counts_base[my_rank];
+        if (self_rows > max_recv) self_rows = static_cast<int32_t>(max_recv);
+        if (self_rows < 0) self_rows = 0;
+        recv_counts_base[my_rank] = self_rows;
+      }
+
+      for (int src = 0; src < nranks; ++src) {
+        if (src == my_rank) continue;
+        __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
+        int32_t pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t *>(remote_slot), 0));
         if (pulled > max_recv) pulled = static_cast<int32_t>(max_recv);
         if (pulled < 0) pulled = 0;
         recv_counts_base[src] = pulled;
+      }
+
+      // Flush the whole delivered vector to GM: a consumer on another AIV
+      // invalidates and re-reads the window, so a value left sitting in this
+      // core's cache would read back as stale zero. Every word of the line
+      // was written by THIS core, so each write-back is fully correct.
+      for (int src = 0; src < nranks; ++src) {
         __asm__ __volatile__("");
         dcci(static_cast<__gm__ void *>(recv_counts_base + src), cache_line_t::SINGLE_CACHE_LINE);
         __asm__ __volatile__("");
       }
-    } else {
-      for (int src = block_idx; src < nranks; src += active_blocks) {
-        int32_t pulled;
-        if (src == my_rank) {
-          pulled = send_counts_base[my_rank];
-        } else {
-          __gm__ int32_t *remote_slot = CommRemotePtr(comm_ctx, send_counts_base + my_rank, src);
-          pulled = static_cast<int32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t *>(remote_slot), 0));
-        }
-        if (pulled > max_recv) pulled = static_cast<int32_t>(max_recv);
-        if (pulled < 0) pulled = 0;
-        recv_counts_base[src] = pulled;
-        __asm__ __volatile__("");
-        dcci(static_cast<__gm__ void *>(recv_counts_base + src), cache_line_t::SINGLE_CACHE_LINE);
-        __asm__ __volatile__("");
-      }
+      dsb(DSB_DDR);
     }
-    dsb(DSB_DDR);
     pipe_barrier(PIPE_ALL);
   }
 
