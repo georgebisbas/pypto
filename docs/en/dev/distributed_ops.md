@@ -509,8 +509,9 @@ runtime argument error **before** submitting the AIV task, and launches exactly
 `B` blocks with `require_sync_start`. The block-aware signal lanes above are
 what make `B > 1` correct. The entry also reports the three quantities §13.3
 names to DFX — one `LOG_TIMING` line per call carrying `requested_core_num=L
-launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` plus the rank
-count, at the default log threshold — so the launch width is observable from
+launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` (`0` in the
+`B < NR` stride regime) plus the rank count, at the default log threshold — so
+the launch width is observable from
 the device log alone instead of being inferred from the data path.
 
 The admitted blocks **partition the work** (RFC #2521 K3):
@@ -524,10 +525,11 @@ The admitted blocks **partition the work** (RFC #2521 K3):
   idx + 2B, …`, pushing each peer's full range.
 
 Counts remain a pull with the same two-sided clamp, but the pull is owned by
-one block per rank: `recv_counts` is `NR` adjacent `int32` words — a single
-64-byte cache line — and a `dcci` write-back flushes the whole line, so
+one block per rank: `recv_counts` is `NR` adjacent `int32` words — one or more
+64-byte cache lines — and a `dcci` write-back flushes the whole line, so
 partitioning the counts writes across blocks would let one block's write-back
-clobber a neighbour's fresh word. The barriers, credits and the kernel ABI are
+clobber a neighbour's fresh word in the same line. The barriers, credits and
+the kernel ABI are
 unchanged; the per-lane completion surface stays the `AtomicAdd(-2)`
 self-clearing credit lanes.
 

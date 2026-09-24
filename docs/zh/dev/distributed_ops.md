@@ -437,7 +437,7 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 运行时参数错误拒绝宽度小于 `B` 的 signal，并严格启动 `B` 个 block
 （`require_sync_start`）。上文按 block 划分的 signal 车道正是为 `B > 1` 服务。入口还会把
 §13.3 列出的三个量上报给 DFX——每次调用一行 `LOG_TIMING`，携带 `requested_core_num=L
-launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` 以及 rank 数，位于默认日志阈值——
+launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K`（`B < NR` 的 stride 模式下为 `0`）以及 rank 数，位于默认日志阈值——
 因此启动宽度可直接从设备日志读出，而无需从数据通路上推断。
 
 已准入的 block 会**划分工作**（RFC #2521 K3）：
@@ -450,8 +450,8 @@ launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` 以及 rank �
   各自推送完整区间。
 
 计数仍为两侧截断的 pull，但 pull 由每个 rank 的单一 block 拥有（`recv_counts`
-是 `NR` 个相邻 `int32`，即同一条 64 字节缓存行；将它的写入分散到多个 block 会
-触发缓存行写回互相覆盖的缺陷类）。屏障、credit 与内核 ABI 均不变；每个 lane 的
+是 `NR` 个相邻 `int32`，可能跨越一条或多条 64 字节缓存行；将它的写入分散到多个
+block 会触发缓存行写回互相覆盖的缺陷类）。屏障、credit 与内核 ABI 均不变；每个 lane 的
 完成面仍是 `AtomicAdd(-2)` 的自清零 credit 车道。
 
 InCore 复合路径只接受编译期的 `core_num = 1`，其他取值会被直接拒绝，并在诊断

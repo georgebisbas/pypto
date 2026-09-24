@@ -265,7 +265,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
   {
     // K3: exactly ONE block per rank owns this entire phase, and that is a
     // correctness requirement, not a simplification. recv_counts is P
-    // adjacent INT32 words - one 64-byte cache line at any realistic P - and
+    // adjacent INT32 words - one or more 64-byte cache lines - and
     // a dcci write-back flushes the whole LINE, not just the touched word
     // (cache-line write-back clobbers concurrent same-line writes). If
     // several blocks each wrote a different word of that one line, one
