@@ -2732,6 +2732,23 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed, constexpr_values={"dd": "[]"})
         assert metas["view"] == seed["src"]
 
+    def test_slice_with_an_unresolvable_local_drop_dims_declines_rather_than_guess(self):
+        """A sixth review pass caught this: resolving a Name's bound value
+        returns ``None`` both for a genuine ``drop_dims=None`` binding and
+        for a local parameter forwarding ``drop_dims`` (unresolvable
+        statically -- its real value only exists at runtime). Conflating
+        the two would treat a real, non-empty runtime ``drop_dims`` as a
+        no-op and advertise the wrong, pre-drop rank. A local/shadowed name
+        must always decline, never be assumed empty."""
+
+        def body(src, drop_dims):
+            view = pl.tensor.slice(src, [1, 64], [0, 0], drop_dims=drop_dims)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "view" not in metas
+
     def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
         """The same review pass: ``pl.slice``/``pl.reshape``'s real first
         parameter is named ``tensor`` (tensor_ops.py), not ``input`` --
