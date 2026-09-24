@@ -1969,22 +1969,23 @@ def _extract_local_tensor_metas(
 
     # 3-segment spellings this walker also understands, keyed by the FULL
     # dotted path so a match can never collide across namespaces the way
-    # attr-name-only dispatch could. A callable value reuses the exact
-    # handler the 2-segment sugar form above already has (pl.tensor.slice is
-    # pl.slice, same op). None marks an op with no per-op handler here but
+    # attr-name-only dispatch could. The pl.tensor.* / pld.tensor.window
+    # entries are DERIVED from _pl_attr_handlers above rather than
+    # hand-duplicated, so a new entry added there is automatically covered
+    # under its 3-segment spelling too — the two tables can't drift apart
+    # for that half. None marks an op with no per-op handler here but
     # documented as returning its own rebind target's type unchanged — the
     # same "preserve what the name already held" fallback unmodelled
-    # one-level pl.* calls already get (e.g. pl.assemble). Anything NOT
-    # listed here safely falls through to local.pop(), exactly like today's
+    # one-level pl.* calls already get (e.g. pl.assemble). These have no
+    # 2-segment sugar to derive from (the managed collectives are
+    # 3-segment-only), so they're listed explicitly. Anything NOT listed
+    # here safely falls through to local.pop(), exactly like today's
     # behavior for any other unrecognized call: a new op starts safe by
     # default and must be added here deliberately, never silently assumed
     # same-shape (#2638).
     _qualified_call_handlers: _QualifiedCallHandlers = {
-        ("pl", "tensor", "create_tensor"): _create_tensor_meta,
-        ("pl", "tensor", "slice"): _slice_meta,
-        ("pl", "tensor", "window"): _window_meta,
-        ("pl", "tensor", "reshape"): _reshape_meta,
-        ("pld", "tensor", "window"): _window_meta,
+        **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
+        ("pld", "tensor", "window"): _pl_attr_handlers["window"],
         # Managed collectives: 3-segment-only (no 2-segment sugar exists).
         # Each is documented as returning its `target` operand's own type
         # unchanged — a same-shape rebind.

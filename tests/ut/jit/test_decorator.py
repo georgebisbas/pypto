@@ -2579,6 +2579,55 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert "buf" not in metas
 
+    def test_window_three_segment_form_missing_dtype_untracked(self):
+        """The identical "handler present but declines" case
+        ``test_window_missing_dtype_untracked`` already covers for the
+        2-segment spelling, now for the 3-segment one: ``_qualified_call_meta``
+        must not conflate "handler ran and returned None" with "preserve
+        existing"."""
+
+        def body(buf):
+            win = pld.tensor.window(buf, [1, 256])  # no dtype= kw
+            return win
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "win" not in metas
+
+    def test_all_to_all_v_rebind_inside_a_for_loop_keeps_metadata(self):
+        """Exercises the recursive self-call in ``_walk_local_tensor_meta_stmts``,
+        which threads ``qualified_call_handlers`` into nested bodies
+        separately from the direct call -- a dropped or misordered parameter
+        there would only break a rebind inside a block like this one, which
+        none of the other (top-level-only) tests above would catch."""
+
+        def body(stage, data, signal, send_counts, recv_counts, n):
+            for _ in pl.range(n):
+                data = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
+            return data
+
+        seed = {
+            "stage": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "data": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "send_counts": TensorMeta(shape=(4,), dtype=DataType.INT32),
+            "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["data"] == seed["data"]
+
+    def test_call_rooted_attribute_chain_is_not_mistaken_for_a_qualified_call(self):
+        """``_flatten_dotted_call`` returns None for a callee that isn't a
+        pure attribute/name chain -- e.g. one rooted at a Call rather than a
+        Name, named in the helper's own docstring as an unresolvable shape.
+        Must still safely drop rather than crash or misidentify the call."""
+
+        def body(other):
+            x = other().tensor.window([1, 1], dtype=pl.FP32)
+            return x
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "x" not in metas
+
 
 class TestDtypeOperandResolution:
     """A ``dtype=`` operand is resolved by value, not by its ``pl.<NAME>``
