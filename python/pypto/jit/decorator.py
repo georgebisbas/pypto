@@ -1297,6 +1297,19 @@ def _call_operand(call: ast.Call, index: int | None, name: str) -> ast.expr | No
     return next((kw.value for kw in call.keywords if kw.arg == name), None)
 
 
+def _tensor_or_input_operand(call: ast.Call) -> ast.expr | None:
+    """The first positional operand of ``pl.slice``/``pl.reshape`` or their
+    ``pl.tensor.*`` siblings — two real spellings, two real parameter names
+    for the same slot (``tensor_ops.py``'s ``tensor`` vs ``unified_ops.py``'s
+    ``input``). A positional call is unaffected either way; only an
+    explicit-keyword one needs both names checked.
+    """
+    operand = _call_operand(call, 0, "tensor")
+    if operand is None:
+        operand = _call_operand(call, 0, "input")
+    return operand
+
+
 def _shape_attr_source(node: ast.expr) -> str | None:
     """The tensor name ``node`` reads the shape of (``src.shape`` → ``"src"``), or None."""
     if isinstance(node, ast.Attribute) and node.attr == "shape" and isinstance(node.value, ast.Name):
@@ -1927,8 +1940,9 @@ def _extract_local_tensor_metas(
         return TensorMeta(shape=shape, dtype=dtype_val)
 
     def _reshape_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
-        # pl.reshape(input, shape) — dtype inherited from source tensor.
-        src = _call_operand(call, 0, "input")
+        # pl.reshape(input, shape) / pl.tensor.reshape(tensor, shape) — dtype
+        # inherited from source tensor.
+        src = _tensor_or_input_operand(call)
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
         src_meta = local[src.id]
@@ -1951,17 +1965,26 @@ def _extract_local_tensor_metas(
         return TensorMeta(shape=shape, dtype=src_meta.dtype)
 
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
-        # pl.slice(input, shape, offset, ...) — each by position or keyword.
+        # pl.slice(input, shape, offset, ...) / pl.tensor.slice(tensor, shape,
+        # offset, ...) — shape/offset/drop_dims/etc. share the same names in
+        # both real spellings; only the first param's name differs.
+        #
         # drop_dims rank-reduces the result; this handler doesn't model that,
         # so decline rather than advertise the pre-drop shape at the wrong
-        # rank. Pre-existing gap for the 2-segment spelling too, not
-        # introduced by qualified dispatch — just newly reachable through it.
+        # rank — UNLESS drop_dims is itself a no-op (omitted, None, or an
+        # explicitly empty list/tuple), which drops no dims and leaves the
+        # already-computed shape correct. Pre-existing gap for the 2-segment
+        # spelling too, not introduced by qualified dispatch — just newly
+        # reachable through it.
         drop_dims_node = _call_operand(call, 4, "drop_dims")
-        if drop_dims_node is not None and not (
-            isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None
-        ):
+        drop_dims_is_noop = (
+            drop_dims_node is None
+            or (isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None)
+            or (isinstance(drop_dims_node, (ast.List, ast.Tuple)) and len(drop_dims_node.elts) == 0)
+        )
+        if not drop_dims_is_noop:
             return None
-        src = _call_operand(call, 0, "input")
+        src = _tensor_or_input_operand(call)
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
         src_meta = local[src.id]
