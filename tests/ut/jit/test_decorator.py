@@ -2670,6 +2670,38 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert "view" not in metas
 
+    def test_slice_with_an_explicitly_empty_drop_dims_still_gets_metadata(self):
+        """A third review pass caught this: an explicitly empty
+        ``drop_dims=[]`` drops nothing, so it's a no-op that the
+        drop_dims guard above must not blanket-decline -- only a
+        *non-empty* ``drop_dims`` actually rank-reduces the result."""
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=[])
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
+    def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
+        """The same review pass: ``pl.slice``/``pl.reshape``'s real first
+        parameter is named ``tensor`` (tensor_ops.py), not ``input`` --
+        ``_slice_meta``/``_reshape_meta`` were matching the wrong keyword
+        name, invisible for a positional call (``_call_operand`` checks the
+        positional slot first) but silently dropping metadata for an
+        explicit-keyword one, on both the 2- and 3-segment spellings."""
+
+        def body(src):
+            sliced = pl.tensor.slice(tensor=src, shape=[4, 64], offset=[0, 0])
+            flat = pl.tensor.reshape(tensor=src, shape=[256])
+            return sliced, flat
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["sliced"] == seed["src"]
+        assert metas["flat"] == TensorMeta(shape=(256,), dtype=DataType.FP32)
+
 
 class TestDtypeOperandResolution:
     """A ``dtype=`` operand is resolved by value, not by its ``pl.<NAME>``
