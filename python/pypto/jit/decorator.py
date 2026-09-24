@@ -1335,6 +1335,49 @@ def _extract_dim_alias(value: ast.expr | None) -> tuple[str, int] | None:
     return None
 
 
+def _flatten_dotted_call(fn: ast.expr) -> tuple[str, ...] | None:
+    """Full dotted path of a plain attribute/name chain, e.g. ``pld.tensor.all_to_all_v``
+    -> ``("pld", "tensor", "all_to_all_v")``, or None if ``fn`` isn't a pure chain of
+    ``Attribute`` nodes rooted at a ``Name`` (so this walker cannot reason about it at all —
+    for example the callee of a higher-order call, or an attribute on a subscript)."""
+    segments: list[str] = []
+    node = fn
+    while isinstance(node, ast.Attribute):
+        segments.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    segments.append(node.id)
+    segments.reverse()
+    return tuple(segments)
+
+
+# Qualified (3+-segment) call dispatch: full dotted path -> a handler that
+# computes the result's TensorMeta, or None for an op documented as
+# returning its own rebind target's type unchanged (#2638).
+_QualifiedCallHandlers = dict[tuple[str, ...], Callable[[ast.Call, str | None], TensorMeta | None] | None]
+
+
+def _qualified_call_meta(
+    fn: ast.expr,
+    value: ast.Call,
+    named_target: str | None,
+    qualified_call_handlers: _QualifiedCallHandlers,
+) -> tuple[TensorMeta | None, bool]:
+    """Metadata effect of a qualified call: ``(meta, preserve_existing)``.
+
+    Unlisted paths return ``(None, False)`` — the caller then falls through to
+    ``local.pop()``, exactly like any other unrecognized call.
+    """
+    path = _flatten_dotted_call(fn)
+    if path is None or path not in qualified_call_handlers:
+        return None, False
+    handler = qualified_call_handlers[path]
+    if handler is not None:
+        return handler(value, named_target), False
+    return None, True
+
+
 def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -> ShapeDim | None:
     """Dim ``k`` of tensor ``P`` for a ``(P, k)`` dim alias, or None when ``P`` is untracked."""
     if alias is None:
@@ -1392,6 +1435,7 @@ def _update_local_tensor_meta(
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    qualified_call_handlers: _QualifiedCallHandlers,
 ) -> None:
     """Apply one assignment's metadata effects to the source-ordered state."""
     parts = _assignment_parts(stmt)
@@ -1425,6 +1469,11 @@ def _update_local_tensor_meta(
                 # result metadata this extractor does not model (for example,
                 # same-shaped pl.assemble rebindings).
                 preserve_existing = True
+        elif isinstance(fn, ast.Attribute) and has_named_target:
+            # A qualified (3+-segment) spelling, e.g. pld.tensor.all_to_all_v(...)
+            # or pl.tensor.slice(...) — invisible to the one-level branch above
+            # since fn.value is itself an Attribute, not a Name (#2638).
+            meta, preserve_existing = _qualified_call_meta(fn, value, named_target, qualified_call_handlers)
         elif isinstance(fn, ast.Name) and fn.id in deps.io:
             # The in-place ``Out``-param convention first; a callee that
             # allocates its own results falls through to its return statement.
@@ -1518,13 +1567,16 @@ def _walk_local_tensor_meta_stmts(
     deps: _DepScan,
     resolve_int: Callable[[ast.expr], int | None],
     pl_attr_handlers: dict[str, Callable[[ast.Call, str | None], TensorMeta | None]],
+    qualified_call_handlers: _QualifiedCallHandlers,
     stop_at_call: ast.Call | None = None,
 ) -> bool:
     """Walk supported DSL scopes in source order until the selected call."""
     for stmt in stmts:
         if _stmt_calls_dep(stmt, stop_at_dep, stop_at_call):
             return True
-        _update_local_tensor_meta(stmt, local, dim_values, deps, resolve_int, pl_attr_handlers)
+        _update_local_tensor_meta(
+            stmt, local, dim_values, deps, resolve_int, pl_attr_handlers, qualified_call_handlers
+        )
         for attr in ("body", "orelse", "finalbody"):
             nested = getattr(stmt, attr, None)
             if isinstance(nested, list) and _walk_local_tensor_meta_stmts(
@@ -1535,6 +1587,7 @@ def _walk_local_tensor_meta_stmts(
                 deps,
                 resolve_int,
                 pl_attr_handlers,
+                qualified_call_handlers,
                 stop_at_call,
             ):
                 return True
@@ -1914,6 +1967,36 @@ def _extract_local_tensor_metas(
         "reshape": _reshape_meta,
     }
 
+    # 3-segment spellings this walker also understands, keyed by the FULL
+    # dotted path so a match can never collide across namespaces the way
+    # attr-name-only dispatch could. A callable value reuses the exact
+    # handler the 2-segment sugar form above already has (pl.tensor.slice is
+    # pl.slice, same op). None marks an op with no per-op handler here but
+    # documented as returning its own rebind target's type unchanged — the
+    # same "preserve what the name already held" fallback unmodelled
+    # one-level pl.* calls already get (e.g. pl.assemble). Anything NOT
+    # listed here safely falls through to local.pop(), exactly like today's
+    # behavior for any other unrecognized call: a new op starts safe by
+    # default and must be added here deliberately, never silently assumed
+    # same-shape (#2638).
+    _qualified_call_handlers: _QualifiedCallHandlers = {
+        ("pl", "tensor", "create_tensor"): _create_tensor_meta,
+        ("pl", "tensor", "slice"): _slice_meta,
+        ("pl", "tensor", "window"): _window_meta,
+        ("pl", "tensor", "reshape"): _reshape_meta,
+        ("pld", "tensor", "window"): _window_meta,
+        # Managed collectives: 3-segment-only (no 2-segment sugar exists).
+        # Each is documented as returning its `target` operand's own type
+        # unchanged — a same-shape rebind.
+        ("pld", "tensor", "all_to_all_v"): None,
+        ("pld", "tensor", "all_to_all"): None,
+        ("pld", "tensor", "allreduce"): None,
+        ("pld", "tensor", "reduce_scatter"): None,
+        ("pld", "tensor", "broadcast"): None,
+        ("pld", "tensor", "allgather"): None,
+        ("pld", "tensor", "barrier"): None,
+    }
+
     _walk_local_tensor_meta_stmts(
         func_def.body,
         stop_at_dep,
@@ -1922,6 +2005,7 @@ def _extract_local_tensor_metas(
         deps,
         _resolve_int,
         _pl_attr_handlers,
+        _qualified_call_handlers,
         stop_at_call,
     )
     return local
