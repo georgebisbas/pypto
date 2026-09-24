@@ -1694,6 +1694,22 @@ class _StaticScope:
         return tuple(value) if all(isinstance(d, int) and not isinstance(d, bool) for d in value) else None
 
 
+def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> bool:
+    """True when ``drop_dims`` is a no-op: omitted, ``None``, an empty
+    list/tuple literal, or a ``Name`` bound to one of those (module-level or
+    closure, e.g. ``EMPTY = []``) — ``scope.value()`` is the general
+    "what constant does this name resolve to" accessor.
+    """
+    if isinstance(drop_dims_node, ast.Name):
+        resolved = scope.value(drop_dims_node)
+        return isinstance(resolved, (list, tuple)) and not resolved
+    return (
+        drop_dims_node is None
+        or (isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None)
+        or (isinstance(drop_dims_node, (ast.List, ast.Tuple)) and len(drop_dims_node.elts) == 0)
+    )
+
+
 def _extract_local_tensor_metas(
     func: Any,
     seed_meta: dict[str, TensorMeta] | None = None,
@@ -1971,18 +1987,10 @@ def _extract_local_tensor_metas(
         #
         # drop_dims rank-reduces the result; this handler doesn't model that,
         # so decline rather than advertise the pre-drop shape at the wrong
-        # rank — UNLESS drop_dims is itself a no-op (omitted, None, or an
-        # explicitly empty list/tuple), which drops no dims and leaves the
-        # already-computed shape correct. Pre-existing gap for the 2-segment
-        # spelling too, not introduced by qualified dispatch — just newly
-        # reachable through it.
-        drop_dims_node = _call_operand(call, 4, "drop_dims")
-        drop_dims_is_noop = (
-            drop_dims_node is None
-            or (isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None)
-            or (isinstance(drop_dims_node, (ast.List, ast.Tuple)) and len(drop_dims_node.elts) == 0)
-        )
-        if not drop_dims_is_noop:
+        # rank — UNLESS drop_dims is a no-op (see _drop_dims_is_noop).
+        # Pre-existing gap for the 2-segment spelling too, not introduced by
+        # qualified dispatch — just newly reachable through it.
+        if not _drop_dims_is_noop(_call_operand(call, 4, "drop_dims"), scope):
             return None
         src = _tensor_or_input_operand(call)
         if not isinstance(src, ast.Name) or src.id not in local:
