@@ -1696,17 +1696,21 @@ class _StaticScope:
 
 def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> bool:
     """True when ``drop_dims`` is a no-op: omitted, ``None``, an empty
-    list/tuple literal, or a ``Name`` bound to one of those (module-level or
-    closure, e.g. ``EMPTY = []``) — ``scope.value()`` is the general
-    "what constant does this name resolve to" accessor.
+    list/tuple literal, or a ``Name`` bound to one of those. ``scope.fold()``
+    resolves a ``pl.constexpr`` parameter binding first (its own, narrower
+    mechanism — a name outside ``constexpr`` passes through unchanged); what
+    remains is then resolved as a module-level or closure constant via
+    ``scope.value()`` (e.g. ``EMPTY = []`` or ``NONE_DIMS = None``) if it's
+    still a ``Name``.
     """
-    if isinstance(drop_dims_node, ast.Name):
-        resolved = scope.value(drop_dims_node)
-        return isinstance(resolved, (list, tuple)) and not resolved
+    node = scope.fold(drop_dims_node)
+    if isinstance(node, ast.Name):
+        resolved = scope.value(node)
+        return resolved is None or (isinstance(resolved, (list, tuple)) and not resolved)
     return (
-        drop_dims_node is None
-        or (isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None)
-        or (isinstance(drop_dims_node, (ast.List, ast.Tuple)) and len(drop_dims_node.elts) == 0)
+        node is None
+        or (isinstance(node, ast.Constant) and node.value is None)
+        or (isinstance(node, (ast.List, ast.Tuple)) and len(node.elts) == 0)
     )
 
 
