@@ -1699,13 +1699,20 @@ def _drop_dims_is_noop(drop_dims_node: ast.expr | None, scope: _StaticScope) -> 
     list/tuple literal, or a ``Name`` bound to one of those. ``scope.fold()``
     resolves a ``pl.constexpr`` parameter binding first (its own, narrower
     mechanism — a name outside ``constexpr`` passes through unchanged); what
-    remains is then resolved as a module-level or closure constant via
-    ``scope.value()`` (e.g. ``EMPTY = []`` or ``NONE_DIMS = None``) if it's
-    still a ``Name``.
+    remains is then resolved as a module-level or closure constant
+    (e.g. ``EMPTY = []`` or ``NONE_DIMS = None``) if it's still a ``Name`` —
+    read directly off ``scope.namespace``/``scope.shadowed`` rather than
+    through ``scope.value()``, whose bare ``None`` return is ambiguous
+    between "genuinely bound to None" and "a local parameter, unresolvable
+    here" (e.g. ``def body(src, drop_dims): ... drop_dims=drop_dims``) — the
+    latter must never be assumed empty, or a real non-empty runtime value
+    would advertise the wrong, pre-drop rank.
     """
     node = scope.fold(drop_dims_node)
     if isinstance(node, ast.Name):
-        resolved = scope.value(node)
+        if node.id in scope.shadowed or node.id not in scope.namespace:
+            return False
+        resolved = scope.namespace[node.id]
         return resolved is None or (isinstance(resolved, (list, tuple)) and not resolved)
     return (
         node is None
