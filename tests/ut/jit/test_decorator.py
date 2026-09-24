@@ -2702,6 +2702,36 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert metas["view"] == seed["src"]
 
+    def test_slice_with_a_name_bound_to_none_drop_dims_still_gets_metadata(self):
+        """A fifth review pass: a global/closure name bound to ``None``
+        (not ``[]``) is also a no-op -- ``drop_dims=NONE_DIMS`` must not be
+        treated as non-empty just because it's a ``Name`` rather than a
+        literal ``None``."""
+
+        NONE_DIMS: list[int] | None = None
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=NONE_DIMS)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
+    def test_slice_with_a_constexpr_empty_drop_dims_still_gets_metadata(self):
+        """Same review pass: a ``pl.constexpr`` parameter bound to ``[]``
+        needs ``scope.fold()`` first (its own, narrower mechanism) before
+        the empty-list check can see it -- ``scope.value()`` alone only
+        resolves ordinary closure/module names, not constexpr bindings."""
+
+        def body(src, dd):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=dd)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed, constexpr_values={"dd": "[]"})
+        assert metas["view"] == seed["src"]
+
     def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
         """The same review pass: ``pl.slice``/``pl.reshape``'s real first
         parameter is named ``tensor`` (tensor_ops.py), not ``input`` --
