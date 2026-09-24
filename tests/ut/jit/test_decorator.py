@@ -2684,6 +2684,24 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert metas["view"] == seed["src"]
 
+    def test_slice_with_a_closure_constant_empty_drop_dims_still_gets_metadata(self):
+        """A fourth review pass caught this: the empty-``drop_dims`` check
+        above inspected the raw AST node, so ``drop_dims=EMPTY`` (a name
+        bound to a closure or module-level ``[]`` constant) looked like an
+        opaque, non-empty operand -- not a no-op -- and declined metadata
+        that was previously inferred. Fold the operand before classifying
+        it, the same way the ``shape`` operand already does."""
+
+        EMPTY: list[int] = []
+
+        def body(src):
+            view = pl.tensor.slice(src, [4, 64], [0, 0], drop_dims=EMPTY)
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["view"] == seed["src"]
+
     def test_slice_and_reshape_qualified_calls_accept_the_tensor_keyword(self):
         """The same review pass: ``pl.slice``/``pl.reshape``'s real first
         parameter is named ``tensor`` (tensor_ops.py), not ``input`` --
