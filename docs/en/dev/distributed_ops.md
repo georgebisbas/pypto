@@ -518,9 +518,11 @@ The admitted blocks **partition the work** (RFC #2521 K3):
 
 - `B >= NR` — peer × length: `K = B / NR` lanes per peer, block `idx` owns
   `(peer, lane) = (idx / K, idx % K)`. Each lane pushes one **contiguous**
-  sub-range of that peer's valid payload (split with `ceil`, never interleaved
-  by chunk), so `K = 1` degenerates to the previous whole-range push and the
-  wire shape (`[rows, SIZE]` flat TPUTs) is unchanged.
+  sub-range of that peer's valid payload (split with `ceil`; interior
+  boundaries rounded up to 32 bytes per the RFC's `SplitAligned`, so every
+  lane's `TPUT` starts 32-byte aligned and only the final tail may be ragged —
+  never interleaved by chunk), so `K = 1` degenerates to the previous
+  whole-range push and the wire shape (`[rows, SIZE]` flat TPUTs) is unchanged.
 - `B < NR` — multi-peer-per-core: block `idx` owns peers `idx, idx + B,
   idx + 2B, …`, pushing each peer's full range.
 

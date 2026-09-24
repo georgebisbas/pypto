@@ -359,7 +359,12 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (rows64 < 0) rows64 = 0;
 
     int64_t valid_numel = rows64 * row_numel;
-    int64_t lane_elems = (valid_numel + lanes_per_peer - 1) / lanes_per_peer;
+    // RFC #2521 SplitAligned(..., 32): interior lane boundaries round up to
+    // 32 bytes, so every lane's TPUT segment starts at a 32-byte-aligned
+    // address (the mesh-allreduce length stripes use the same rule); only the
+    // lane holding the payload end may carry a ragged tail.
+    const int64_t align_elem = 32 / static_cast<int64_t>(sizeof({{dtype_cpp}}));
+    int64_t lane_elems = ((valid_numel + lanes_per_peer * align_elem - 1) / (lanes_per_peer * align_elem)) * align_elem;
     int64_t begin = static_cast<int64_t>(lane_in_group) * lane_elems;
     if (begin > valid_numel) begin = valid_numel;
     int64_t end = begin + lane_elems;

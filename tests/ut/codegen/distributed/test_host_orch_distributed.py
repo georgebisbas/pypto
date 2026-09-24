@@ -1822,12 +1822,28 @@ int main() {{
 # rather than a Python transcription of them.
 _GEOMETRY_ANCHOR = "int32_t lanes_per_peer = active_blocks >= nranks ? active_blocks / nranks : 0;"
 _PEER_LANE_ANCHOR = "int32_t peer_of_block = lanes_per_peer > 0 ? block_idx / lanes_per_peer : 0;"
-_SLICE_ANCHOR = "int64_t lane_elems = (valid_numel + lanes_per_peer - 1) / lanes_per_peer;"
+_SLICE_ANCHOR = (
+    "int64_t lane_elems = ((valid_numel + lanes_per_peer * align_elem - 1) / "
+    "(lanes_per_peer * align_elem)) * align_elem;"
+)
 
 # (P, B): admitted widths the entry can produce, plus the B < P stride regime.
 _GEOMETRY_POINTS = ((8, 8), (8, 16), (16, 16), (4, 8), (4, 4), (2, 8), (4, 2), (8, 4))
-# (valid_numel, K), including payloads smaller than K and ragged divisions.
-_SLICE_POINTS = ((0, 2), (1, 1), (2, 4), (10, 3), (9, 3), (7, 4), (100, 7), (4096, 2))
+# (valid_numel, K, align_elem): payloads smaller than K, ragged divisions, and
+# the RFC #2521 32-byte interior boundary rule (INT8: 32, FP16/BF16: 16, FP32: 8 elements).
+_SLICE_POINTS = (
+    (0, 2, 8),
+    (1, 1, 8),
+    (2, 4, 8),
+    (10, 3, 8),
+    (9, 3, 8),
+    (7, 4, 8),
+    (100, 7, 8),
+    (4096, 2, 8),
+    (13, 4, 16),
+    (36, 2, 32),
+    (64, 3, 32),
+)
 
 
 def _extract_kernel_statements(source: str, anchor: str, count: int) -> str:
@@ -1853,7 +1869,7 @@ def _run_kernel_lane_probe(tmp_path):
     geometry_cases = "\n".join(
         f"  for (int32_t i = 0; i < {b}; ++i) emit_geometry({p}, {b}, i);" for p, b in _GEOMETRY_POINTS
     )
-    slice_cases = "\n".join(f"  emit_slices({valid}, {k});" for valid, k in _SLICE_POINTS)
+    slice_cases = "\n".join(f"  emit_slices({valid}, {k}, {align});" for valid, k, align in _SLICE_POINTS)
     program = f"""#include <cstdint>
 #include <cstdio>
 
@@ -1864,11 +1880,12 @@ static void emit_geometry(int32_t nranks, int32_t active_blocks, int32_t block_i
               peer_of_block, lane_in_group);
 }}
 
-static void emit_slices(int64_t valid_numel, int32_t lanes_per_peer) {{
+static void emit_slices(int64_t valid_numel, int32_t lanes_per_peer, int64_t align_elem) {{
   for (int32_t lane_in_group = 0; lane_in_group < lanes_per_peer; ++lane_in_group) {{
 {slice_stmts}
-    std::printf("slice %lld %d %d %lld %lld\\n", static_cast<long long>(valid_numel), lanes_per_peer,
-                lane_in_group, static_cast<long long>(begin), static_cast<long long>(end));
+    std::printf("slice %lld %d %lld %d %lld %lld\\n", static_cast<long long>(valid_numel),
+                lanes_per_peer, static_cast<long long>(align_elem), lane_in_group,
+                static_cast<long long>(begin), static_cast<long long>(end));
   }}
 }}
 
@@ -1894,7 +1911,7 @@ int main() {{
     assert run.returncode == 0, run.stderr
 
     geometry_rows: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
-    slice_rows: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    slice_rows: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
     for line in run.stdout.splitlines():
         kind, *fields = line.split()
         values = [int(f) for f in fields]
@@ -1902,8 +1919,8 @@ int main() {{
             nranks, blocks, _idx, k, peer, lane = values
             geometry_rows.setdefault((nranks, blocks), []).append((k, peer, lane))
         else:
-            valid, k, _lane, begin, end = values
-            slice_rows.setdefault((valid, k), []).append((begin, end))
+            valid, k, align, _lane, begin, end = values
+            slice_rows.setdefault((valid, k, align), []).append((begin, end))
     return geometry_rows, slice_rows
 
 
@@ -1931,23 +1948,30 @@ def test_kernel_lane_geometry_is_a_bijection_over_admitted_blocks(tmp_path):
 
 
 def test_kernel_lane_slice_partitions_each_peers_payload(tmp_path):
-    """The K lane ranges tile [0, valid_numel) exactly - adjacent, no overlap, no gap."""
+    """The K lane ranges tile [0, valid_numel); every non-empty lane starts 32-byte aligned."""
     _, slice_rows = _run_kernel_lane_probe(tmp_path)
-    for (valid, k), parts in slice_rows.items():
+    for (valid, k, align), parts in slice_rows.items():
         assert len(parts) == k
         assert parts[0][0] == 0, f"valid={valid} K={k}: first lane does not start at 0"
         for (_begin, end), (next_begin, _next_end) in zip(parts, parts[1:]):
             assert end == next_begin, f"valid={valid} K={k}: lanes are not adjacent"
         for begin, end in parts:
             assert 0 <= begin <= end <= valid, f"valid={valid} K={k}: bad range ({begin}, {end})"
+            if end > begin:
+                assert begin % align == 0, (
+                    f"valid={valid} K={k}: lane start {begin} is not {align}-element aligned "
+                    "(RFC #2521 32-byte interiors)"
+                )
         assert parts[-1][1] == valid, f"valid={valid} K={k}: last lane does not reach the payload end"
 
 
 def test_kernel_lane_slice_worked_examples(tmp_path):
-    """Ragged division, and a payload smaller than K so trailing lanes send nothing."""
+    """Aligned interior, ragged final tail, and a payload smaller than K so trailing lanes send nothing."""
     _, slice_rows = _run_kernel_lane_probe(tmp_path)
-    assert slice_rows[(10, 3)] == [(0, 4), (4, 8), (8, 10)]
-    assert slice_rows[(2, 4)] == [(0, 1), (1, 2), (2, 2), (2, 2)]
+    assert slice_rows[(10, 3, 8)] == [(0, 8), (8, 10), (10, 10)]
+    assert slice_rows[(36, 2, 32)] == [(0, 32), (32, 36)]
+    assert slice_rows[(64, 3, 32)] == [(0, 32), (32, 64), (64, 64)]
+    assert slice_rows[(2, 4, 8)] == [(0, 2), (2, 2), (2, 2), (2, 2)]
 
 
 def _assert_host_collective_next_level_files(program_cls, tmp_path, variant, signature, kernel_snippet):

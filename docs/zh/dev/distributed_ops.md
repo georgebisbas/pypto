@@ -444,8 +444,10 @@ launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K`（`B < NR` 的
 
 - `B >= NR` —— peer × length：每个 peer 有 `K = B / NR` 个 lane，block `idx` 拥有
   `(peer, lane) = (idx / K, idx % K)`。每个 lane 推送该 peer 有效载荷的一段
-  **连续**子区间（按 `ceil` 切分，绝不按 chunk 交错），因此 `K = 1` 退化为此前的
-  全区间推送，链路形态（`[rows, SIZE]` 的扁平 TPUT）保持不变。
+  **连续**子区间（按 `ceil` 切分，内部边界按 32 字节向上取整——即 RFC 的
+  `SplitAligned`——因此每个 lane 的 TPUT 都从 32 字节对齐地址开始，仅末段可能参差；
+  绝不按 chunk 交错），因此 `K = 1` 退化为此前的全区间推送，链路形态
+  （`[rows, SIZE]` 的扁平 TPUT）保持不变。
 - `B < NR` —— 每核多 peer：block `idx` 拥有 peer `idx, idx + B, idx + 2B, …`，
   各自推送完整区间。
 
