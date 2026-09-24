@@ -1378,6 +1378,31 @@ def _qualified_call_meta(
     return None, True
 
 
+def _same_operand_meta(
+    local: dict[str, TensorMeta], operand_index: int, operand_name: str
+) -> Callable[[ast.Call, str | None], TensorMeta | None]:
+    """Handler factory for a collective documented as returning a specific
+    argument's own type unchanged (e.g. ``broadcast``'s ``target``,
+    ``barrier``'s ``signal``). Reads that argument's tracked metadata
+    directly rather than assuming the call's LHS name is the same name as
+    the operand: ``old = pld.tensor.broadcast(window, signal, root=0)`` must
+    get ``window``'s metadata, not whatever ``old`` already held — a blind
+    ``preserve_existing`` would silently serve stale metadata when the two
+    names differ (#2638 review). When the two names *are* the same (the
+    documented self-rebind idiom), this reads ``local[operand.id]`` before
+    the assignment takes effect, which is exactly what preserving would
+    have returned anyway — so the self-rebind case is unaffected.
+    """
+
+    def handler(call: ast.Call, target: str | None = None) -> TensorMeta | None:
+        operand = _call_operand(call, operand_index, operand_name)
+        if not isinstance(operand, ast.Name) or operand.id not in local:
+            return None
+        return local[operand.id]
+
+    return handler
+
+
 def _alias_dim(alias: tuple[str, int] | None, local: Mapping[str, TensorMeta]) -> ShapeDim | None:
     """Dim ``k`` of tensor ``P`` for a ``(P, k)`` dim alias, or None when ``P`` is untracked."""
     if alias is None:
@@ -1927,6 +1952,15 @@ def _extract_local_tensor_metas(
 
     def _slice_meta(call: ast.Call, target: str | None = None) -> TensorMeta | None:
         # pl.slice(input, shape, offset, ...) — each by position or keyword.
+        # drop_dims rank-reduces the result; this handler doesn't model that,
+        # so decline rather than advertise the pre-drop shape at the wrong
+        # rank. Pre-existing gap for the 2-segment spelling too, not
+        # introduced by qualified dispatch — just newly reachable through it.
+        drop_dims_node = _call_operand(call, 4, "drop_dims")
+        if drop_dims_node is not None and not (
+            isinstance(drop_dims_node, ast.Constant) and drop_dims_node.value is None
+        ):
+            return None
         src = _call_operand(call, 0, "input")
         if not isinstance(src, ast.Name) or src.id not in local:
             return None
@@ -1973,29 +2007,28 @@ def _extract_local_tensor_metas(
     # entries are DERIVED from _pl_attr_handlers above rather than
     # hand-duplicated, so a new entry added there is automatically covered
     # under its 3-segment spelling too — the two tables can't drift apart
-    # for that half. None marks an op with no per-op handler here but
-    # documented as returning its own rebind target's type unchanged — the
-    # same "preserve what the name already held" fallback unmodelled
-    # one-level pl.* calls already get (e.g. pl.assemble). These have no
-    # 2-segment sugar to derive from (the managed collectives are
-    # 3-segment-only), so they're listed explicitly. Anything NOT listed
-    # here safely falls through to local.pop(), exactly like today's
-    # behavior for any other unrecognized call: a new op starts safe by
-    # default and must be added here deliberately, never silently assumed
-    # same-shape (#2638).
+    # for that half. The managed collectives have no 2-segment sugar to
+    # derive from (3-segment-only), so they're listed explicitly, each with
+    # _same_operand_meta reading the real operand its own docstring names as
+    # the rebind target — not a bare `preserve_existing`, which would trust
+    # the LHS name instead of the operand when the two differ (review
+    # finding: `old = pld.tensor.broadcast(window, ...)` must get `window`'s
+    # metadata, not `old`'s stale one). None stays available in the type for
+    # a future op with no derivable operand at all; nothing currently uses
+    # it. Anything NOT listed here safely falls through to local.pop(),
+    # exactly like today's behavior for any other unrecognized call: a new
+    # op starts safe by default and must be added here deliberately, never
+    # silently assumed same-shape (#2638).
     _qualified_call_handlers: _QualifiedCallHandlers = {
         **{("pl", "tensor", attr): handler for attr, handler in _pl_attr_handlers.items()},
         ("pld", "tensor", "window"): _pl_attr_handlers["window"],
-        # Managed collectives: 3-segment-only (no 2-segment sugar exists).
-        # Each is documented as returning its `target` operand's own type
-        # unchanged — a same-shape rebind.
-        ("pld", "tensor", "all_to_all_v"): None,
-        ("pld", "tensor", "all_to_all"): None,
-        ("pld", "tensor", "allreduce"): None,
-        ("pld", "tensor", "reduce_scatter"): None,
-        ("pld", "tensor", "broadcast"): None,
-        ("pld", "tensor", "allgather"): None,
-        ("pld", "tensor", "barrier"): None,
+        ("pld", "tensor", "all_to_all_v"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "all_to_all"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "allreduce"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "reduce_scatter"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "broadcast"): _same_operand_meta(local, 0, "target"),
+        ("pld", "tensor", "allgather"): _same_operand_meta(local, 1, "target"),
+        ("pld", "tensor", "barrier"): _same_operand_meta(local, 0, "signal"),
     }
 
     _walk_local_tensor_meta_stmts(
