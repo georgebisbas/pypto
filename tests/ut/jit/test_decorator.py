@@ -2437,11 +2437,15 @@ class TestPldTensorRebindPreservesMetadata:
     ``pl.<op>(...)`` branch in ``_update_local_tensor_meta`` (``fn.value`` is
     itself an ``ast.Attribute``, not a ``Name``), so before this fix it fell
     through to ``local.pop()`` instead of either computing real metadata or
-    preserving a same-shape rebind's existing metadata (#2638). Dispatch is
-    now an explicit allow-list keyed by the full dotted path
+    the managed collectives' documented rebind-target metadata (#2638).
+    Dispatch is now an explicit allow-list keyed by the full dotted path
     (``_qualified_call_handlers``): an unlisted path still safely drops --
     it never silently fabricates or reuses stale metadata for an op this
-    walker hasn't vetted."""
+    walker hasn't vetted. Each collective's handler reads its own
+    documented rebind operand directly (``_same_operand_meta``), not the
+    LHS name blindly, so a rebind to a *different* name than the operand
+    still gets the operand's real metadata instead of leaking whatever the
+    LHS name previously held."""
 
     def test_all_to_all_v_rebind_keeps_metadata(self):
         # Mirrors the real usage in
@@ -2478,14 +2482,14 @@ class TestPldTensorRebindPreservesMetadata:
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
         assert metas["target"] == seed["target"]
 
-    def test_fresh_name_rebind_still_untracked(self):
-        """Known limitation, deliberately not fixed here: an op mapped to
-        ``None`` only preserves what the *same* name already held. Binding
-        the result to a fresh name -- ``result = f(..., data, ...)`` instead
-        of ``data = f(..., data, ...)`` -- still has no metadata for
-        ``result``. A handler that types the result from the ``target``
-        argument (rather than merely preserving) would close this; not
-        needed to fix #2638 as reported."""
+    def test_fresh_name_rebind_gets_target_operand_metadata(self):
+        """Binding a collective's result to a *fresh* name --
+        ``result = f(..., data, ...)`` instead of ``data = f(..., data,
+        ...)`` -- now gets ``data``'s (the real ``target`` operand's)
+        metadata, computed directly rather than assumed absent. This used
+        to be an accepted, documented limitation of a bare
+        ``preserve_existing``; ``_same_operand_meta`` closes it as a side
+        effect of reading the operand instead of the LHS name."""
 
         def body(stage, data, signal, send_counts, recv_counts):
             result = pld.tensor.all_to_all_v(stage, data, signal, send_counts, recv_counts, core_num=1)
@@ -2499,7 +2503,27 @@ class TestPldTensorRebindPreservesMetadata:
             "recv_counts": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
         }
         metas = _extract_local_tensor_metas(body, seed_meta=seed)
-        assert "result" not in metas
+        assert metas["result"] == seed["data"]
+
+    def test_rebind_to_a_different_stale_name_gets_operand_metadata_not_the_stale_one(self):
+        """The bug a review pass caught in the first version of this fix:
+        ``old = pld.tensor.broadcast(window, signal, root=0)`` where ``old``
+        already holds *different* stale metadata than ``window``. A blind
+        ``preserve_existing`` would have kept ``old``'s stale (32, 32) FP16
+        entry; the correct answer is ``window``'s (64, 64) FP32 one, since
+        that's the operand the collective actually rebinds."""
+
+        def body(window, signal):
+            old = pld.tensor.broadcast(window, signal, root=0)
+            return old
+
+        seed = {
+            "window": TensorMeta(shape=(64, 64), dtype=DataType.FP32),
+            "signal": TensorMeta(shape=(4, 1), dtype=DataType.INT32),
+            "old": TensorMeta(shape=(32, 32), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["old"] == seed["window"]
 
     def test_pl_tensor_dim_is_not_mistaken_for_a_pld_rebind(self):
         """Guards the review trap: ``pl.tensor.dim`` is also a two-level-plus
@@ -2627,6 +2651,24 @@ class TestPldTensorRebindPreservesMetadata:
 
         metas = _extract_local_tensor_metas(body, seed_meta={})
         assert "x" not in metas
+
+    def test_slice_with_drop_dims_declines_rather_than_advertise_the_wrong_rank(self):
+        """A second review pass caught this: ``_slice_meta`` never read
+        ``drop_dims``, so a rank-reducing slice was inferred at the
+        pre-drop rank -- ``pl.tensor.slice(src, [1, 64], [0, 0],
+        drop_dims=[0])`` would have been recorded as shape (1, 64) although
+        the real result is (64,). Pre-existing gap in the shared handler
+        (also reachable through the 2-segment ``pl.slice`` spelling before
+        this fix), newly exercised through qualified dispatch. Must decline
+        rather than advertise the wrong rank."""
+
+        def body(src):
+            view = pl.tensor.slice(src, [1, 64], [0, 0], drop_dims=[0])
+            return view
+
+        seed = {"src": TensorMeta(shape=(4, 64), dtype=DataType.FP32)}
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "view" not in metas
 
 
 class TestDtypeOperandResolution:
