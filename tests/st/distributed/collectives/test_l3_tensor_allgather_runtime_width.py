@@ -36,12 +36,17 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
-from pypto import ir
 from pypto.ir import DistributedConfig
+from pypto.runtime import RunConfig
 
 D = 5120  # token width; 10 KiB per BF16 row
 W_MAX = 5  # capacity, in rows per rank
 STAGE_CHUNK = 2048  # capacity-bounded stage-out read width, in elements
+
+# The transfer extent, in elements. The annotations read this module-level
+# symbol; a body that *uses* it in an expression must re-bind it locally (see
+# ``gather_step``), which is how the DSL resolves a dynamic symbol in a body.
+RUNTIME_N = pl.dynamic("RUNTIME_N")
 
 
 def _make_rank_inputs(n_ranks: int, w: int) -> torch.Tensor:
@@ -55,86 +60,86 @@ def _make_rank_inputs(n_ranks: int, w: int) -> torch.Tensor:
 
 
 def _expected_allgather(inputs: torch.Tensor) -> torch.Tensor:
-    """Rank-ordered concatenation of the live rows, replicated on every rank.
+    """Every rank ends holding the same gathered ``[nr, N]`` matrix.
 
-    Returns the same ``[nr, 1, N]`` shape as the output tensor, matching the
-    sibling ``test_l3_tensor_allgather_intrinsic.py``: a 1-D golden would still
-    compare correctly by broadcasting, but it would compare every rank against
-    one row and would not be exactly comparable.
+    Returns the ``[nr, nr, N]`` output shape — rank index first, then the
+    gathered row — so the comparison cannot pass by broadcasting one rank's
+    result across all of them.
     """
-    gathered = torch.cat([inputs[r, 0] for r in range(inputs.shape[0])])
-    return torch.stack([gathered] * inputs.shape[0]).unsqueeze(1)
+    n_ranks = inputs.shape[0]
+    gathered = torch.cat([inputs[r, 0] for r in range(n_ranks)])
+    matrix = gathered.reshape(n_ranks, inputs.shape[2])
+    return matrix.unsqueeze(0).expand(n_ranks, *matrix.shape).contiguous()
 
 
 def _build_runtime_width_program(n_ranks: int):
-    """Allgather whose transfer extent is the runtime symbol ``W``.
+    """Allgather whose transfer extent is the runtime symbol ``RUNTIME_N``.
 
-    The window buffer is allocated at capacity, but the window itself is created
-    at ``[nr, W * D]`` so the composite's extent follows the runtime value. That
-    is the rail's own form: ``[TP, width * D]``, not ``[TP * width, D]`` -- the
-    deducer requires the target's trailing extent to equal the input's.
+    Built with the ``@pl.jit`` family -- the surface users write, and the one
+    whose specialisation path the test should therefore exercise. The window
+    buffer is allocated at capacity, but the window itself is created at
+    ``[nr, RUNTIME_N]`` so the composite's extent follows the runtime value.
     """
     nr = n_ranks
-    W = pl.dynamic("RUNTIME_W")
 
-    @pl.program
-    class RuntimeWidthAllGather:
-        @pl.function(type=pl.FunctionType.InCore)
-        def gather_step(
-            self,
-            inp: pl.Tensor[[1, W * D], pl.BF16],
-            out: pl.Out[pl.Tensor[[1, nr * W * D], pl.BF16]],
-            data: pl.InOut[pld.DistributedTensor[[nr, W * D], pl.BF16]],
-            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, nr * W * D], pl.BF16]:
-            # The transfer under test: one push per peer over a runtime extent.
-            data = pld.tensor.allgather(inp, data, signal)
-            # Stage-out flattens the [nr, W*D] window; both loops are bounded by
-            # the runtime extent.
-            for r in pl.range(nr):
-                for col in pl.range(0, W * D, STAGE_CHUNK):
-                    valid = pl.min(STAGE_CHUNK, W * D - col)
-                    chunk = pl.load(data, [r, col], [1, STAGE_CHUNK], valid_shape=[1, valid])
-                    pl.store(chunk, [0, r * (W * D) + col], out)
-            return out
+    @pl.jit.incore
+    def gather_step(
+        inp: pl.Tensor[[1, RUNTIME_N], pl.BF16],
+        out: pl.Out[pl.Tensor[[nr, RUNTIME_N], pl.BF16]],
+        data: pl.InOut[pld.DistributedTensor[[nr, RUNTIME_N], pl.BF16]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> pl.Tensor[[nr, RUNTIME_N], pl.BF16]:
+        # A dynamic symbol is resolvable in a body only when the body binds it
+        # locally; the annotations above read the module-level constant.
+        RUNTIME_N = pl.dynamic("RUNTIME_N")
+        # The transfer under test: one push per peer over a runtime extent.
+        data = pld.tensor.allgather(inp, data, signal)
+        # Stage-out copies the gathered [nr, RUNTIME_N] window into the output;
+        # the loop bound is the runtime extent, which is the point of the test.
+        for r in pl.range(nr):
+            for col in pl.range(0, RUNTIME_N, STAGE_CHUNK):
+                valid = pl.min(STAGE_CHUNK, RUNTIME_N - col)
+                chunk = pl.load(data, [r, col], [1, STAGE_CHUNK], valid_shape=[1, valid])
+                pl.store(chunk, [r, col], out)
+        return out
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def chip_orch(
-            self,
-            inp: pl.Tensor[[1, W * D], pl.BF16],
-            out: pl.Out[pl.Tensor[[1, nr * W * D], pl.BF16]],
-            data: pl.InOut[pld.DistributedTensor[[nr, W * D], pl.BF16]],
-            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pl.Tensor[[1, nr * W * D], pl.BF16]:
-            return self.gather_step(inp, out, data, signal)
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[1, RUNTIME_N], pl.BF16],
+        out: pl.Out[pl.Tensor[[nr, RUNTIME_N], pl.BF16]],
+        data: pl.InOut[pld.DistributedTensor[[nr, RUNTIME_N], pl.BF16]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+    ) -> pl.Tensor[[nr, RUNTIME_N], pl.BF16]:
+        return gather_step(inp, out, data, signal)
 
-        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
-        def host_orch(
-            self,
-            inputs: pl.Tensor[[nr, 1, W * D], pl.BF16],
-            outputs: pl.Out[pl.Tensor[[nr, 1, nr * W * D], pl.BF16]],
-        ) -> pl.Tensor[[nr, 1, nr * W * D], pl.BF16]:
-            # Capacity allocation: any W <= W_MAX fits the same buffer.
-            data_buf = pld.alloc_window_buffer(nr * W_MAX * D * pl.BF16.get_byte())
-            signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[nr, 1, RUNTIME_N], pl.BF16],
+        outputs: pl.Out[pl.Tensor[[nr, nr, RUNTIME_N], pl.BF16]],
+    ) -> pl.Tensor[[nr, nr, RUNTIME_N], pl.BF16]:
+        RUNTIME_N = pl.dynamic("RUNTIME_N")
+        # Capacity allocation: any extent <= W_MAX * D fits the same buffer.
+        data_buf = pld.alloc_window_buffer(nr * W_MAX * D * pl.BF16.get_byte())
+        signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
 
-            for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [nr, W * D], dtype=pl.BF16)
-                sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
-                self.chip_orch(inputs[r], outputs[r], data, sig, device=r)
-            return outputs
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [nr, RUNTIME_N], dtype=pl.BF16)
+            sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], data, sig, device=r)
+        return outputs
 
-    return RuntimeWidthAllGather
+    return host_orch
 
 
 class TestL3TensorAllGatherRuntimeWidth:
     """Runtime-extent composite allgather.
 
     One compiled artifact is exercised at three different extents. That is the
-    whole assertion: the program is built and compiled once, with no tensors in
-    hand, so nothing about the transfer extent can have been specialised in. If
-    ``W`` were baked to a constant at compile time, the second and third runs
-    would fail.
+    whole assertion: the program is compiled with no tensors at all -- the shape
+    contract comes from the signature and a dynamic dim needs no value, so the
+    artifact is extent-independent by construction -- and then run at each
+    extent. If ``W`` were baked to a constant at compile time, the second and
+    third runs would fail.
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 4])
@@ -143,12 +148,13 @@ class TestL3TensorAllGatherRuntimeWidth:
             pytest.skip(f"allgather P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
         program = _build_runtime_width_program(n_ranks)
-        compiled = ir.compile(
-            program,
-            platform=test_config.platform,
-            distributed_config=DistributedConfig(
-                device_ids=device_ids[:n_ranks],
-                num_sub_workers=0,
+        compiled = program.compile(
+            config=RunConfig(
+                platform=test_config.platform,
+                distributed_config=DistributedConfig(
+                    device_ids=device_ids[:n_ranks],
+                    num_sub_workers=0,
+                ),
             ),
         )
 
@@ -156,9 +162,9 @@ class TestL3TensorAllGatherRuntimeWidth:
         # both cross the staging-tile cap and must be chunked at run time.
         for w in (1, 2, 5):
             inputs = _make_rank_inputs(n_ranks, w).bfloat16()
-            outputs = torch.zeros((n_ranks, 1, n_ranks * w * D), dtype=torch.bfloat16)
+            outputs = torch.zeros((n_ranks, n_ranks, w * D), dtype=torch.bfloat16)
 
-            compiled(inputs, outputs)
+            compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
 
             expected = _expected_allgather(inputs)
             # Pure data movement, so the result must be bit-exact: a tolerance

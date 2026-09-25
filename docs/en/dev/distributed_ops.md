@@ -721,8 +721,20 @@ static one is (see the chunking rules under
 runtime-bound by a kernel scalar, loop variable or physical tensor-shape
 parameter; a type-metadata-only symbol is rejected during PTO codegen.
 
-Verifier: `local_data` must be a plain `Tensor`; `target` and `signal` must be
-window-bound `DistributedTensorType`, with `signal` shaped `[NR, 1]`.
+**Type contract.** The deducer is shared by both execution paths, so it accepts
+what either needs: `local_data` may be a plain `Tensor` **or** a
+`DistributedTensor` (the HOST builtin stages through a `[1, SIZE]
+DistributedTensor` window, while InCore passes the plain chunk); `target` must be
+a window-bound `DistributedTensor` of `[NR, SIZE]`; `signal` may be **`[NR]` or
+`[NR, 1]`** INT32; and `local_data` and `target` must be different buffers —
+aliasing them is a cross-process data race.
+
+The InCore lowering is stricter than the deducer on one point: its barrier
+indexes one cell per rank, so it requires `signal` to be 2D `[NR, 1]`
+(`ValidateMeshSignalShape`). A `[NR, 1]` signal therefore satisfies both paths,
+while a rank-one `[NR]` signal is HOST-only. A signal shaped for ring
+`allreduce` (`[2*(NR-1), NR]`) cannot be shared with this collective on either
+path; give it its own window.
 
 ### `pld.system.notify` (TNOTIFY)
 
