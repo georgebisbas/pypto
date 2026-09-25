@@ -3867,68 +3867,20 @@ def _run_default_pipeline(pm, program):
         return pm.run_passes(program)
 
 
-def test_allgather_accepts_dynamic_transfer_extent(default_pass_manager, ascend_backend):
-    """An InCore allgather over a symbolic transfer extent reaches PTO codegen."""
-    n = pl.dynamic("ALLGATHER_DYNAMIC_N")
+def test_allgather_accepts_runtime_transfer_extent(default_pass_manager, ascend_backend):
+    """An InCore allgather over a runtime transfer extent reaches PTO codegen.
 
-    @pl.program
-    class Before:
-        @pl.function(type=pl.FunctionType.InCore)
-        def gather_step(
-            self,
-            inp: pl.Tensor[[1, n], pl.BF16],
-            data: pl.InOut[pld.DistributedTensor[[_ALLGATHER_DYNAMIC_NR, n], pl.BF16]],
-            signal: pl.InOut[pld.DistributedTensor[[_ALLGATHER_DYNAMIC_NR, 1], pl.INT32]],
-        ) -> pld.DistributedTensor[[_ALLGATHER_DYNAMIC_NR, n], pl.BF16]:
-            result = pld.tensor.allgather(inp, data, signal)
-            return result
-
-    After = _run_default_pipeline(default_pass_manager, Before)
-
-    # A dynamic extent takes the full chunk bound rather than a rounded-down
-    # width: 16 KiB / 2 B per BF16 element.
-    assert (1, 8192) in _stage_tile_shapes(After)
-    assert "pld.tensor.allgather" not in set(_collect_op_names(After))
-    # The lowering is push-based; nothing pulls.
-    assert _OP_PLD_TILE_REMOTE_LOAD not in set(_collect_op_names(After))
-
-    from pypto import codegen  # noqa: PLC0415
-
-    func = After.get_function("gather_step")
-    assert func is not None
-    single = ir.Program([func], func.name, After.span)
-    mlir = codegen.PTOCodegen().generate(single)
-
-    # The runtime extent survives to the transfer: source and peer destination
-    # both carry a dynamic extent rather than a constant.
-    remote_put = next(line for line in mlir.splitlines() if "pto.comm.tput" in line)
-    assert len(re.findall(r"1x\?xbf16", remote_put)) == 2, remote_put
-    # The bounce stage is a bounded buffer whose valid extent is dynamic.
-    assert "cols=8192" in remote_put, remote_put
-    assert "v_row=?" in remote_put and "v_col=?" in remote_put, remote_put
-
-    # Every loop in the emission is a rank loop bounded by NR, not a chunk loop:
-    # the transfer is a single `tput` per peer over the whole runtime extent.
-    # Whether the runtime chunks extents past one 16-KiB stage is therefore not
-    # answerable from the generated IR -- it is settled at run time instead, by
-    # tests/st/distributed/collectives/test_l3_tensor_allgather_runtime_width.py.
-    loop_bounds = re.findall(r"scf\.for [^=]+= %c0_index to (%\w+) step", mlir)
-    assert loop_bounds, mlir
-    assert set(loop_bounds) == {"%2"}, loop_bounds
-
-
-def test_allgather_accepts_runtime_reviewed_window(default_pass_manager, ascend_backend):
-    """The rail's actual form: a window whose gathered extent is a runtime value.
-
-    Mirrors ``attention_tp.py::decode_tp_input_all_gather``, where the caller
-    publishes ``ceil(T/TP)`` rows and the ``[TP, width*D]`` view of the window
-    *is* the gathered layout. Both sides carry the same symbol product, so this
-    also covers whether the deducer compares the two extents structurally rather
-    than requiring a compile-time constant.
+    Written in the re-viewed-window form rather than as a bare symbolic target,
+    because that is what a caller actually needs: the rail declares a
+    ``[TP * width, D]`` window and views it as ``[TP, width * D]``, where
+    ``width`` is known only at run time (``attention_tp.py::decode_tp_input_all_gather``).
+    Routing it through ``tensor.view`` still covers the plain symbolic-extent case,
+    since the view's trailing dim is the same symbol product the deducer compares,
+    and additionally pins that the view keeps its window binding.
     """
     d = 64
     nr = _ALLGATHER_DYNAMIC_NR
-    w = pl.dynamic("ALLGATHER_VIEW_W")
+    w = pl.dynamic("ALLGATHER_RUNTIME_W")
 
     @pl.program
     class Before:
@@ -3945,9 +3897,12 @@ def test_allgather_accepts_runtime_reviewed_window(default_pass_manager, ascend_
 
     After = _run_default_pipeline(default_pass_manager, Before)
 
+    # A runtime extent takes the full chunk bound rather than a rounded-down
+    # width: 16 KiB / 2 B per BF16 element.
+    assert (1, 8192) in _stage_tile_shapes(After)
     assert "pld.tensor.allgather" not in set(_collect_op_names(After))
-    # A runtime extent past one chunk must still be admitted by the stage pick.
-    assert _stage_tile_shapes(After), "no stage tile was materialised"
+    # The lowering is push-based; nothing pulls.
+    assert _OP_PLD_TILE_REMOTE_LOAD not in set(_collect_op_names(After))
 
     from pypto import codegen  # noqa: PLC0415
 
@@ -3956,12 +3911,23 @@ def test_allgather_accepts_runtime_reviewed_window(default_pass_manager, ascend_
     single = ir.Program([func], func.name, After.span)
     mlir = codegen.PTOCodegen().generate(single)
 
-    # The re-viewed window still carries a dynamic extent into the transfer --
-    # i.e. the view did not degrade to a constant, and `tput` still targets the
-    # original window rather than a fresh buffer.
+    # The runtime extent survives the view and reaches the transfer: source and
+    # peer destination both carry a dynamic extent, the bounce stage is bounded
+    # with a dynamic valid extent, and `tput` still targets the original window
+    # rather than a fresh buffer.
     remote_put = next(line for line in mlir.splitlines() if "pto.comm.tput" in line)
     assert len(re.findall(r"1x\?xbf16", remote_put)) == 2, remote_put
-    assert "v_col=?" in remote_put, remote_put
+    assert "cols=8192" in remote_put, remote_put
+    assert "v_row=?" in remote_put and "v_col=?" in remote_put, remote_put
+
+    # Every loop in the emission is a rank loop, not a chunk loop: the transfer is
+    # a single `tput` per peer over the whole runtime extent, so all of the loops
+    # share one bound -- the rank count. A chunk loop would add a distinct second
+    # bound. Assert it that way rather than against a specific SSA name, which
+    # shifts with the program's value numbering.
+    loop_bounds = re.findall(r"scf\.for [^=]+= %c0_index to (%\w+) step", mlir)
+    assert loop_bounds, mlir
+    assert len(set(loop_bounds)) == 1, loop_bounds
 
 
 if __name__ == "__main__":
