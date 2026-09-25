@@ -614,8 +614,17 @@ local_data : Tensor[[1, SIZE]]                 -- 本 rank 的分块
 [`pld.tensor.allreduce`](#pldtensorallreduce)）。任何符号范围都必须由内核标量、循环
 变量或物理张量形状参数在运行时绑定；仅类型元数据的符号会在 PTO codegen 阶段被拒绝。
 
-验证器：`local_data` 必须是普通 `Tensor`；`target` 与 `signal` 必须是窗口绑定的
-`DistributedTensorType`，且 `signal` 形状为 `[NR, 1]`。
+**类型约定。** 推导器由两条执行路径共用，因此接受两者所需的形式：`local_data`
+可以是普通 `Tensor` **或** `DistributedTensor`（HOST builtin 经 `[1, SIZE]` 的
+`DistributedTensor` 暂存窗口提交；InCore 传入普通分块）；`target` 必须是窗口绑定的
+`DistributedTensor`，形状 `[NR, SIZE]`；`signal` 可以是 **`[NR]` 或 `[NR, 1]`**
+的 INT32；且 `local_data` 与 `target` 必须是不同缓冲区——让二者别名会造成跨进程
+数据竞争。
+
+InCore 下降在一点上比推导器更严格：其屏障按 rank 索引一格，因此要求 `signal`
+为二维 `[NR, 1]`（`ValidateMeshSignalShape`）。所以 `[NR, 1]` 同时满足两条路径，
+而一维 `[NR]` 仅适用于 HOST。为 ring `allreduce` 设计的信号（`[2*(NR-1), NR]`）
+在两条路径上都不能与本集合通信算子共用，应给它独立的窗口。
 
 ### `pld.system.notify`（TNOTIFY）
 
