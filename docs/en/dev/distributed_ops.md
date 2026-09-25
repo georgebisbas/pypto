@@ -687,6 +687,43 @@ One SPMD grid avoids both: `require_sync_start` admits all blocks together and
 per-card admission guarantee, not a global simultaneous start across ranks — the
 ready barrier absorbs cross-rank launch skew.
 
+### `pld.tensor.allgather`
+
+```text
+pld.tensor.allgather(local_data, target, signal) -> DistributedTensorType(target)
+```
+
+Gathers one `[1, SIZE]` local chunk from every rank into the window-bound
+`target` and returns it — the **window-as-result** form. Unlike `allreduce`,
+`target` is not this rank's slice: it is the whole gathered matrix, so its
+leading extent is the rank count and its trailing extent is one chunk.
+
+```text
+local_data : Tensor[[1, SIZE]]                 -- this rank's chunk
+ target    : DistributedTensor[[NR, SIZE]]     -- the gathered result
+ signal    : DistributedTensor[[NR, 1]] INT32
+```
+
+**Shape contract.** The deducer compares `target.shape[1]` with
+`local_data.shape[1]` structurally rather than requiring a compile-time
+constant, so a symbol shared by both sides is admissible — including a runtime
+chunk width. The rail form `[TP, width * D]` is therefore valid; `[TP * width,
+D]` is not, and is rejected at IR construction with *"target SIZE must equal
+input SIZE"*.
+
+**Lowering.** Push-based: one `pld.tile.put` per peer writes this rank's chunk
+into that peer's `target` row `my_rank`, then a barrier, then a self-clearing
+epilogue. Nothing is pulled. The bounce stage is capped at one 16-KiB chunk and
+the transfer is chunked by `pld.tile.put` itself, so the composite emits no
+chunk loop of its own and a runtime extent is chunked at run time exactly as a
+static one is (see the chunking rules under
+[`pld.tensor.allreduce`](#pldtensorallreduce)). Any symbolic extent must be
+runtime-bound by a kernel scalar, loop variable or physical tensor-shape
+parameter; a type-metadata-only symbol is rejected during PTO codegen.
+
+Verifier: `local_data` must be a plain `Tensor`; `target` and `signal` must be
+window-bound `DistributedTensorType`, with `signal` shaped `[NR, 1]`.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -799,6 +836,8 @@ dispatches before the final `Simplify`.
   `test_l3_allgather.py`, `test_l3_reduce_scatter.py`, `test_l3_broadcast.py`
   (each likewise dynamic-NR, P=2/P=4),
   `test_l3_tensor_allreduce_intrinsic.py`, `test_l3_tensor_allreduce_ring_intrinsic.py`,
+  `test_l3_tensor_allgather_runtime_width.py` (composite allgather at a runtime
+  extent: one compile exercised at three different extents),
   `test_l3_allreduce_ring.py` (hand-rolled ring RS+AG), `test_l3_host_tensor_allreduce.py`,
   `test_l3_host_tensor_allreduce_ring.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`,
