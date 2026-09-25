@@ -109,8 +109,10 @@ chunk to every rank.
   `left = ...`, but round `s=0`'s wait (`signal, offsets=[0, left]`) depends
   on a notify the RS loop never sends: a stage-in phase, right before it,
   copies each local chunk into `scratch` and then notifies the right
-  neighbour at row 0 — the same pattern every hand-rolled collective in this
-  ladder uses, just easy to miss when only the loop body is quoted.
+  neighbour at row 0 — the same stage-before-notify ordering every
+  hand-rolled collective in this ladder uses (only the ring notifies a
+  single neighbour instead of every peer), just easy to miss when only the
+  loop body is quoted.
 - **The last all-gather round sends no notify.** Its own loop guards the
   final round with `if s < nranks - 2:` — the row that round's notify would
   use, `2*(nranks-1)`, is past the signal's last valid row
