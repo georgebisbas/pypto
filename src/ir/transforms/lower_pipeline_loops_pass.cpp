@@ -12,6 +12,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -267,11 +268,22 @@ class DeadInitCondFolder : public IRMutator {
 /// Equivalently: @p main_start is a compile-time constant and `main_start + step`
 /// has the same sign as @p step. A runtime `main_start` (the dynamic-bounds path)
 /// yields no bound, so nothing is folded there — the predicated form is kept.
+///
+/// The bound is only trusted when the addition is representable: a valid loop can
+/// start near either extreme (say `main_start = INT64_MAX - 1` with `step = 2`),
+/// and `*start + step` would then be signed overflow — UB during compilation. When
+/// the sum does not fit, this conservatively reports "not provable", which keeps
+/// the predicated form.
 bool ReplicaIndexIsProvablyNonZero(const ExprPtr& main_start, int64_t step) {
   auto start = EvalConstInt(main_start);
   if (!start.has_value()) return false;
-  const int64_t bound = *start + step;
-  return step > 0 ? bound > 0 : bound < 0;
+  const int64_t s = *start;
+  if (step > 0) {
+    if (s > std::numeric_limits<int64_t>::max() - step) return false;
+    return s + step > 0;
+  }
+  if (s < std::numeric_limits<int64_t>::min() - step) return false;
+  return s + step < 0;
 }
 
 /**

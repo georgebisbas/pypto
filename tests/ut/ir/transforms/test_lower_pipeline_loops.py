@@ -737,7 +737,7 @@ class TestReplicaSeedPredicateFoldIsGatedOnTheLoopBound:
         # with a literal. The pass injects the BOOL-typed `ConstInt` a DSL
         # `init_cond=False` produces (that is the spelling the printer/parser
         # round-trips), which prints as `pl.const(0, pl.BOOL)`.
-        assert re.search(r"init_cond=(False|pl\.const\()", predicates[1]), (
+        assert re.search(r"init_cond=(False|pl\.const\(0,\s*pl\.BOOL\))", predicates[1]), (
             "replica 1 can never index zero, so its predicate must fold to a literal "
             f"`false`; got: {predicates[1]}"
         )
@@ -759,7 +759,7 @@ class TestReplicaSeedPredicateFoldIsGatedOnTheLoopBound:
         )
         # `-2 + 4j + 2` hits 0 at j = 0, so replica 1's predicate is reachable and must
         # survive verbatim as `i + 2 == 0`.
-        assert not re.search(r"init_cond=(False|pl\.const\()", predicates[1]), (
+        assert not re.search(r"init_cond=(False|pl\.const\(0,\s*pl\.BOOL\))", predicates[1]), (
             "replica 1's seed test is reachable (its first index is 0) and must not be "
             f"folded away — folding it accumulates onto an uninitialised accumulator: {predicates[1]}"
         )

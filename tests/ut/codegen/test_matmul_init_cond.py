@@ -308,9 +308,11 @@ class TestAutoTiledPredicateFolds:
         mlir = _generate_default_mlir(AutoTiledSplitK)
         # Replica 0's `ko == 0` is runtime and legitimately branches; the bug
         # this guards is the *second* branch, on replica 1's dead predicate.
-        assert mlir.count("scf.if") <= 1, (
-            "only the seeding replica's predicate is runtime; a replica whose index "
-            "cannot be zero must not emit a branch on a compile-time constant\n" + mlir
+        # `== 1` (not `<= 1`): the seeding branch must survive, so a run that
+        # emits no branch at all fails here instead of passing vacuously.
+        assert mlir.count("scf.if") == 1, (
+            "replica 0's runtime seed test must be the only branch; a replica "
+            "whose index cannot be zero must not emit a branch on a constant\n" + mlir
         )
         # One overwrite, and only the seeding replica can reach it. An unfolded
         # predicate emits a second (unreachable) overwrite arm.
