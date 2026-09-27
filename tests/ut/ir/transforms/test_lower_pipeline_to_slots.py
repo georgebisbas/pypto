@@ -368,6 +368,63 @@ class TestFallback:
             f"the rotation counter must be a division, got {type(counter).__name__}"
         )
 
+    def test_a_negative_start_is_declined(self):
+        """A negative start cannot index a slot, in either form.
+
+        ``iv % factor`` is a *signed* remainder, so `start = -2, step = 1` yields
+        `(-1) % 2 == -1` — a slot before the region. That shape satisfies the old
+        `start % factor == 0` test, so it reached codegen; this gate closes that
+        pre-existing hole as well as guarding the counter form, where
+        `iv - start` is not representable for a sufficiently negative start.
+
+        The load address is loop-invariant on purpose: a negative start would
+        otherwise produce negative slice offsets and the shape would not parse.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(-2, 6, 1, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
+    def test_a_start_whose_counter_would_overflow_is_declined(self):
+        """The counter subtracts `start`, so a start near the type's floor is out.
+
+        `pl.pipeline(INT64_MIN, 1, 1 << 61, stage=3)` runs five iterations and
+        reaches `iv = 0`, where `0 - INT64_MIN` is not representable. The wrapped
+        quotient would then make the remainder select slot `-1` of a three-slot
+        region — an access before the allocation. Replication handles these bounds
+        correctly, so declining is the right answer.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(-(2**63), 1, 1 << 61, stage=3, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
     def test_load_carried_out_as_a_phi(self):
         """A yielded tile makes the return var share its MemRef — codegen calls that
         'one of its slots is carried out of an if or a loop as a phi'."""
