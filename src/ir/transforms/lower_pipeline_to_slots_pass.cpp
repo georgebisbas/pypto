@@ -366,18 +366,35 @@ class SlotBindingMutator : public IRMutator {
   ///
   /// A runtime `step` or `start` is still declined: the slot would then depend on
   /// a value the analysis cannot bound.
+  ///
+  /// **`start` must also be non-negative**, and that is not a formality — both
+  /// emitted shapes need the induction variable to be non-negative for the slot
+  /// to land in `[0, factor)`:
+  ///
+  /// * `iv % factor` is a *signed* remainder, so a negative `iv` yields a
+  ///   negative slot (`(-1) % 2 == -1`) and addresses before the region.
+  /// * the counter form subtracts `start`, and `iv - start` is not representable
+  ///   for a sufficiently negative `start`. `pl.pipeline(INT64_MIN, 1, 1 << 61,
+  ///   stage=3)` runs five iterations and reaches `iv = 0`, where
+  ///   `0 - INT64_MIN` overflows; the wrapped quotient then makes `remsi` select
+  ///   slot `-1` of a three-slot allocation.
+  ///
+  /// The first bullet is pre-existing — `start = -2, step = 1, factor = 2`
+  /// satisfies `start % factor == 0` and emits a negative slot today — so this
+  /// requirement closes both. A loop that starts negative is better served by
+  /// replication, which handles arbitrary bounds.
   static bool LoopShapeAllowsSlots(const ForStmtPtr& op, int64_t factor) {
     if (factor < kMinSlots || factor > kMaxSlots) return false;
     auto step = As<ConstInt>(op->step_);
     if (!step || step->value_ <= 0) return false;
     auto start = As<ConstInt>(op->start_);
-    if (!start) return false;
+    if (!start || start->value_ < 0) return false;
     if (step->value_ == 1) {
       // Keep the narrow form, and the narrow requirement, exactly as before.
       return start->value_ % factor == 0;
     }
-    // `((iv - start) / step) % factor` is well-formed for any constant start:
-    // the counter is zero-based by construction.
+    // `((iv - start) / step) % factor` is well-formed: `iv >= start >= 0` keeps
+    // the subtraction non-negative and bounded by the loop's own span.
     return true;
   }
 
