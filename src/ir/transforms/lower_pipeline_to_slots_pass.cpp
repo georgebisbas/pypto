@@ -58,11 +58,20 @@ namespace {
 constexpr int64_t kMinSlots = 2;
 constexpr int64_t kMaxSlots = 16;
 
-/// Memory spaces ptoas accepts for a multi-buffer slot. Mirrors
-/// `IsMultiBufferMemorySpace` in `src/codegen/pto/pto_codegen.cpp`.
+/// Memory spaces ptoas accepts for a multi-buffer slot.
+///
+/// **Prototype note.** The original list was Vec/Mat/Acc, mirroring
+/// `IsMultiBufferMemorySpace` in `src/codegen/pto/pto_codegen.cpp`, whose comment
+/// records that "the multi-buffer design ships with local vec / mat support" and
+/// that `acc` was verified against ptoas 0.54 — it says nothing about Left/Right,
+/// so those two were conservatively excluded rather than measured. ptoas' own
+/// `MultiTileBufType::verify` constrains only the slot type and the count, never
+/// the memory space, so this is an allowlist on PyPTO's side and not a ptoas
+/// restriction. Widening it is an experiment: see the prototype branch notes.
 bool IsMultiBufferSpace(const std::optional<MemorySpace>& space) {
   return space.has_value() &&
-         (*space == MemorySpace::Vec || *space == MemorySpace::Mat || *space == MemorySpace::Acc);
+         (*space == MemorySpace::Vec || *space == MemorySpace::Mat || *space == MemorySpace::Acc ||
+          *space == MemorySpace::Left || *space == MemorySpace::Right);
 }
 
 /// Does the tile state a compile-time valid extent?
@@ -344,20 +353,46 @@ class SlotBindingMutator : public IRMutator {
     return result;
   }
 
-  /// Can the loop's induction variable index the slots directly as `iv % factor`?
+  /// Can the loop's induction variable index the slots?
   ///
-  /// ptoas matches the *affine form* of the slot index to decide which accesses
-  /// share a slot, and that match is what earns the rotation its per-slot dynamic
-  /// event ids. A general `((iv - start) / step) % factor` would have to be
-  /// materialized as an intermediate SSA value, which risks losing exactly the
-  /// analysis this transform exists to trigger — so any loop whose slot index is
-  /// not literally `iv % factor` is left to `LowerPipelineLoops`.
+  /// Two accepted shapes, and they exist for the same reason: the slot operand
+  /// has to stay an expression ptoas can reason about, never a byte offset.
+  ///
+  /// * `step == 1` with an aligned `start` means the induction variable **is**
+  ///   the rotation counter, so the slot is literally `iv % factor`. That is the
+  ///   form the affine analysis matches by construction, and it is still emitted
+  ///   for exactly these loops, unchanged.
+  /// * Any other constant `step` counts iterations, not induction values, so the
+  ///   rotation counter is `(iv - start) / step` and the slot is
+  ///   `((iv - start) / step) % factor`. The division is exact by construction
+  ///   (`iv` only ever takes `start + j*step`), so this is still a remainder over
+  ///   a single SSA value — not a folded byte offset — and ptoas' slot accounting
+  ///   keys on that value rather than on its shape.
+  ///
+  /// The second shape admits any pipeline loop whose body loads at the top
+  /// level and whose step is a compile-time constant — hand-written stepped
+  /// pipelines included.
+  ///
+  /// It does **not** by itself admit a compiler-generated matmul K-loop
+  /// (`pl.pipeline(0, 512, k, stage=2)`, `step == k`): such a body extracts from
+  /// an already-loaded tile rather than loading, so `CollectCandidates` finds
+  /// nothing and declines before this shape is ever used. Teaching that pass
+  /// about extract-produced tiles is a separate change.
+  ///
+  /// A runtime `step` or `start` is still declined: the slot would then depend on
+  /// a value the analysis cannot bound.
   static bool LoopShapeAllowsSlots(const ForStmtPtr& op, int64_t factor) {
     if (factor < kMinSlots || factor > kMaxSlots) return false;
     auto step = As<ConstInt>(op->step_);
-    if (!step || step->value_ != 1) return false;
+    if (!step || step->value_ <= 0) return false;
     auto start = As<ConstInt>(op->start_);
-    if (!start || start->value_ % factor != 0) return false;
+    if (!start) return false;
+    if (step->value_ == 1) {
+      // Keep the narrow form, and the narrow requirement, exactly as before.
+      return start->value_ % factor == 0;
+    }
+    // `((iv - start) / step) % factor` is well-formed for any constant start:
+    // the counter is zero-based by construction.
     return true;
   }
 
@@ -398,7 +433,13 @@ class SlotBindingMutator : public IRMutator {
       if (!call || !call->op_) continue;
       // `tile.read` is deliberately absent: it returns a ScalarType element, not a
       // tile, so it allocates no buffer to rotate.
-      if (!IsOp(call, "tile.load")) continue;
+      //
+      // **Prototype note.** `tile.extract` is admitted alongside `tile.load`: an
+      // AutoTile K-loop takes its per-stage operands from an already-loaded Mat
+      // tile via `tile.extract` rather than by loading, so a loads-only filter
+      // finds no candidate at all for the dominant kernel shape. The remaining
+      // gates (space, static extent, phi, view/in-place) still decide.
+      if (!IsOp(call, "tile.load") && !IsOp(call, "tile.extract")) continue;
 
       auto tile_type = As<TileType>(assign->var_->GetType());
       if (!tile_type) continue;
@@ -499,8 +540,7 @@ class SlotBindingMutator : public IRMutator {
     // identity, so a fresh Var per candidate keeps the regions apart without a
     // name-uniqueness scheme.
     auto base = std::make_shared<Var>("pipe_" + candidate.var->name_hint_, GetPtrType(), span);
-    ExprPtr slot_index =
-        MakeFloorMod(op->loop_var_, std::make_shared<ConstInt>(factor, DataType::INDEX, span), span);
+    ExprPtr slot_index = BuildSlotIndex(op, factor, span);
     auto memref = std::make_shared<MemRef>(std::static_pointer_cast<const Var>(base), int64_t{0}, uint64_t{0},
                                            span, /*is_pinned=*/true, static_cast<uint64_t>(factor),
                                            std::make_optional(slot_index));
@@ -510,6 +550,32 @@ class SlotBindingMutator : public IRMutator {
 
     LOG_DEBUG << "LowerPipelineToSlots: '" << candidate.var->name_hint_ << "' -> slot ("
               << op->loop_var_->name_hint_ << " % " << factor << ") of a " << factor << "-slot allocation";
+  }
+
+  /// The slot operand for `op`: `iv % factor` when the induction variable is
+  /// already the rotation counter, else `((iv - start) / step) % factor`.
+  ///
+  /// Both are a remainder over one SSA value, which is the property the ptoas
+  /// slot accounting keys on: `findMultiTileSlotExpr` returns whatever
+  /// `pto.multi_tile_get` carries, and only the identity of that value — not its
+  /// arithmetic shape — decides whether two accesses are provably the same slot.
+  ///
+  /// `step == 1` loops keep the literal `iv % factor` they have always had, so
+  /// their emitted IR is untouched.
+  static ExprPtr BuildSlotIndex(const ForStmtPtr& op, int64_t factor, const Span& span) {
+    auto factor_expr = std::make_shared<ConstInt>(factor, DataType::INDEX, span);
+    auto step = As<ConstInt>(op->step_);
+    INTERNAL_CHECK(step) << "LowerPipelineToSlots: slot index requested for a loop with a non-constant step";
+    if (step->value_ == 1) {
+      return MakeFloorMod(op->loop_var_, factor_expr, span);
+    }
+    auto start = As<ConstInt>(op->start_);
+    INTERNAL_CHECK(start)
+        << "LowerPipelineToSlots: slot index requested for a loop with a non-constant start";
+    auto counter = MakeFloorDiv(
+        MakeSub(op->loop_var_, std::make_shared<ConstInt>(start->value_, DataType::INDEX, span), span),
+        std::make_shared<ConstInt>(step->value_, DataType::INDEX, span), span);
+    return MakeFloorMod(counter, factor_expr, span);
   }
 
   /// Old tile Var -> the same tile bound to a slot. Registered before the body is
