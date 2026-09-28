@@ -2348,6 +2348,25 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
         auto chunk_offsets = tile_conversion_utils::MakeShapeTuple({comm.my_rank, col}, span);
         auto chunk_valid_shape_tuple = tile_conversion_utils::MakeShapeTuple({one_idx, valid_cols}, span);
 
+        // A2/A3 peer MTE transfers must end on a 32-byte boundary, so an FP16
+        // ragged tail cannot be read at its logical element width. Widen the
+        // physical read to the aligned element count and let it spill into the
+        // window's tail padding, then narrow back to the logical tail before
+        // reduction. FP32 needs no widening here because its element width
+        // already divides the tile alignment. Same contract as the chunked
+        // allreduce path; see `allow_physical_tail_padding` in comm.h.
+        ExprPtr remote_valid_cols = valid_cols;
+        std::vector<std::pair<std::string, std::any>> remote_load_kwargs;
+        if (target_type->dtype_ == DataType::FP16) {
+          remote_valid_cols =
+              MakeMul(MakeFloorDiv(MakeAdd(valid_cols, chunk_geometry.alignment_minus_one_idx, span),
+                                   chunk_geometry.alignment_elements_idx, span),
+                      chunk_geometry.alignment_elements_idx, span);
+          remote_load_kwargs.emplace_back("allow_physical_tail_padding", true);
+        }
+        auto remote_valid_shape_tuple =
+            tile_conversion_utils::MakeShapeTuple({one_idx, remote_valid_cols}, span);
+
         auto acc_loaded = chunk_body.Bind(
             "acc_loaded",
             reg.Create("tile.load", {target, chunk_offsets, chunk_shape_tuple, chunk_valid_shape_tuple},
@@ -2371,11 +2390,21 @@ ExprPtr LowerTensorReduceScatterRule(const CallPtr& call, const std::vector<Expr
                         "recv_loaded",
                         OpRegistry::GetInstance().Create(
                             "pld.tile.remote_load",
-                            {target, peer, chunk_offsets, chunk_shape_tuple, chunk_valid_shape_tuple}, {},
-                            span),
+                            {target, peer, chunk_offsets, chunk_shape_tuple, remote_valid_shape_tuple},
+                            remote_load_kwargs, span),
                         span);
+                    // The widened FP16 read covers padding past the logical
+                    // tail; drop it before the zero-fill so the reduced tile
+                    // keeps the chunk's real extent.
+                    ExprPtr recv_tail = recv_loaded;
+                    if (target_type->dtype_ == DataType::FP16) {
+                      recv_tail = then_body.Bind(
+                          "recv_tail",
+                          reg.Create("tile.set_validshape", {recv_loaded, one_idx, valid_cols}, {}, span),
+                          span);
+                    }
                     auto recv = then_body.Bind("recv",
-                                               reg.Create("tile.fillpad_inplace", {recv_loaded},
+                                               reg.Create("tile.fillpad_inplace", {recv_tail},
                                                           {{"pad_value", PadValue::zero}}, span),
                                                span);
                     return then_body.Bind("acc_next", then_body.Reduce(reduce_op, acc, recv, span), span);

@@ -2228,7 +2228,7 @@ def test_reduce_scatter_supports_all_reduce_ops():
         )
 
 
-def _build_reduce_scatter_sized(size):
+def _build_reduce_scatter_sized(size, dtype=pl.FP32):
     """Build an InCore reduce_scatter with a literal extent ``size``."""
     nr = _REDUCE_SCATTER_NRANKS
 
@@ -2237,9 +2237,9 @@ def _build_reduce_scatter_sized(size):
         @pl.function(type=pl.FunctionType.InCore)
         def reduce_step(
             self,
-            data: pl.InOut[pld.DistributedTensor[[nr, size], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[nr, size], dtype]],
             signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
-        ) -> pld.DistributedTensor[[nr, size], pl.FP32]:
+        ) -> pld.DistributedTensor[[nr, size], dtype]:
             data = pld.tensor.reduce_scatter(data, signal, op=pld.ReduceOp.Sum)
             return data
 
@@ -2300,6 +2300,57 @@ def test_reduce_scatter_chunks_an_extent_larger_than_one_chunk(default_pass_mana
     assert "cols=4096" in mlir, mlir
     assert "cols=8192" not in mlir, mlir
     assert "scf.for" in mlir
+
+
+def _collect_calls_named(prog, wanted):
+    """Collect every ``Call`` whose operator name is in ``wanted``."""
+
+    class _NamedCallCollector(ir.IRVisitor):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+
+        def visit_call(self, op: ir.Call) -> None:
+            if op.op.name in wanted:
+                self.calls.append(op)
+            super().visit_call(op)
+
+    collector = _NamedCallCollector()
+    collector.visit_program(prog)
+    return collector.calls
+
+
+def test_reduce_scatter_fp16_tail_widens_the_remote_read(default_pass_manager, ascend_backend):
+    """An FP16 ragged tail reads at the tile alignment, not its logical width.
+
+    A2/A3 peer MTE transfers must end on a 32-byte boundary, so the final FP16
+    chunk -- a single element at ``SIZE = 8193`` -- cannot be remote-loaded at
+    its logical width. The chunked path must widen the physical read to the
+    aligned element count, let it spill into the window's reserved tail, and
+    re-narrow before reduction.
+
+    This is invisible to an FP32 sweep: 32 bytes divides evenly by an FP32
+    element, so the FP32 path needs no widening and stays correct without it.
+    Comparing the two dtypes is what makes the guard real rather than assumed.
+    """
+    # FP16 chunk budget is 8192 elements (16 KiB / 2 B); 8193 is chunk + 1, so
+    # the final chunk has a one-element tail -- the reported failure shape.
+    fp16 = _run_default_pipeline(default_pass_manager, _build_reduce_scatter_sized(8193, dtype=pl.FP16))
+    fp32 = _run_default_pipeline(default_pass_manager, _build_reduce_scatter_sized(8193, dtype=pl.FP32))
+
+    fp16_loads = _collect_calls_named(fp16, {"pld.tile.remote_load"})
+    assert fp16_loads, "chunked FP16 lowering emitted no remote_load"
+    assert all(call.kwargs.get("allow_physical_tail_padding") is True for call in fp16_loads), (
+        f"FP16 remote_load must declare the physical tail: {[call.kwargs for call in fp16_loads]}"
+    )
+
+    # FP32 depends on the widening NOT happening: an unaligned FP32 span is
+    # already valid, and padding it would read past a window that reserves none.
+    fp32_loads = _collect_calls_named(fp32, {"pld.tile.remote_load"})
+    assert fp32_loads, "chunked FP32 lowering emitted no remote_load"
+    assert all("allow_physical_tail_padding" not in call.kwargs for call in fp32_loads), (
+        f"FP32 remote_load must not widen its read: {[call.kwargs for call in fp32_loads]}"
+    )
 
 
 def test_reduce_scatter_accepts_a_dynamic_extent(default_pass_manager, ascend_backend):
