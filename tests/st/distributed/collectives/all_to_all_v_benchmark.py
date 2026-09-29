@@ -95,6 +95,10 @@ PAYLOAD_SWEEP_BYTES: tuple[int, ...] = (
     1024 * 1024,
 )
 
+# RFC §8.3 sub-32-byte tail points. The current row-loop INT8 staging kernel
+# requires 32-byte-aligned rows, so these are expected to be rejected by the
+# alignment guard below; they are kept to document the intended sweep and the
+# recorded N/A outcome in the A1 archive.
 TAIL_PEER_BYTES: tuple[int, ...] = (1, 15, 31, 33, 4159, 4161)
 
 CORE_SWEEP: dict[int, tuple[int, ...]] = {
@@ -328,7 +332,7 @@ def read_pypto_commit() -> str:
             timeout=5,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return "unknown"
     sha = proc.stdout.strip()
     return sha if proc.returncode == 0 and sha else "unknown"
@@ -428,12 +432,16 @@ def _cluster_near_min(durs: list[float], factor: float = 2.5) -> list[float]:
 
 
 def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> float | None:
-    """Per-task AIV exec from ``chip_swimlane_records.json`` + ``name_map.json``.
+    """Last-completing AIV block per rank from ``chip_swimlane_records.json`` + ``name_map.json``.
 
     Level-1 records store ``func_id`` in ``task_token_raw & 0xFFFFFFFF``. Converted
     event names are ``task_spmd`` / ``func_-1_`` and must not be used. Duration is
     ``(end - start) / clock_freq`` **per task** — ``max(end) - min(start)`` across
-    cores is not a gang span on 910B2 (two cycle origins ~seconds apart).
+    cores is not a gang span on 910B2 (two cycle origins ~seconds apart). The
+    reported span is the **max of the valid per-block durations** (one task per
+    admitted block, ``B = CalAllToAllVBlocks(P, L)``): the collective completes
+    when its slowest block finishes, so averaging would understate completion
+    latency for ``L>1``; for ``L=1`` this equals the single block time.
     """
     names = _load_name_map(path.parent / "name_map.json")
     if not names:
@@ -461,7 +469,9 @@ def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> f
     clustered = _cluster_near_min(durs)
     if not clustered:
         return None
-    return sum(clustered) / len(clustered)
+    # The collective is complete when its slowest valid block completes; for a
+    # single-block (L=1) dispatch this is identical to the block time.
+    return max(clustered)
 
 
 def _gang_span_from_records(path: Path) -> float | None:
@@ -487,7 +497,7 @@ def _gang_span_from_records(path: Path) -> float | None:
 
 
 def collect_swimlane_spans_us(output_dir: Path) -> dict[int, float]:
-    """Collective AIV exec per rank, in microseconds.
+    """Collective completion per rank (last-completing block), in microseconds.
 
     Prefers raw ``chip_swimlane_records.json`` + ``name_map.json`` (onboard
     level-1). HOST writes stage/fill/consume as later ``d{{k}}`` folders and
@@ -546,7 +556,7 @@ def result_json(  # noqa: PLR0913
     recv_bytes: list[int],
     row_width: int,
 ) -> dict[str, Any]:
-    means = {int(r): (sum(v) / len(v) if v else 0.0) for r, v in per_rank_kernel_us.items()}
+    means = {int(r): sum(v) / len(v) for r, v in per_rank_kernel_us.items() if v}
     if means:
         fastest_rank = min(means, key=lambda r: means[r])
         samples = per_rank_kernel_us[str(fastest_rank)]
@@ -932,14 +942,17 @@ def compile_only_json(args: argparse.Namespace, shape: BenchShape) -> dict[str, 
     if not row_bytes_aligned(shape.row_width):
         raise ValueError(
             f"row_width={shape.row_width} is not 32-byte aligned for INT8 staging; "
-            "sub-32-byte tail points cannot use the row-loop stage kernel"
+            "sub-32-byte tail points cannot use the row-loop stage kernel (recorded as N/A in the A1 archive)"
         )
+    if len(args.device_ids) < shape.p:
+        raise ValueError(f"need {shape.p} devices, got {args.device_ids}")
+    device_ids = args.device_ids[: shape.p]
     impl: Impl = args.impl
     program = build_program(impl, shape, args.core_num)
     compiled = _compile(
         program,
         platform=args.platform,
-        device_ids=args.device_ids,
+        device_ids=device_ids,
         output_dir=args.output_dir,
         skip_ptoas=True,
     )
@@ -961,7 +974,7 @@ def compile_only_json(args: argparse.Namespace, shape: BenchShape) -> dict[str, 
     send_b, recv_b = remote_bytes_per_rank(send_counts, shape)
     doc = result_json(
         platform=args.platform,
-        device_ids=args.device_ids,
+        device_ids=device_ids,
         shape=shape,
         peer_bytes=args.peer_bytes,
         pattern=args.count_pattern,
@@ -1030,7 +1043,7 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
     if not row_bytes_aligned(shape.row_width):
         raise ValueError(
             f"row_width={shape.row_width} is not 32-byte aligned for INT8 staging; "
-            "sub-32-byte tail points cannot use the row-loop stage kernel"
+            "sub-32-byte tail points cannot use the row-loop stage kernel (recorded as N/A in the A1 archive)"
         )
     if len(args.device_ids) < shape.p:
         raise ValueError(f"need {shape.p} devices, got {args.device_ids}")
@@ -1139,6 +1152,9 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
         doc["host_timing_slot_includes_swimlane_tax"] = slot_includes_tax
     if aiv_found:
         doc["aiv_rounds_captured"] = max(len(v) for v in aiv_rank.values())
+        missing = sorted(int(r) for r, v in aiv_rank.items() if not v)
+        if missing:
+            doc["aiv_ranks_missing"] = missing
     return doc
 
 
