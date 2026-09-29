@@ -418,30 +418,43 @@ def _load_name_map(path: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in raw.items()}
 
 
-def _cluster_near_min(durs: list[float], factor: float = 2.5) -> list[float]:
-    """Drop 910B2 dual-die clock-origin outliers.
+def _completion_us(tasks: list[tuple[int, float]], us_per_cycle: float) -> float | None:
+    """Last-completing AIV block in the faithful trace view.
 
-    A second die can stamp the same func_id hundreds of microseconds away.
-    Keep the tight cluster around the shortest duration; that is the AIV exec.
+    On 910B2 the same dispatch can be stamped from two cycle origins ~seconds
+    apart (a second die's trace), and those duplicate durations are inflated —
+    observed from ~3x up to ~140x the faithful stamp (e.g. 160 us vs 22.3 ms
+    on an archived P2 cell). Split ``tasks`` (start cycles, duration) into
+    view groups on start-time gaps > 1 s, keep the view holding the fastest
+    stamp, and report its **maximum duration**: the collective completes when
+    its slowest block finishes, so a genuinely slow block is never filtered
+    while inflated duplicates (which live in the other view) cannot pollute
+    the result. A single-view dispatch reduces to the maximum of its stamps.
     """
-    if not durs:
-        return []
-    mn = min(durs)
-    thresh = max(mn * factor, mn + 5.0)
-    return [d for d in durs if d <= thresh]
+    if not tasks:
+        return None
+    ordered = sorted(tasks)
+    groups: list[list[tuple[int, float]]] = [[ordered[0]]]
+    for prev, cur in zip(ordered, ordered[1:]):
+        if (cur[0] - prev[0]) * us_per_cycle > 1_000_000:
+            groups.append([])
+        groups[-1].append(cur)
+    faithful = min(groups, key=lambda g: min(d for _, d in g))
+    return max(d for _, d in faithful)
 
 
 def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> float | None:
-    """Last-completing AIV block per rank from ``chip_swimlane_records.json`` + ``name_map.json``.
+    """Last-completing AIV block in the faithful trace view (raw records + ``name_map.json``).
 
     Level-1 records store ``func_id`` in ``task_token_raw & 0xFFFFFFFF``. Converted
     event names are ``task_spmd`` / ``func_-1_`` and must not be used. Duration is
     ``(end - start) / clock_freq`` **per task** — ``max(end) - min(start)`` across
-    cores is not a gang span on 910B2 (two cycle origins ~seconds apart). The
-    reported span is the **max of the valid per-block durations** (one task per
-    admitted block, ``B = CalAllToAllVBlocks(P, L)``): the collective completes
-    when its slowest block finishes, so averaging would understate completion
-    latency for ``L>1``; for ``L=1`` this equals the single block time.
+    cores is not a gang span on 910B2 (two cycle origins ~seconds apart). Stamps
+    are split into trace views by start-time gaps (> 1 s); the view holding the
+    fastest stamp is faithful (duplicate stamps from the second origin are
+    inflated — observed up to ~140x), and the rank's span is the **maximum
+    duration in that view**: the collective completes when its slowest block
+    finishes. For a single-view dispatch this is simply the maximum stamp.
     """
     names = _load_name_map(path.parent / "name_map.json")
     if not names:
@@ -454,7 +467,7 @@ def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> f
     if freq <= 0:
         return None
     us_per_cycle = 1e6 / freq
-    durs: list[float] = []
+    tasks: list[tuple[int, float]] = []
     for row in rec.get("aicore_tasks") or []:
         if not isinstance(row, (list, tuple)) or len(row) < 5:
             continue
@@ -465,13 +478,8 @@ def _aiv_exec_us_from_raw_records(path: Path, needle: str = "all_to_all_v") -> f
         start, end = int(row[3]), int(row[4])
         dur = (end - start) * us_per_cycle
         if dur > 0:
-            durs.append(dur)
-    clustered = _cluster_near_min(durs)
-    if not clustered:
-        return None
-    # The collective is complete when its slowest valid block completes; for a
-    # single-block (L=1) dispatch this is identical to the block time.
-    return max(clustered)
+            tasks.append((start, dur))
+    return _completion_us(tasks, us_per_cycle)
 
 
 def _gang_span_from_records(path: Path) -> float | None:
@@ -1079,6 +1087,7 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
     aiv_rank: dict[str, list[float]] = {str(i): [] for i in range(shape.p)}
     slot_includes_tax = False
     profile = args.profile
+    swim_rounds = args.swimlane_rounds if profile == "both" else args.rounds
 
     if profile in ("timing-slot", "both"):
         print(
@@ -1098,7 +1107,6 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
         slot_rank = {str(i): [] for i in range(shape.p)}
 
     if profile in ("swimlane", "both"):
-        swim_rounds = args.swimlane_rounds if profile == "both" else args.rounds
         swim_warmup = args.warmup if profile == "swimlane" else min(args.warmup, 2)
         print(
             f"[a2av-bench] session=swimlane enter warmup={swim_warmup} rounds={swim_rounds}",
@@ -1152,9 +1160,17 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
         doc["host_timing_slot_includes_swimlane_tax"] = slot_includes_tax
     if aiv_found:
         doc["aiv_rounds_captured"] = max(len(v) for v in aiv_rank.values())
+        doc["aiv_rounds_requested"] = swim_rounds
         missing = sorted(int(r) for r, v in aiv_rank.items() if not v)
         if missing:
             doc["aiv_ranks_missing"] = missing
+        short = {
+            r: len(v)
+            for r, v in sorted(aiv_rank.items(), key=lambda kv: int(kv[0]))
+            if 0 < len(v) < swim_rounds
+        }
+        if short:
+            doc["aiv_rounds_incomplete"] = short
     return doc
 
 
