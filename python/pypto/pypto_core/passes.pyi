@@ -801,7 +801,9 @@ def lower_l2_tensor_collectives() -> Pass:
 
     Runs before :func:`derive_call_directions` so the emitted call
     gets its argument directions and task edges derived like any kernel call.
-    Today only ``pld.tensor.all_to_all_v`` with ``core_num=1`` is supported.
+    ``pld.tensor.all_to_all_v`` accepts a compile-time ``core_num``: the admitted
+    block count ``B = CalAllToAllVBlocks(P, L)`` is folded and ``B`` blocks are
+    launched; a runtime ``core_num`` is rejected.
     """
 
 def materialize_dist_tensor_ctx() -> Pass:
