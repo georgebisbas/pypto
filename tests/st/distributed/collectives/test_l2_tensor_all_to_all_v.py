@@ -77,7 +77,21 @@ SIZE = 64
 MAX_RECV = 4
 
 
-def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
+def _admitted_blocks(n_ranks: int, core_num: int) -> int:
+    """``B = CalAllToAllVBlocks(P, L)``: ``L`` below ``P``, else the largest multiple of ``P`` <= ``L``.
+
+    An independent restatement, as in the HOST multicore ST, so a case's expected
+    gang width does not come from the code under test.
+    """
+    return core_num if core_num < n_ranks else (core_num // n_ranks) * n_ranks
+
+
+# Requested block limits ``L``. With P=2 these admit B = 1, 2, 4; with P=4, B = 1, 2, 4 — covering
+# the single-block rail, B < P (multi-peer-per-core) and B = P / B > P (peer x length lanes).
+_CORE_NUMS = (1, 2, 4)
+
+
+def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int, core_num: int = 1):
     """Build an N-rank CHIP-pipeline variable-size all-to-all program.
 
     Signal/counts shapes are per-rank-count, so the program is built by a
@@ -86,6 +100,9 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
     nr = n_ranks
     mr = max_recv
     total = nr * mr
+    # The signal is [NR, S] with one lane per admitted block, so S = B (the
+    # smallest legal stride: the pass rejects S < B).
+    stride = _admitted_blocks(nr, core_num)
 
     @pl.program
     class L2TensorAllToAllV:
@@ -163,7 +180,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
             stage: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
             data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, stride], pl.INT32]],
             counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
             recv: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
@@ -175,7 +192,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             not by an injected ordering token.
             """
             stage, counts = self.stage_step(inp, counts_row, stage, counts)
-            data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=1)
+            data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
             return self.consume_step(data, recv, out, recv_out)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
@@ -189,7 +206,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             """Allocate the five windows once, dispatch one pipeline per rank."""
             stage_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
             data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
-            signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            signal_buf = pld.alloc_window_buffer(nr * stride * pl.INT32.get_byte())
             # Peers pull ONE word per rank from this window (scalar ld_dev read),
             # so the [NR, 1] INT32 vector is the whole requirement — no fixed-
             # width TLOAD unit set.
@@ -199,7 +216,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
             for r in pl.range(pld.world_size()):
                 stage = pld.window(stage_buf, [total, SIZE], dtype=pl.FP32)
                 data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
-                sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
+                sig = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
                 counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
                 recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
                 self.chip_pipeline(
@@ -243,9 +260,14 @@ def _golden_inputs(nr: int, mr: int) -> tuple[torch.Tensor, torch.Tensor]:
 class TestL2TensorAllToAllV:
     """L2 managed all_to_all_v: one chip pipeline per rank, no nested dispatch."""
 
+    @pytest.mark.parametrize("core_num", _CORE_NUMS)
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_l2_all_to_all_v(self, test_config, device_ids, n_ranks):
-        """Compile and run the CHIP-pipeline all_to_all_v for P in {2, 4}."""
+    def test_l2_all_to_all_v(self, test_config, device_ids, n_ranks, core_num):
+        """Compile and run the CHIP-pipeline all_to_all_v for P in {2, 4}, L in {1, 2, 4}.
+
+        ``L > 1`` must produce results identical to ``L = 1``: the golden below
+        does not depend on ``core_num``.
+        """
         if len(device_ids) < n_ranks:
             pytest.skip(f"L2 all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
@@ -253,7 +275,7 @@ class TestL2TensorAllToAllV:
         mr = MAX_RECV
         total = nr * mr
 
-        program = _build_l2_all_to_all_v_program(nr, mr)
+        program = _build_l2_all_to_all_v_program(nr, mr, core_num)
         compiled = ir.compile(
             program,
             platform=test_config.platform,
@@ -340,8 +362,9 @@ class TestL2TensorAllToAllVSkew:
     """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))
+    @pytest.mark.parametrize("core_num", _CORE_NUMS)
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_l2_all_to_all_v_skewed_counts(self, test_config, device_ids, n_ranks, case):
+    def test_l2_all_to_all_v_skewed_counts(self, test_config, device_ids, n_ranks, core_num, case):
         if len(device_ids) < n_ranks:
             pytest.skip(f"L2 all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
@@ -351,7 +374,7 @@ class TestL2TensorAllToAllVSkew:
         raw = _SKEW_CASES[case](nr, mr)
 
         compiled = ir.compile(
-            _build_l2_all_to_all_v_program(nr, mr),
+            _build_l2_all_to_all_v_program(nr, mr, core_num),
             platform=test_config.platform,
             distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
         )
