@@ -655,6 +655,28 @@ class ChipWorker(Worker):
         self._handles.add(handle)
         return handle
 
+    def _release_callable_handle(self, handle: RegistrationHandle) -> None:
+        """Release the cid of `handle` once no open alias is left.
+
+        Called by :meth:`RegistrationHandle.unregister`. The cid is dropped
+        from the local cache and released on the underlying worker, so its
+        slot becomes reusable for the next registration; a later dispatch
+        of the same program re-registers it transparently through
+        :meth:`_run_chip`. A superseded cid (the program was re-registered
+        after an earlier release) is left alone.
+        """
+        cid = handle.cid
+        if cid is None:
+            return
+        key = id(handle.compiled.chip_callable)
+        if self._cid_cache.get(key) is not cid:
+            return
+        for other in list(self._handles):
+            if other is not handle and not other.closed and other.cid is cid:
+                return
+        self._cid_cache.pop(key, None)
+        self._impl.unregister(cid)
+
     # ------------------------------------------------------------------
     # Internal hook for the runner reuse path
     # ------------------------------------------------------------------
@@ -734,9 +756,12 @@ class RegistrationHandle:
 
     **cid reuse semantics (L2):** Multiple :meth:`ChipWorker.register` calls
     for the same ``compiled.chip_callable`` return aliases of the same
-    underlying cid. :meth:`unregister` only marks the handle closed; it does
-    NOT call ``simpler.Worker.unregister``. Real cid release happens once,
-    in :meth:`Worker.close`. ``cid`` is informational only.
+    underlying cid. :meth:`unregister` marks the handle closed and, once no
+    open alias is left, releases the cid on the underlying worker -- the
+    program re-registers transparently on its next dispatch. That is how a
+    long-running process stays under ``MAX_REGISTERED_CALLABLE_IDS`` when
+    kernels churn; :meth:`Worker.close` remains the catch-all release.
+    ``cid`` identifies the registration while it lives.
 
     **L3 note:** ``DistributedWorker`` doesn't expose a per-callable cid the
     way ChipWorker does (its chip / sub registrations are baked at prepare()
@@ -785,13 +810,20 @@ class RegistrationHandle:
         return self._worker.run(self._compiled, *args, config=config)
 
     def unregister(self) -> None:
-        """Mark this handle closed. Idempotent.
+        """Release this handle. Idempotent.
 
-        Does NOT call ``simpler.Worker.unregister`` — other handle aliases
-        for the same cid would silently break. The real reverse-registration
-        happens once, in :meth:`Worker.close`.
+        When no other open handle aliases the same callable, the cid is
+        also released on the underlying worker (the target-local resources
+        become reusable and the next dispatch re-registers transparently).
+        Aliases keep the cid alive until the last one is unregistered; the
+        parent :meth:`Worker.close` remains the catch-all release.
         """
+        if self._closed:
+            return
         self._closed = True
+        release = getattr(self._worker, "_release_callable_handle", None)
+        if release is not None:
+            release(self)
 
     def _mark_closed(self) -> None:
         """Internal: called by Worker.close() to invalidate the handle."""
