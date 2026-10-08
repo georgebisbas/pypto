@@ -425,6 +425,83 @@ class TestFallback:
 
         self._assert_declined(Before)
 
+    def test_a_stop_whose_final_update_would_overflow_is_declined(self):
+        """A stepped loop's last `iv + step` update must stay representable.
+
+        `pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` runs two iterations, at
+        `INT64_MAX - 4` and `INT64_MAX - 1`, but the retained `scf.for` then computes
+        `INT64_MAX - 1 + 3`, which overflows the signed index and can keep the loop
+        running. Replication emits the tail copies with no loop, so declining is right.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(2**63 - 5, 2**63 - 1, 3, stage=3, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
+    def test_a_stop_with_room_for_the_final_update_is_admitted(self):
+        """The bound is tight: `stop == INT64_MAX - (step - 1)` still fits.
+
+        `pl.pipeline(INT64_MAX - 7, INT64_MAX - 2, 3, stage=2)` iterates at
+        `INT64_MAX - 7` and `INT64_MAX - 4`; the update after the last one is
+        `INT64_MAX - 1`, which is representable, so the loop is slotted.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(2**63 - 8, 2**63 - 3, 3, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        after = _run_to_slots(Before, passes.MemoryPlanner.PTOAS)
+        assert set(_slotted_memrefs(after)) == {"t"}
+
+    def test_a_stepped_loop_with_a_runtime_stop_is_declined(self):
+        """A runtime `stop` cannot be shown to leave room for `iv + step`.
+
+        Unlike `step == 1`, a stepped loop can overshoot `stop`, so it is only
+        admitted with a constant `stop` the pass can bound.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for i, (acc,) in pl.pipeline(0, n, 2, stage=2, init_values=(out,)):
+                    t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(a, [0, 0], [64, 64])
+                    e: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.exp(t)
+                    nxt: pl.Tensor[[64, 64], pl.FP32] = pl.store(e, [0, 0], acc)
+                    y = pl.yield_(nxt)
+                return y
+
+        self._assert_declined(Before)
+
     def test_load_carried_out_as_a_phi(self):
         """A yielded tile makes the return var share its MemRef — codegen calls that
         'one of its slots is carried out of an if or a loop as a phi'."""

@@ -110,7 +110,11 @@ ptoas 的 slot 计数读取 `pto.multi_tile_get` 携带的那个值，并围绕 
   `((iv - start) / step) % F`。该除法按构造恰好整除，因此这仍然是对**单个** SSA 值取余，
   而绝不是被折叠的字节偏移。
 
-运行期的 `step` 或 `start` 仍然会被拒绝：此时 slot 会依赖分析无法定界的一个值。
+运行期的 `step` 或 `start` 仍然会被拒绝：此时 slot 会依赖分析无法定界的一个值。带步长的循环
+（`step > 1`）还要求 `stop` 为常量且不超过 `INT64_MAX - (step - 1)`，否则同样会被拒绝：保留下来的
+`scf.for` 会在最后一次迭代之后计算 `iv + step`，该更新最多可能越过 `stop` 共 `step - 1`，从而使有符号
+index 溢出。`pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` 就是被堵住的形态。`step == 1` 不会越过
+`stop`，因此仍允许运行期 `stop`。
 注意计数器形式会丢掉 `(iv + c) % N` 这类配对的 `kDisjoint` 推断，因为常量剥离位于除法
 **之上**，两侧最终得到不同的 symbol；这只会退化为 `kUnknown`——调用方按保守方式处理
 （保留依赖），而不会给出错误答案。

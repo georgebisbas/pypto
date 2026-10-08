@@ -114,7 +114,11 @@ is emitted depends on whether the induction variable **is** the rotation counter
   remainder over a single SSA value, never a folded byte offset.
 
 A runtime `step` or `start` is still declined: the slot would then depend on a value the analysis
-cannot bound. Note that the counter form loses the `kDisjoint` inference for an
+cannot bound. A stepped loop (`step > 1`) is also declined unless `stop` is a constant no larger
+than `INT64_MAX - (step - 1)`: the retained `scf.for` computes `iv + step` after its last
+iteration, and that update can overshoot `stop` by up to `step - 1`, overflowing the signed index.
+`pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` is the shape this closes. `step == 1` cannot
+overshoot, so it keeps a runtime `stop`. Note that the counter form loses the `kDisjoint` inference for an
 `(iv + c) % N`-style pair, because the constant peel sits above the division and the two sides
 end up with different symbols; that degrades to `kUnknown`, which the callers treat
 conservatively (the dependency is kept), never to a wrong answer.

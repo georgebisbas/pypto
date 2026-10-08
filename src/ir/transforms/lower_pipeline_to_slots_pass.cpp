@@ -365,7 +365,8 @@ class SlotBindingMutator : public IRMutator {
   /// kernel shape in the stack and previously fell through to replication.
   ///
   /// A runtime `step` or `start` is still declined: the slot would then depend on
-  /// a value the analysis cannot bound.
+  /// a value the analysis cannot bound. A stepped loop (`step > 1`) additionally
+  /// needs a constant `stop` that leaves room for the final `iv + step` update.
   ///
   /// **`start` must also be non-negative**, and that is not a formality — both
   /// emitted shapes need the induction variable to be non-negative for the slot
@@ -395,7 +396,16 @@ class SlotBindingMutator : public IRMutator {
     }
     // `((iv - start) / step) % factor` is well-formed: `iv >= start >= 0` keeps
     // the subtraction non-negative and bounded by the loop's own span.
-    return true;
+    //
+    // The retained `scf.for` also computes `iv + step` after the last iteration,
+    // and with `step > 1` that can overshoot `stop` by up to `step - 1`. So `stop`
+    // must be a constant no larger than `INT64_MAX - (step - 1)`; otherwise the
+    // final update overflows the signed index. A runtime `stop` cannot be bounded,
+    // so it declines too, like a runtime `step` or `start`. (`step == 1` cannot
+    // overshoot: `iv + 1 <= stop`.)
+    auto stop = As<ConstInt>(op->stop_);
+    if (!stop) return false;
+    return stop->value_ <= std::numeric_limits<int64_t>::max() - (step->value_ - 1);
   }
 
   /// The loop body's top-level loads that each want a private per-stage buffer,
