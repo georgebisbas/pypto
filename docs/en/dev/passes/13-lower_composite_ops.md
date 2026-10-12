@@ -45,7 +45,7 @@ src/ir/transforms/lower_composite/lower_composite_builder.h / .cpp
 src/ir/transforms/lower_composite/lower_composite_common.h / .cpp
   Shared shape, target-validation, signal, chunk-geometry, and staging helpers
 
-src/ir/transforms/lower_composite_rules.h
+src/ir/transforms/lower_composite/lower_composite_rules.h
   CompositeLoweringFn       — (call, visited_args, builder) -> result expr
   Collective rule declarations for allreduce and allgather
 

@@ -43,8 +43,8 @@ using CompositeLoweringFn = ExprPtr (*)(const CallPtr& call, const std::vector<E
 // has the ``CompositeLoweringFn`` signature and is wired into the dispatch table
 // in ``lower_composite_ops_pass.cpp``.
 
-/// ``pld.tensor.allreduce`` — mesh mode, and ring mode via the algorithm
-/// attribute. Defined in ``lower_composite_allreduce.cpp``.
+/// ``pld.tensor.allreduce`` — mesh mode, and ring mode via the ``mode="ring"``
+/// kwarg. Defined in ``lower_composite_allreduce.cpp``.
 ExprPtr LowerTensorAllReduceRule(const CallPtr& call, const std::vector<ExprPtr>& args, LoweringBuilder& b);
 
 /// ``pld.tensor.allgather`` — push-based 3-arg form. Defined in
