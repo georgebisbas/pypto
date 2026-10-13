@@ -117,27 +117,26 @@ The reveal replaces phases 1–3 with one call:
 
 ### The IR diff (the teaching artifact)
 
-Like step 13's push/pull reversal, the interesting part isn't which bytes
-move — both modes move the same chunks to the same destinations — it's which
-side of the transfer the barrier lands on.
+The interesting part isn't which bytes move — both modes move the same chunks
+to the same destinations — it's how much of the sequence the builtin writes
+for you, and where it stops.
 
 - `--mode hand` lowers to the three phases above: `P` puts (one per
   destination), then the `Set`/`Ge(1)` barrier, then the read-back loop — the
   barrier comes *after* your own pushes but *before* you trust any peer's,
   because your reads would otherwise race their pushes.
 - `--mode builtin` expands into the same shape — your per-destination chunks
-  pushed via `pld.tile.put`, then the barrier, then the row read-back — but
-  the barrier's role has flipped. Because the transfers come *first*, it is a
-  **completion** barrier telling you every peer's push has landed, not a
-  **readiness** barrier gating a read.
+  pushed via `pld.tile.put`, then the barrier — but it stops there. The
+  barrier sits on the same side of the transfer as in the hand-rolled version,
+  so it means the same thing: a **completion** barrier confirming that every
+  peer's push has landed. What the builtin does *not* do is read the rows back
+  for you — the window **is** the result, so the read-back loop stays in your
+  code.
 - The composite appends a **self-clearing epilogue** after the barrier that
   subtracts this call's credits back out, so the same signal is reusable by a
   later collective ([21-putting_it_together](21-putting_it_together.md)). The
-  HOST builtin additionally chunks large transfers at the orchestration
-  level — the InCore composite this example uses does not need to.
-- That barrier-role flip is the lesson of this diff: whether a barrier gates
-  a read or confirms a write depends on which side of the transfer it sits
-  on, not on anything about barriers themselves.
+  HOST builtin also chunks large transfers, but inside the generated AIV
+  kernel, in fixed-size tiles — not at the orchestration level.
 
 **Cost card (per rank):** every rank sends a *different* `N/P` slice to each
 peer — `(P-1)/P · N` bytes received, and no two ranks receive the same bytes.
