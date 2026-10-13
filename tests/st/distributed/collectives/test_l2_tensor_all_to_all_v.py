@@ -38,15 +38,14 @@ scalar word per rank from this window after Barrier A, so the ``[NR]`` INT32
 vector is all it needs) and ``recv`` (per-source valid row counts, written by
 the collective).
 
-**Uses ``@pl.jit``** (issue #2638, fixed): earlier revisions of this file used
-``@pl.program`` because ``@pl.jit``'s specializer only recognized *one-level*
-attribute calls (``pl.store(...)``, ``pld.window(...)``) — ``pld.tensor.all_to_all_v(...)``
-is a two-level attribute and matched no branch of ``_update_local_tensor_meta``,
-so the metadata of the name it rebinds was dropped and passing that name on
-failed with "missing inferred tensor metadata for parameter 'data' of
-'consume_step'". #2638 generalized the walker to recognize qualified
-(3+-segment) calls, so the collective's self-rebind idiom
-(``data = pld.tensor.all_to_all_v(stage, data, ...)``) now specializes correctly.
+**Why this file used to be ``@pl.program``**: while issue #2638 was open,
+``@pl.jit``'s specializer dropped local tensor metadata across a two-level
+collective rebinding — ``data = pld.tensor.all_to_all_v(...)`` followed by
+``consume_step(data, ...)`` failed with "missing inferred tensor metadata for
+parameter 'data'". The specializer was generalized (#2901; #2638 closed
+2026-10-10, pinned by ``tests/ut/jit/test_decorator.py``), so this file now
+uses the user-facing ``@pl.jit`` surface — the family the rule
+(``.claude/rules/testing-and-examples.md``) requires for ``tests/st/``.
 
 ST coverage: P=2 and P=4 (skips when fewer devices are available) — the
 uniform golden, plus the same 0 / 1 / capacity / over-capacity / negative
@@ -74,7 +73,21 @@ SIZE = 64
 MAX_RECV = 4
 
 
-def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
+def _admitted_blocks(n_ranks: int, core_num: int) -> int:
+    """``B = CalAllToAllVBlocks(P, L)``: ``L`` below ``P``, else the largest multiple of ``P`` <= ``L``.
+
+    An independent restatement, as in the HOST multicore ST, so a case's expected
+    gang width does not come from the code under test.
+    """
+    return core_num if core_num < n_ranks else (core_num // n_ranks) * n_ranks
+
+
+# Requested block limits ``L``. With P=2 these admit B = 1, 2, 4; with P=4, B = 1, 2, 4 — covering
+# the single-block rail, B < P (multi-peer-per-core) and B = P / B > P (peer x length lanes).
+_CORE_NUMS = (1, 2, 4)
+
+
+def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int, core_num: int = 1):
     """Build an N-rank CHIP-pipeline variable-size all-to-all program.
 
     Signal/counts shapes are per-rank-count, so the program is built by a
@@ -83,6 +96,9 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
     nr = n_ranks
     mr = max_recv
     total = nr * mr
+    # The signal is [NR, S] with one lane per admitted block, so S = B (the
+    # smallest legal stride: the pass rejects S < B).
+    stride = _admitted_blocks(nr, core_num)
 
     @pl.jit.incore
     def stage_step(
@@ -153,7 +169,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
         recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
         stage: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
         data: pl.InOut[pld.DistributedTensor[[total, SIZE], pl.FP32]],
-        signal: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+        signal: pl.InOut[pld.DistributedTensor[[nr, stride], pl.INT32]],
         counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
         recv: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
     ) -> tuple[pl.Tensor[[total, SIZE], pl.FP32], pl.Tensor[[nr, 1], pl.INT32]]:
@@ -165,7 +181,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
         not by an injected ordering token.
         """
         stage, counts = stage_step(inp, counts_row, stage, counts)
-        data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=1)
+        data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
         return consume_step(data, recv, out, recv_out)
 
     @pl.jit.host
@@ -178,7 +194,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
         """Allocate the five windows once, dispatch one pipeline per rank."""
         stage_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
         data_buf = pld.alloc_window_buffer(total * SIZE * pl.FP32.get_byte())
-        signal_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+        signal_buf = pld.alloc_window_buffer(nr * stride * pl.INT32.get_byte())
         # Peers pull ONE word per rank from this window (scalar ld_dev read),
         # so the [NR, 1] INT32 vector is the whole requirement — no fixed-
         # width TLOAD unit set.
@@ -188,7 +204,7 @@ def _build_l2_all_to_all_v_program(n_ranks: int, max_recv: int):
         for r in pl.range(pld.world_size()):
             stage = pld.window(stage_buf, [total, SIZE], dtype=pl.FP32)
             data = pld.window(data_buf, [total, SIZE], dtype=pl.FP32)
-            sig = pld.window(signal_buf, [nr, 1], dtype=pl.INT32)
+            sig = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
             counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
             recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
             chip_pipeline(
@@ -232,9 +248,14 @@ def _golden_inputs(nr: int, mr: int) -> tuple[torch.Tensor, torch.Tensor]:
 class TestL2TensorAllToAllV:
     """L2 managed all_to_all_v: one chip pipeline per rank, no nested dispatch."""
 
+    @pytest.mark.parametrize("core_num", _CORE_NUMS)
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_l2_all_to_all_v(self, test_config, device_ids, n_ranks):
-        """Compile and run the CHIP-pipeline all_to_all_v for P in {2, 4}."""
+    def test_l2_all_to_all_v(self, test_config, device_ids, n_ranks, core_num):
+        """Compile and run the CHIP-pipeline all_to_all_v for P in {2, 4}, L in {1, 2, 4}.
+
+        ``L > 1`` must produce results identical to ``L = 1``: the golden below
+        does not depend on ``core_num``.
+        """
         if len(device_ids) < n_ranks:
             pytest.skip(f"L2 all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
@@ -246,7 +267,8 @@ class TestL2TensorAllToAllV:
         outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
 
-        compiled = _build_l2_all_to_all_v_program(nr, mr).compile(
+        program = _build_l2_all_to_all_v_program(nr, mr, core_num)
+        compiled = program.compile(
             inputs,
             send_counts,
             outputs,
@@ -333,8 +355,9 @@ class TestL2TensorAllToAllVSkew:
     """
 
     @pytest.mark.parametrize("case", sorted(_SKEW_CASES))
+    @pytest.mark.parametrize("core_num", _CORE_NUMS)
     @pytest.mark.parametrize("n_ranks", [2, 4])
-    def test_l2_all_to_all_v_skewed_counts(self, test_config, device_ids, n_ranks, case):
+    def test_l2_all_to_all_v_skewed_counts(self, test_config, device_ids, n_ranks, core_num, case):
         if len(device_ids) < n_ranks:
             pytest.skip(f"L2 all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
 
@@ -347,13 +370,15 @@ class TestL2TensorAllToAllVSkew:
         # being sent, so an over-send would deposit recognisable data in the
         # padding rows and the tail assertion below would catch it.
         #
-        # ``salt`` makes every (case, n_ranks) payload unique. Window memory is
-        # not zero-initialised on reuse AND persists across tests in one
-        # process, so an unwritten row could otherwise still hold the pattern an
-        # earlier test wrote — indistinguishable from a real over-send. The
-        # 900000 base additionally separates this file's salts from the InCore
-        # and HOST files', which share the same formula.
-        salt = 900000 + (sorted(_SKEW_CASES).index(case) + 1) * 100000 + nr * 10000
+        # ``salt`` makes every (case, n_ranks, core_num) payload unique. Window
+        # memory is not zero-initialised on reuse AND persists across tests in
+        # one process, so an unwritten row could otherwise still hold the
+        # pattern an earlier test wrote — indistinguishable from a real
+        # over-send. The core_num term keeps that true across the L
+        # parametrizations, which reuse the same (case, n_ranks) slot layout;
+        # the 900000 base additionally separates this file's salts from the
+        # InCore and HOST files', which share the same formula.
+        salt = 900000 + (sorted(_SKEW_CASES).index(case) + 1) * 100000 + nr * 10000 + core_num * 1000
         inputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         send_counts = torch.zeros((nr, nr, 1), dtype=torch.int32)
         for r in range(nr):
@@ -367,7 +392,8 @@ class TestL2TensorAllToAllVSkew:
         outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
         recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
 
-        compiled = _build_l2_all_to_all_v_program(nr, mr).compile(
+        program = _build_l2_all_to_all_v_program(nr, mr, core_num)
+        compiled = program.compile(
             inputs,
             send_counts,
             outputs,
