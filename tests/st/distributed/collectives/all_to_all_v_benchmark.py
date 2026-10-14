@@ -1021,6 +1021,7 @@ def _timed_session(  # noqa: PLR0913
     rounds: int,
     collect_aiv: bool,
     check: bool,
+    resident: bool,
 ) -> tuple[list[float], dict[str, list[float]]]:
     host_slots: list[float] = []
     per_rank: dict[str, list[float]] = {str(i): [] for i in range(shape.p)}
@@ -1029,14 +1030,32 @@ def _timed_session(  # noqa: PLR0913
         persistent=True,
         reset_persistent_windows=False,
     ) as runtime:
-        runtime.run(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
+        # Worker-resident arguments: `alloc_stacked_tensor` shards dim 0 across the cards
+        # (shard i -> card i), which is exactly the per-rank view the orchestration takes
+        # from the host tensors. One upload at session setup, then the dispatch loop never
+        # names host memory, so `stage_inputs` and `validate` leave the timed slot.
+        if resident:
+            resident_in = runtime.alloc_stacked_tensor(inputs)
+            resident_counts = runtime.alloc_stacked_tensor(send_counts)
+            resident_out = runtime.alloc_stacked_tensor(outputs)
+            resident_recv = runtime.alloc_stacked_tensor(recv_out)
+            run_args = (compiled, resident_in, resident_counts, resident_out, resident_recv)
+        else:
+            run_args = (compiled, inputs, send_counts, outputs, recv_out)
+
+        runtime.run(*run_args, config=run_config)
         if check:
+            if resident:
+                # A DeviceTensor is never copied back implicitly; the correctness read is
+                # the only D2H in the whole resident session, and it sits outside timing.
+                runtime.copy_stacked_from(resident_out, outputs)
+                runtime.copy_stacked_from(resident_recv, recv_out)
             check_correctness(shape, inputs, send_counts, outputs, recv_out)
         for _ in range(warmup):
-            runtime.run(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
+            runtime.run(*run_args, config=run_config)
         for _ in range(rounds):
             t0 = time.perf_counter()
-            runtime.run(compiled, inputs, send_counts, outputs, recv_out, config=run_config)
+            runtime.run(*run_args, config=run_config)
             slot_us = (time.perf_counter() - t0) * 1e6
             host_slots.append(slot_us)
             if collect_aiv:
@@ -1046,6 +1065,9 @@ def _timed_session(  # noqa: PLR0913
             else:
                 for r in range(shape.p):
                     per_rank[str(r)].append(slot_us)
+        if resident:
+            runtime.copy_stacked_from(resident_out, outputs)
+            runtime.copy_stacked_from(resident_recv, recv_out)
     return host_slots, per_rank
 
 
@@ -1105,6 +1127,7 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
             rounds=args.rounds,
             collect_aiv=False,
             check=True,
+            resident=args.resident_args,
         )
         print("[a2av-bench] session=timing-slot exit ok", flush=True)
     else:
@@ -1123,6 +1146,7 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
             rounds=swim_rounds,
             collect_aiv=True,
             check=profile == "swimlane",
+            resident=args.resident_args,
         )
         print("[a2av-bench] session=swimlane exit ok", flush=True)
         if profile == "swimlane":
@@ -1197,6 +1221,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--core-num", type=int, default=1, dest="core_num", help="requested L")
     parser.add_argument("--impl", choices=("managed-host", "managed-l2"), default="managed-l2")
     parser.add_argument("--rounds", type=int, default=100)
+    parser.add_argument(
+        "--resident-args",
+        action="store_true",
+        help=(
+            "Allocate the four tensor args worker-resident (alloc_stacked_tensor) once per "
+            "session and dispatch the DeviceTensors, so the timed slot carries no H2D/D2H "
+            "(no chip.run.stage_inputs / chip.run.validate). Read-back happens once, "
+            "outside timing. Default: host tensors, one H2D+D2H per round."
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--profile", choices=("swimlane", "timing-slot", "both"), default="swimlane")
     parser.add_argument(
