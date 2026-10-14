@@ -887,9 +887,22 @@ def build_program(impl: Impl, shape: BenchShape, core_num: int):
 
 
 def outer_l3_l2_dispatches(impl: Impl) -> int:
-    """RFC reporting column: HOST 3 outer tasks vs L2 1. Not an AIV speedup."""
+    """RFC reporting column: outer L3→L2 tasks per rank. Not an AIV speedup.
+
+    ``managed-host`` submits **four**, all inside the timed slot: ``stage_orch``,
+    ``fill_counts_orch``, the managed collective, and ``consume_orch``.
+    ``managed-l2`` submits one: the whole stage/collective/consume pipeline is a
+    single ``chip_pipeline`` dispatch.
+
+    The RFC's §10 framing ("HOST 3-outer-task vs L2 1-outer-task") counts only
+    the three comparison-relevant outer tasks — stage / collective / consume.
+    This harness's HOST build additionally issues a separate counts-fill dispatch,
+    so the published column reports what the code actually does rather than the
+    framing's count. Campaign JSON archived before 2026-10-14 records 3 here for
+    the HOST rail.
+    """
     if impl == "managed-host":
-        return 3
+        return 4
     if impl == "managed-l2":
         return 1
     raise ValueError(f"unknown impl {impl!r}")
