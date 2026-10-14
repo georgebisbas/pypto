@@ -1267,6 +1267,51 @@ def test_backend_materializes_ring_allreduce_builtin_next_level_files(tmp_path):
     assert "signal_rows" in kernel_cpp
 
 
+def test_host_allreduce_ring_builtin_kernel_is_flat_tput(tmp_path):
+    """RFC #2521 K1: one flat TPUT per ring step, no caller-managed tile loop.
+
+    TPUT_IMPL re-chunks a payload larger than the staging tile internally
+    against the tile's valid column width, so the caller must not keep its own
+    per-tile loop with a ``pipe_barrier(PIPE_ALL)`` pair around every chunk.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            data_buf = pld.alloc_window_buffer(SIZE * pl.FP32.get_byte())
+            signal_buf = pld.alloc_window_buffer(7 * 4 * pl.INT32.get_byte())
+            data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
+            signal = pld.window(signal_buf, [7, 4], dtype=pl.INT32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data, device=r)
+            pld.tensor.allreduce(data, signal, op=pld.ReduceOp.Sum, mode="ring")
+            return 0
+
+    program = passes.materialize_comm_domain_scopes()(Prog)
+    program = passes.lower_host_tensor_collectives()(program)
+    program = passes.materialize_dist_tensor_ctx()(program)
+    program = _finalize_chip_program_for_generate(program)
+    files = pto_backend.generate(program, str(tmp_path), skip_ptoas=True)
+
+    kernel_cpp = files[
+        "next_levels/builtin.tensor.allreduce_ring__sum__fp32"
+        "/kernels/aiv/builtin_tensor_allreduce_ring__sum__fp32_kernel.cpp"
+    ]
+
+    # No caller-managed per-tile loop: the transfer is one TPUT per step.
+    assert "tile_off" not in kernel_cpp, kernel_cpp
+    # Exactly two call sites: the atomic reduce-scatter push and the plain
+    # allgather push.
+    tput_calls = re.findall(r"pto::comm::TPUT(?:<[^()]*>)?\(", kernel_cpp)
+    assert len(tput_calls) == 2, kernel_cpp
+    assert "pto::comm::TPUT<pto::AtomicType::AtomicAdd>" in kernel_cpp
+
+
 # ---------------------------------------------------------------------------
 # Dynamic-dim recovery preamble (issue #1873). A HOST orchestrator that slices a
 # per-rank sub-tensor whose bound uses a ``pl.dynamic()`` dim must bind that dim

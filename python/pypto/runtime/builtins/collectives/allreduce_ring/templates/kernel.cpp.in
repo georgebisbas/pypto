@@ -35,11 +35,14 @@
 //     ReduceOp::kSum by construction, see entry.cpp.in).
 //   * Allgather: each rank TPUTs (non-atomic) its finalized chunk
 //     send_idx = (my_rank - step + 1) % NR into the right neighbour's slot.
-//   * Ordering: pipe_barrier(PIPE_ALL) around every TPUT (drains the MTE DMA
-//     pipe) and dsb(DSB_DDR) before every TNOTIFY (orders the pushed writes
-//     ahead of the signal) — the exact allgather/all_to_all recipe.  No dcci
-//     cacheline flush is needed: the receiver reads data the sender wrote
-//     remotely via TPUT, never a locally-TSTORE'd cacheline.
+//   * One TPUT per step (RFC #2521 K1): TPUT_IMPL re-chunks a payload larger
+//     than the staging tile internally (one pipe_barrier per internal chunk),
+//     so the caller keeps no per-tile loop.
+//   * Ordering: pipe_barrier(PIPE_ALL) around every step's TPUT (drains the
+//     MTE DMA pipe) and dsb(DSB_DDR) before every TNOTIFY (orders the pushed
+//     writes ahead of the signal) — the exact allgather/all_to_all recipe.
+//     No dcci cacheline flush is needed: the receiver reads data the sender
+//     wrote remotely via TPUT, never a locally-TSTORE'd cacheline.
 
 #include <cstdint>
 #include <pto/pto-inst.hpp>
@@ -237,10 +240,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
                 "builtin.tensor.allreduce_ring currently only supports 4-byte element types");
 
   // Single staging tile for the TPUT push path — the allgather/all_to_all
-  // recipe.  TPUT's single-shot path TLOADs/TSTOREs by Tile::GetValidCol()
-  // (ColMaskInternal), NOT the GlobalTensor shape, so the tile's column mask
-  // is narrowed to each chunk's exact extent below; a 256-col tile with a
-  // shorter transfer would over-read/overwrite adjacent chunk slots.
+  // recipe.  One TPUT per step carries the step's whole chunk: TPUT_IMPL
+  // re-chunks a payload larger than the tile against the tile's valid column
+  // width (ColMaskInternal / GetValidCol(), RFC #2521 K1) with one internal
+  // pipe_barrier per chunk, so no caller-managed per-tile loop is needed.
+  // The mask is still re-set to each step's exact extent below: TPUT_IMPL
+  // mutates ColMaskInternal to its last (possibly ragged) internal chunk's
+  // width and does not restore it, and a mask left larger than the actual
+  // transfer over-reads/overwrites adjacent chunk slots (the a2av finding).
   const int tile_cols = static_cast<int>(max_chunk_elems < kTileCount ? max_chunk_elems : kTileCount);
   TileData send_tile(1, tile_cols);
   TASSIGN(send_tile, 0x10000);
@@ -266,15 +273,18 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     const int64_t send_end = RingChunkStart(numel, nranks, send_idx + 1);
     const int64_t send_len = send_end - send_base;
 
-    for (int64_t tile_off = 0; tile_off < send_len; tile_off += tile_cols) {
-      int64_t remain64 = send_len - tile_off;
-      int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
-      send_tile.ColMaskInternal = tile_elems;
+    // K1: ONE TPUT per step.  TPUT_IMPL re-chunks the flat [send_len] payload
+    // against the staging tile internally, so the caller keeps no per-tile
+    // loop and no pipe_barrier pair per chunk (the internal chunking issues
+    // one barrier per chunk — half the barriers of the per-tile form).
+    // send_len == 0 (numel < nranks) issues no TPUT at all.
+    if (send_len > 0) {
+      send_tile.ColMaskInternal = static_cast<int>(send_len < tile_cols ? send_len : tile_cols);
 
-      ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
-      StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
+      ShapeDyn tile_shape(1, 1, 1, 1, send_len);
+      StrideDyn tile_stride(send_len, send_len, send_len, send_len, 1);
 
-      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base + tile_off);
+      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base);
       __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
       Global src_g(src_ptr, tile_shape, tile_stride);
       Global dst_g(dst_ptr, tile_shape, tile_stride);
@@ -301,15 +311,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     const int64_t send_end = RingChunkStart(numel, nranks, send_idx + 1);
     const int64_t send_len = send_end - send_base;
 
-    for (int64_t tile_off = 0; tile_off < send_len; tile_off += tile_cols) {
-      int64_t remain64 = send_len - tile_off;
-      int tile_elems = static_cast<int>(remain64 < tile_cols ? remain64 : tile_cols);
-      send_tile.ColMaskInternal = tile_elems;
+    // K1: ONE TPUT per step (plain, non-atomic) — same flat form as phase 1.
+    if (send_len > 0) {
+      send_tile.ColMaskInternal = static_cast<int>(send_len < tile_cols ? send_len : tile_cols);
 
-      ShapeDyn tile_shape(1, 1, 1, 1, tile_elems);
-      StrideDyn tile_stride(tile_elems, tile_elems, tile_elems, tile_elems, 1);
+      ShapeDyn tile_shape(1, 1, 1, 1, send_len);
+      StrideDyn tile_stride(send_len, send_len, send_len, send_len, 1);
 
-      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base + tile_off);
+      __gm__ {{dtype_cpp}} *src_ptr = chunks + static_cast<size_t>(send_base);
       __gm__ {{dtype_cpp}} *dst_ptr = CommRemotePtr(comm_ctx, src_ptr, right);
       Global src_g(src_ptr, tile_shape, tile_stride);
       Global dst_g(dst_ptr, tile_shape, tile_stride);
