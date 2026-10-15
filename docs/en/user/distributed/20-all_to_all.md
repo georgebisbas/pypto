@@ -100,7 +100,8 @@ def hand_step(self, x, y, data, signal):
 - **Read-back completes the exchange.** After the barrier, row `src` of our
   own window holds the chunk rank `src` intended for us.
 
-The reveal replaces phases 1–3 with one call:
+The reveal replaces phases 1–2 with one call; phase 3's read-back loop
+remains in the caller:
 
 ```python
     result = pld.tensor.all_to_all(x, data, signal)

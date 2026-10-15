@@ -112,9 +112,12 @@ The reveal replaces phases 2–3 with one call:
   uses, `Max`, `Min`, and `Prod` are supported too, the same dispatch
   `pld.tensor.allreduce` uses. The restriction is narrower elsewhere: the
   **HOST builtin** rail (a different lowering, not exercised by this step)
-  lowers `Sum`/FP32 only and rejects anything else with `builtin.tensor.
-  reduce_scatter op must be ReduceOp.Sum (got int N)`. Don't carry that
-  HOST-only restriction across to the InCore form you're writing here.
+  lowers `Sum`/FP32 only. A non-Sum op is rejected with
+  `builtin.tensor.reduce_scatter op must be ReduceOp.Sum (got int N)`;
+  `Sum` with a non-FP32 dtype is rejected with
+  `builtin.tensor.reduce_scatter currently supports only (op=ReduceOp.Sum, dtype=FP32)`.
+  Don't carry that HOST-only restriction across to the InCore form you're
+  writing here.
 - **Row `my_rank` of the window is your reduced chunk** — the same
   row-per-chunk layout the hand-rolled version used.
 

@@ -94,9 +94,12 @@ def hand_step(self, x, y, data, signal):
 - **`op=` 选择归约方式——这条路径上支持完整家族。** 该参数默认为
   `pld.ReduceOp.Sum`；在本示例使用的 InCore 复合路径上，`Max`、`Min`、`Prod`
   同样受支持，与 `pld.tensor.allreduce` 使用的是同一套分派。限制在别处更窄：
-  **HOST 内置**路径（另一种 lowering，本步骤不会走到）只降级 `Sum`/FP32，对
-  其他取值会以 `builtin.tensor.reduce_scatter op must be ReduceOp.Sum (got int
-  N)` 拒绝。不要把这条仅限 HOST 的限制带到你在这里写的 InCore 形态上。
+  **HOST 内置**路径（另一种 lowering，本步骤不会走到）只降级 `Sum`/FP32。
+  非 Sum 的 op 会以
+  `builtin.tensor.reduce_scatter op must be ReduceOp.Sum (got int N)` 拒绝；
+  `Sum` 配合非 FP32 的 dtype 则会以
+  `builtin.tensor.reduce_scatter currently supports only (op=ReduceOp.Sum, dtype=FP32)`
+  拒绝。不要把这条仅限 HOST 的限制带到你在这里写的 InCore 形态上。
 - **window 的行 `my_rank` 就是你的归约分块**——与手工版本相同的行-分块布局。
 
 ### IR 对比（教学工件）

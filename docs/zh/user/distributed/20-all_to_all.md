@@ -80,7 +80,7 @@ def hand_step(self, x, y, data, signal):
 - **notify 用 `Set` 而非 `AtomicAdd`。** 每个 rank 是其行的唯一写入者（`[my_rank, 0]`），因此这里的 barrier 使用步骤 04 走读中的单写入者形式 `Set`/`Ge(1)`。
 - **读回完成交换。** barrier 之后，我们自己 window 的行 `src` 保存着 rank `src` 发给我们的分块。
 
-揭示用一次调用替换阶段 1–3：
+揭示用一次调用替换阶段 1–2；阶段 3 的读回循环仍由调用方完成：
 
 ```python
     result = pld.tensor.all_to_all(x, data, signal)
