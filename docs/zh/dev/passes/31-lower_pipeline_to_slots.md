@@ -88,7 +88,7 @@ codegen 对无法描述的 region 是**硬拒**而非降级，因为退回逐 sl
 | 静态 valid shape | 一个 region 为其所有 slot 声明唯一的静态 extent |
 | 未被带入 phi | 被 yield 的 tile，或被用作嵌套循环 `init_values` 的 tile，都会让那个 phi 共享它的 MemRef。两者殊途同归——前者经由 `YieldStmt`，后者经由 `IterArg::initValue_`。判定基于**别名根**：`InitMemRef` 会让裸的 `a = b` tile 拷贝、以及 view / 原地算子的结果共享同一个 MemRef，因此 yield 一个别名与直接 yield 原 tile 一样会把槽位带进 phi |
 | 未被 view / 原地 op 消费 | 这类结果**就是**其源的缓冲，会落到同一分配上却带着不同的 `tile_buf` 类型 |
-| `step == 1` 且 `start % F == 0` | 见下 |
+| 常量 `step > 0`、常量 `start >= 0`；`step > 1` 时还要求常量 `stop <= INT64_MAX - (step - 1)` | 见下 |
 | 没有被拒绝的外层 pipeline 循环 | 见下 |
 | slot 放得进该内存空间 | 见下 |
 
@@ -100,7 +100,30 @@ shape、phi、view / 原地算子）只对**真正想要 slot** 的 load 生效�
 `pl.pipeline(stage=F)` 所要求的按 stage 私有缓冲就被静默丢失了。只有作者已绑定的 tile 会被跳过
 而不影响整个循环——因为为它拒绝循环反而会把该声明推上复制路径，而复制路径会拒绝它。
 
-**为什么 slot 索引必须字面上是 `iv % F`。** ptoas 依据 slot 索引的**仿射形式**来判定哪些访问共享一个 slot，而这个匹配正是轮转拿到 per-slot 动态 event id 的依据——喂给它一个折叠后的字节偏移会让分析失效。一般形式 `((iv - start) / step) % F` 必须物化为中间 SSA 值，有丢掉本变换赖以生效的那个分析的风险。索引无法直接写成该形式的循环一律留给复制路径。
+**为什么 slot 索引是 `iv % F`、`(iv - start) % F` 或 `((iv - start) / step) % F`。**
+ptoas 的 slot 计数读取 `pto.multi_tile_get` 携带的那个值，并围绕 `(symbol + offset) mod N`
+推理；它需要的是两处访问共享该 symbol 的**同一性**，而不是表达式具有某种特定形状。因此三种
+形式都合格。
+
+三者都是 `((iv - start) / step) % F`，只是去掉了恒等的部分。发射哪一种由循环形状决定；是否接受则不取决于此：
+任何常量 `step > 0` 且常量 `start >= 0` 的循环都符合条件。
+
+- `step == 1` 且 `start % F == 0`：归纳变量**就是**轮转计数器，slot 字面上就是 `iv % F`，与以往一致。
+- `step == 1` 且 `start % F != 0`：计数器从 `start` 开始，slot 为 `(iv - start) % F`。ptoas 看到的是
+  `(symbol + constant) mod N`，正是其 slot 匹配所能剥离的形式。`pl.pipeline(1, 5, 1, stage=2)` 依次选择 `0, 1, 0, 1`。
+- `step > 1`：`iv` 取 `start + j*step`，slot 为 `((iv - start) / step) % F`。该除法按构造恰好整除，
+  因此这仍然是对**单个** SSA 值取余，而不是折叠后的字节偏移。
+
+运行期的 `step` 或 `start` 仍然会被拒绝：此时 slot 会依赖分析无法定界的一个值。带步长的循环
+（`step > 1`）还要求 `stop` 为常量且不超过 `INT64_MAX - (step - 1)`，否则同样会被拒绝：保留下来的
+`scf.for` 会在最后一次迭代之后计算 `iv + step`，该更新最多可能越过 `stop` 共 `step - 1`，从而使有符号
+index 溢出。`pl.pipeline(INT64_MAX - 4, INT64_MAX, 3, stage=3)` 就是被堵住的形态。`step == 1` 不会越过
+`stop`，因此仍允许运行期 `stop`。
+注意计数器形式会丢掉 `(iv + c) % N` 这类配对的 `kDisjoint` 推断，因为常量剥离位于除法
+**之上**，两侧最终得到不同的 symbol；这只会退化为 `kUnknown`——调用方按保守方式处理
+（保留依赖），而不会给出错误答案。
+
+负的 `start` 在任何形式下都会被拒绝：`iv % F` 是有符号取余，负的 `iv` 会选到负的 slot；而 `start` 足够负时 `iv - start` 无法表示。
 
 **为什么 slot 必须放得下。** 声明出来的 slot 是**钉住**的：`InitMemRef` 按 `F * slot_size`
 给出分配，ptoas 不得复用其中任何一部分，因此这些字节由本 pass 直接负责。否则一个有多个合格 load
@@ -122,24 +145,52 @@ ptoas 带生命周期复用地规划，那部分本 pass 无法建模。
 %pipe_t_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
            : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %rem = arith.remsi %i, %c2_index : index
-  %negative = arith.cmpi slt, %rem, %c0_index : index
-  %corrected = arith.addi %rem, %c2_index : index
-  %slot = arith.select %negative, %corrected, %rem : index
+  %slot = arith.remsi %i, %c2_index : index
   %t = pto.multi_tile_get %pipe_t_mb[%slot] : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<...>
   pto.tload ins(...) outs(%t : ...)
   ...
 }
 ```
 
-有符号 `INDEX` 余数先修正为向下取模（floor modulo）语义，再用来选择槽位。
 操作数仍是逻辑下标，不乘以字节大小，因此 ptoas 仍能推导动态槽位选取和逐槽位 event id。
 
-一般而言，有符号整数和 `INDEX` 的 `FloorMod` 保持 Python `%` 的语义：非零余数与除数同号。
+有符号整数和 `INDEX` 的 `FloorMod` 保持 Python `%` 的语义：非零余数与除数同号，
+而 `arith.remsi` 本身做不到这一点——它与**被除数**同号。因此代码生成会修正该余数，
+使 `-97 % 24` 得到 `23`：
+
+```mlir
+%rem = arith.remsi %i, %c2_index : index
+%negative = arith.cmpi slt, %rem, %c0_index : index
+%corrected = arith.addi %rem, %c2_index : index
+%slot = arith.select %negative, %corrected, %rem : index
+```
+
 正常量除数只需上面的负余数检查，负常量除数则检查余数是否为正。动态除数需要同时检查
-余数非零、余数与除数异号，再加上除数。例如 `-97 % 24` 得到 `23`。除数为零和
-有符号最小值对 `-1` 取模仍不属于有效输入。有符号整数和 `INDEX` 的 `FloorDiv` 使用
-`arith.floordivsi` 生成匹配的向下取整商，保持 `a == (a // b) * b + a % b`。
+余数非零、余数与除数异号，再加上除数。除数为零和有符号最小值对 `-1` 取模仍不属于有效输入。
+
+**当修正不可能改变结果时会被跳过**，这正是上面示例中只有一条 `remsi` 的原因。
+被除数非负且除数为正常量时，`arith.remsi` 的结果本就落在 `[0, 除数)` 内，两者一致，
+修正即是死代码。代码生成以语法方式证明被除数非负，依据的是索引表达式实际由哪些形式构成：
+字面量；起始值为非负字面量的循环的归纳变量（设备循环恒为递增，故该变量不会低于其起始值）；
+该变量减去自身的起始值；以及上述各项按正常量字面量所作的向下整除与向下取模。
+和与积被刻意排除：由非负项构成并不能使结果非负，因为发射出的算术会回绕——
+`i * 4611686018427387904` 在 `i == 2` 处为负。
+
+该证明中的每一种形式还必须在作出证明的那个 dtype 上**执行**。`EmitArithOperand`
+会将各操作数强制转换为其所属运算的 dtype，因此归纳变量抵达较窄的运算时已是另一个值：
+对起始值为 `2147483648` 的 `INDEX` 循环，`INT32` 运算看到的 `i` 是 `-2147483648`。
+这同样适用于嵌套运算而不仅是该变量——`INDEX` 的 `FloorMod` 内嵌一个 `INT32` 的
+`FloorDiv` 时，其商为负且随后被拓宽回去，故按外层宽度证明该子树会跳过结果所需的修正。
+该检查是保守的——无法判定时仍会发射修正。
+
+其意义不止于省下三条指令。多缓冲的槽位操作数必须保持 ptoas 槽位匹配器能够剥离的
+`(symbol + constant) mod N` 形式，而 `rem`/`cmp`/`add`/`select` 链并非该形式。
+由带步长或未对齐循环导出的轮转 —— `((iv - start) / step) % count` —— 既是需要裸余数的情形，
+也正是被除数按构造即非负的情形。
+
+有符号整数和 `INDEX` 的 `FloorDiv` 使用 `arith.floordivsi` 生成匹配的向下取整商，
+保持 `a == (a // b) * b + a % b`；在同一证明下回退为 `arith.divsi` ——
+ptoas 会把 `floordivsi` 展开为截断除法加上同样的条件修正。
 浮点、无符号数的降级保持原有行为。向下整除与取模的常量折叠将超出类型范围的字面量保留到运行时求值，
 避免用原始存储整数的计算结果替换其实际输出的位模式。
 

@@ -446,10 +446,7 @@ tile 调用 `set_validshape`。
 %l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
         : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %rem = arith.remsi %i, %c2_index : index
-  %negative = arith.cmpi slt, %rem, %c0_index : index
-  %corrected = arith.addi %rem, %c2_index : index
-  %slot = arith.select %negative, %corrected, %rem : index
+  %slot = arith.remsi %i, %c2_index : index
   %t = pto.multi_tile_get %l0c_mb[%slot]
      : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
   ...
@@ -457,6 +454,7 @@ scf.for %i = %c0_index to %c4_index step %c1_index {
 ```
 
 有符号整数和 `INDEX` 槽位采用[修正后的向下取模余数](../passes/31-lower_pipeline_to_slots.md#生成的-pto-ir)，保持 Python `%` 的语义。
+当被除数可证明非负且除数为正常量时（如上例），该修正会被跳过，因为此时 `arith.remsi` 的结果已与向下取模一致。
 
 有两点关键：
 

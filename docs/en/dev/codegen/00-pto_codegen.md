@@ -480,17 +480,14 @@ the function head and one slot selection per use:
 %l0c_mb = pto.alloc_multi_tile valid_row = %c64_index valid_col = %c64_index
         : !pto.multi_tile_buf<!pto.tile_buf<loc=vec, dtype=f32, rows=64, cols=64, ...>, count=2>
 scf.for %i = %c0_index to %c4_index step %c1_index {
-  %rem = arith.remsi %i, %c2_index : index
-  %negative = arith.cmpi slt, %rem, %c0_index : index
-  %corrected = arith.addi %rem, %c2_index : index
-  %slot = arith.select %negative, %corrected, %rem : index
+  %slot = arith.remsi %i, %c2_index : index
   %t = pto.multi_tile_get %l0c_mb[%slot]
      : !pto.multi_tile_buf<..., count=2> -> !pto.tile_buf<loc=vec, ...>
   ...
 }
 ```
 
-Signed integer and `INDEX` slots use [corrected floor remainders](../passes/31-lower_pipeline_to_slots.md#generated-pto-ir), preserving Python's `%` semantics.
+Signed integer and `INDEX` slots use [corrected floor remainders](../passes/31-lower_pipeline_to_slots.md#generated-pto-ir), preserving Python's `%` semantics. The correction is skipped — as it is above — when the dividend is provably non-negative and the divisor a positive constant, because `arith.remsi` already agrees with floor-modulo there.
 
 Two properties matter:
 

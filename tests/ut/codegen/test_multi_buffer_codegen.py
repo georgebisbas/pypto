@@ -23,6 +23,7 @@ does not emit — so the baked-address ``pto.alloc_tile`` path stays.
 # DSL function bodies are parsed as AST, not executed — suppress pyright errors.
 # pyright: reportUndefinedVariable=false
 
+import math
 import re
 
 import pypto.language as pl
@@ -327,22 +328,144 @@ def _assert_logical_slot_index(mlir: str) -> None:
     assert gets, mlir
     for get in gets:
         slot = get.split("[")[1].split("]")[0]
+        # Two shapes are correct, and which one appears is a property of the
+        # loop, not of this pass. FloorMod follows the divisor's sign while
+        # `remsi` follows the dividend's, so a negative dividend needs the
+        # rem/cmp/add/select correction. When the induction variable cannot be
+        # negative — every loop here starts at a non-negative literal — the
+        # remainder is already in [0, divisor) and codegen emits the bare
+        # `remsi`, because that correction would be dead code. Asserting only
+        # the corrected form would pin an optimisation *away*.
         selected = re.fullmatch(r"arith\.select (%\w+), (%\w+), (%\w+) : index", definitions.get(slot, ""))
-        assert selected is not None, f"slot {slot} must use the corrected remainder:\n{mlir}"
-        condition, corrected, remainder = selected.groups()
+        if selected is not None:
+            condition, corrected, remainder = selected.groups()
+            assert definitions[corrected].startswith("arith.addi "), mlir
+            comparison = re.fullmatch(
+                rf"arith\.cmpi slt, {re.escape(remainder)}, (%\w+) : index", definitions[condition]
+            )
+            assert comparison is not None, f"negative remainders must select the corrected value:\n{mlir}"
+            assert definitions[comparison.group(1)] == "arith.constant 0 : index", mlir
+        else:
+            remainder = slot
         division = re.fullmatch(r"arith\.remsi (%\w+), (%\w+) : index", definitions.get(remainder, ""))
         assert division is not None, f"slot {slot} must depend on a remainder:\n{mlir}"
         dividend, divisor = division.groups()
         assert dividend == loop.group(1), f"the slot must depend on the loop index:\n{mlir}"
         assert definitions[divisor] == "arith.constant 2 : index", mlir
-        assert definitions[corrected] == f"arith.addi {remainder}, {divisor} : index", mlir
-        comparison = re.fullmatch(
-            rf"arith\.cmpi slt, {re.escape(remainder)}, (%\w+) : index", definitions[condition]
-        )
-        assert comparison is not None, f"negative remainders must select the corrected value:\n{mlir}"
-        assert definitions[comparison.group(1)] == "arith.constant 0 : index", mlir
-        # The complete chain is rem/cmp/add/select. A scaled byte offset cannot
-        # reach multi_tile_get through any of these checked operands.
+        if selected is not None:
+            assert definitions[corrected] == f"arith.addi {remainder}, {divisor} : index", mlir
+        # The chain is rem, optionally over cmp/add/select. A scaled byte offset
+        # cannot reach multi_tile_get through any of these checked operands.
+
+
+_INDEX_OPS = {
+    "addi": lambda a, b: a + b,
+    "subi": lambda a, b: a - b,
+    "muli": lambda a, b: a * b,
+    "divsi": lambda a, b: int(a / b),
+    "divui": lambda a, b: a // b,
+    "floordivsi": lambda a, b: a // b,
+    "remsi": lambda a, b: int(math.fmod(a, b)),
+    "remui": lambda a, b: a % b,
+}
+
+
+def _definition(mlir: str, ssa: str) -> str:
+    line = next((ln.strip() for ln in mlir.splitlines() if ln.strip().startswith(f"{ssa} =")), None)
+    assert line is not None, f"{ssa} has no definition:\n{mlir}"
+    return line
+
+
+# Comparison predicates reachable from the corrected-remainder sequence below.
+_INDEX_CMP = {
+    "slt": lambda a, b: a < b,
+    "sle": lambda a, b: a <= b,
+    "sgt": lambda a, b: a > b,
+    "sge": lambda a, b: a >= b,
+    "eq": lambda a, b: a == b,
+    "ne": lambda a, b: a != b,
+}
+
+
+def _operands(rest: str) -> list[str]:
+    """The operand SSA names of an arith op, with the trailing type annotation dropped."""
+    return [x.strip() for x in rest.split(":")[0].split(",")]
+
+
+def _eval_index(mlir: str, ssa: str, env: dict[str, int]) -> int:
+    """Evaluate an index SSA value by walking its arith definitions back to constants.
+
+    ``env`` binds SSA names that have no definition line (the loop's induction
+    variable). An op outside the tables below fails loudly, because the slot chain
+    must stay plain index arithmetic.
+
+    `cmpi`/`select` are in scope because a signed floor-mod does not lower to a
+    bare `remsi`: #3030 emits the corrected sequence rem/cmp/add/select, so that
+    `-1 % 2` is 1 rather than C's -1. Evaluating it here keeps this test checking
+    the *slot sequence* rather than the spelling of the remainder.
+    """
+    if ssa in env:
+        return env[ssa]
+    op, rest = _definition(mlir, ssa).split("=", 1)[1].strip().split(None, 1)
+    if op == "arith.constant":
+        return int(rest.split(":")[0].strip())
+    name = op.removeprefix("arith.")
+    if name == "select":
+        condition, when_true, when_false = _operands(rest)
+        chosen = when_true if _eval_index(mlir, condition, env) else when_false
+        return _eval_index(mlir, chosen, env)
+    if name == "cmpi":
+        predicate, lhs, rhs = _operands(rest)
+        assert predicate in _INDEX_CMP, f"unexpected predicate in the slot chain: {predicate} ({ssa})"
+        return int(_INDEX_CMP[predicate](_eval_index(mlir, lhs, env), _eval_index(mlir, rhs, env)))
+    assert name in _INDEX_OPS, f"unexpected op in the slot chain: {op} ({ssa})"
+    lhs, rhs = _operands(rest)
+    return _INDEX_OPS[name](_eval_index(mlir, lhs, env), _eval_index(mlir, rhs, env))
+
+
+def _slot_chain_ops(mlir: str, ssa: str, env: dict[str, int]) -> list[str]:
+    """The arith ops (excluding constants) on the path from ``ssa`` back to ``env``.
+
+    A `cmpi`'s first operand is its predicate keyword, not an SSA name, so it is
+    skipped; every other operand is followed.
+    """
+    if ssa in env:
+        return []
+    op, rest = _definition(mlir, ssa).split("=", 1)[1].strip().split(None, 1)
+    if op == "arith.constant":
+        return []
+    name = op.removeprefix("arith.")
+    operands = _operands(rest)
+    if name == "cmpi":
+        operands = operands[1:]
+    ops = [name]
+    for operand in operands:
+        ops += _slot_chain_ops(mlir, operand, env)
+    return ops
+
+
+def _pipelined_kernel(start: int, stop: int, step: int, stage: int) -> ir.Program:
+    """InCore kernel with a loop-invariant load, so any bounds compile."""
+
+    @pl.program
+    class Program:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+            for i, (acc_i,) in pl.pipeline(start, stop, step, stage=stage, init_values=(seed,)):
+                t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                    a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+                )
+                acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+                r = pl.yield_(acc_next)
+            out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+            return out
+
+    return Program
 
 
 def _tile_memrefs(program: ir.Program) -> dict[str, ir.MemRef]:
@@ -572,6 +695,37 @@ class PipelinedLoad:
         return out
 
 
+@pl.program
+class SteppedPipelinedLoad:
+    """``pl.pipeline`` whose step is not 1.
+
+    The induction variable is not the rotation counter here: over ``[0, 256)``
+    with ``step = 64`` it only ever takes ``0/64/128/192``, so indexing slots by
+    ``i % 2`` directly would select slot 0 on every iteration
+    (``0, 0, 0, 0``) and lose the rotation. The rotation counter
+    is ``(i - start) / step``, so the slot is ``((i - start) / step) % F`` — still
+    one remainder over one SSA value, which is the property ptoas' slot accounting
+    reads. Before this shape was admitted, every stepped pipeline fell through to
+    ``LowerPipelineLoops`` and paid ``F`` body copies instead.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        a: pl.Tensor[[256, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+    ) -> pl.Tensor[[64, 64], pl.FP32]:
+        seed: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Vec)
+        for i, (acc_i,) in pl.pipeline(0, 256, 64, stage=2, init_values=(seed,)):
+            t: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.load(
+                a, [i, 0], [64, 64], target_memory=pl.MemorySpace.Vec
+            )
+            acc_next: pl.Tile[[64, 64], pl.FP32] = pl.add(acc_i, t)
+            r = pl.yield_(acc_next)
+        out: pl.Tensor[[64, 64], pl.FP32] = pl.store(r, [0, 0], output)
+        return out
+
+
 class TestPipelineLowersToARegion:
     """``pl.pipeline`` reaches codegen as one region, not as F copies of the body."""
 
@@ -607,6 +761,106 @@ class TestPipelineLowersToARegion:
         assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
         assert "step %c2_index" in _lines(mlir, "scf.for")[0]
 
+    def test_a_stepped_pipeline_also_reaches_one_region(self):
+        """A non-unit step is a loop shape, not a reason to replicate the body."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 1, f"expected exactly one region:\n{mlir}"
+        assert "count=2" in regions[0], regions[0]
+        assert len(_lines(mlir, "pto.multi_tile_get")) == 1, mlir
+
+    def test_a_stepped_slot_is_the_counter_modulo_the_stage_count(self):
+        """The slot is a remainder over the *counter*, never over the raw iv.
+
+        ``i`` takes ``0/64/128/192`` here, so ``i % 2`` is ``0`` every time: the
+        same slot each iteration, and no ping-pong. The counter ``(i - start) / step``
+        is ``0, 1, 2, 3``, so the slot rotates ``0, 1, 0, 1``.
+        """
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        get = _lines(mlir, "pto.multi_tile_get")[0]
+        slot_ssa = get.split("[")[1].split("]")[0]
+        definition = next(
+            (ln.strip() for ln in mlir.splitlines() if ln.strip().startswith(f"{slot_ssa} =")), None
+        )
+        assert definition is not None, f"slot operand {slot_ssa} has no definition:\n{mlir}"
+        assert "remui" in definition or "remsi" in definition, (
+            f"the slot operand must be the index expression, got: {definition}"
+        )
+        # The remainder is taken over a division (the counter), not over the iv.
+        counter_ssa = definition.split("remui")[-1].split("remsi")[-1].split(",")[0].strip()
+        counter_def = next(
+            (ln.strip() for ln in mlir.splitlines() if ln.strip().startswith(f"{counter_ssa} =")), None
+        )
+        assert counter_def is not None, f"the counter {counter_ssa} has no definition:\n{mlir}"
+        assert "divui" in counter_def or "divsi" in counter_def, (
+            f"the rotation counter must be a division, got: {counter_def}"
+        )
+        assert str(64 * 64 * 4) not in definition, (
+            f"the slot operand must not be scaled to a byte offset: {definition}"
+        )
+
+    def test_a_stepped_loop_keeps_its_own_step(self):
+        """One body, and the loop still strides by the user's step."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PTOAS)
+        loops = _lines(mlir, "scf.for")
+        assert len(loops) == 1, mlir
+        assert "step %c64_index" in loops[0], f"a slotted loop keeps its step:\n{loops[0]}"
+        assert len(_lines(mlir, "pto.tload")) == 2, f"seed + one body load:\n{mlir}"
+
+    def test_without_the_region_a_stepped_pipeline_is_replicated(self):
+        """The contrast that motivates the shape: F body copies and a doubled step."""
+        mlir = _codegen(SteppedPipelinedLoad, passes.MemoryPlanner.PYPTO)
+        assert _lines(mlir, "pto.alloc_multi_tile") == []
+        assert len(_lines(mlir, "pto.tload")) == 3, f"seed + two replicated loads:\n{mlir}"
+        assert "step %c128_index" in _lines(mlir, "scf.for")[0]
+
+    @pytest.mark.parametrize(
+        "start, stop, step, stage, expected",
+        [
+            pytest.param(0, 4, 1, 2, [0, 1, 0, 1], id="unit-aligned"),
+            pytest.param(1, 5, 1, 2, [0, 1, 0, 1], id="unit-unaligned"),
+            pytest.param(1, 8, 1, 3, [0, 1, 2, 0, 1, 2, 0], id="unit-unaligned-3slots-7trips"),
+            pytest.param(0, 256, 64, 2, [0, 1, 0, 1], id="stepped-zero-start"),
+            pytest.param(64, 320, 64, 2, [0, 1, 0, 1], id="stepped-nonzero-start"),
+            pytest.param(64, 384, 64, 3, [0, 1, 2, 0, 1], id="stepped-3slots-5trips"),
+        ],
+    )
+    def test_emitted_slot_rotates_through_every_slot_in_order(self, start, stop, step, stage, expected):
+        """Evaluate the slot operand ptoas receives at every induction value.
+
+        A wrong divisor, modulus or start offset changes this sequence even when
+        the chain still ends in a remainder. The op-shape check keeps the chain to
+        one remainder over at most one subtraction and one division, which is what
+        ptoas' slot matcher peels.
+        """
+        mlir = _codegen(_pipelined_kernel(start, stop, step, stage), passes.MemoryPlanner.PTOAS)
+        regions = _lines(mlir, "pto.alloc_multi_tile")
+        assert len(regions) == 1 and f"count={stage}" in regions[0], mlir
+        get = _lines(mlir, "pto.multi_tile_get")[0]
+        slot_ssa = get.split("[")[1].split("]")[0]
+        loop = _lines(mlir, "scf.for")[0]
+        iv_match = re.match(r"scf\.for (%\S+) =", loop)
+        assert iv_match is not None, f"unexpected scf.for syntax: {loop}"
+        iv_ssa = iv_match.group(1)
+        seq = [_eval_index(mlir, slot_ssa, {iv_ssa: v}) for v in range(start, stop, step)]
+        assert seq == expected, f"slot sequence {seq} != {expected}:\n{mlir}"
+        ops = _slot_chain_ops(mlir, slot_ssa, {iv_ssa: start})
+        # The slot must come from a modulo rather than from a scaled byte offset.
+        # A signed floor-mod does not lower to a bare `remsi`: #3030 emits the
+        # corrected rem/cmp/add/select sequence so that `-1 % 2` is 1, so the
+        # chain's root is the `select`. Require a remainder at the root or
+        # immediately under that correction, and no multiplication anywhere --
+        # a byte-scaled offset would have to multiply.
+        assert ops[0] in ("remsi", "remui", "select"), f"the slot must be a remainder, got {ops}:\n{mlir}"
+        if ops[0] == "select":
+            # Operand sub-chains interleave (the counter contributes its own
+            # subi/floordivsi), so check membership rather than position.
+            assert {"cmpi", "addi"} <= set(ops[1:]), f"unexpected correction shape {ops}:\n{mlir}"
+        assert "remsi" in ops or "remui" in ops, f"the slot must come from a modulo, got {ops}:\n{mlir}"
+        assert "muli" not in ops, f"a slot must not be byte-scaled, got {ops}:\n{mlir}"
+        assert sum(op in ("addi", "subi") for op in ops) <= 1, f"too many add/sub steps for ptoas: {ops}"
+        assert sum(op.startswith("div") or op == "floordivsi" for op in ops) == (0 if step == 1 else 1), ops
+
 
 @pytest.mark.parametrize("program", [RotatingSlot, PipelinedLoad], ids=["declared", "pipeline"])
 def test_corrected_slot_preserves_native_dynamic_events(tmp_path, program):
@@ -640,13 +894,20 @@ def test_corrected_slot_preserves_native_dynamic_events(tmp_path, program):
     remainders = {name for name, expr in definitions.items() if re.search(rf"\b{loop_iv}\s*%", expr)}
     assert len(remainders) == 1, f"the native loop must retain its remainder:\n{cpp}"
     remainder = remainders.pop()
+    # Both loops here start at a non-negative literal, so the remainder cannot
+    # be negative and codegen emits no floor correction — the slot *is* the
+    # remainder. When a correction is present it must survive into the native
+    # source rather than being folded away, so follow it when it is there.
+    # (A loop that can reach a negative index still emits one; this assertion
+    # does not cover that path, and `_assert_logical_slot_index` above pins the
+    # MLIR-level shape for both.)
     corrected = {
         name
         for name, expr in definitions.items()
         if "<" in expr and "?" in expr and remainder in dependencies(name)
     }
-    assert len(corrected) == 1, f"the native loop must retain the floor correction:\n{cpp}"
-    slot = corrected.pop()
+    assert len(corrected) <= 1, f"at most one floor correction is expected:\n{cpp}"
+    slot = corrected.pop() if corrected else remainder
     addresses = re.findall(r"TASSIGN\(\w+, (\w+)\);", loop_body)
     assert addresses and all(slot in dependencies(address) for address in addresses), (
         f"the selected tile address must use the corrected slot:\n{cpp}"

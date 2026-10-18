@@ -1104,6 +1104,115 @@ def test_signed_floor_mod_emits_sign_correction(dtype):
     assert "arith.select" in mlir
 
 
+def test_loop_start_literal_is_validated_at_its_own_width():
+    """A start literal is judged at the dtype it is emitted at, not the variable's.
+
+    `EmitArithOperand` narrows the start into its own type before the loop
+    header is formed, so an INT32 literal 4294967295 opens the loop at -1 while
+    its stored value is positive. Checking the fit against the *induction
+    variable's* dtype is not enough — a 64-bit INDEX variable admits that
+    literal — so the recorded lower bound would claim a sign the hardware never
+    has, and `FloorMod(i, 3)` would return -1 instead of 2.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("narrow_start_literal", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        # An INT32 start literal under an INDEX induction variable.
+        with ib.for_loop(i_var, ir.ConstInt(4294967295, DataType.INT32, span), 1, 1):
+            value = ib.let(
+                "m", ir.FloorMod(i_var, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            )
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NarrowStartLiteral", span))
+    assert "arith.select" in mlir, f"a start literal that changes sign needs the correction:\n{mlir}"
+
+
+def test_narrowed_loop_variable_does_not_skip_the_sign_correction():
+    """A loop variable's lower bound only proves a sign at the width it is emitted at.
+
+    `EmitArithOperand` coerces an operand into the operation's dtype, so over an
+    INDEX loop starting at 2147483648 the `i` reaching an INT32 `FloorMod` is
+    -2147483648. The recorded lower bound is positive and says nothing about
+    that, so a bare `remsi` would return -2 where floor-modulo gives 1. The
+    shortcut therefore requires the variable to reach the operation unnarrowed.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("narrowed_loop_var", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 2147483648, 2147483649, 1):
+            narrowed = ir.FloorMod(i_var, ir.ConstInt(3, DataType.INT32, span), DataType.INT32, span)
+            value = ib.let("m", narrowed)
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NarrowedLoopVar", span))
+    assert "arith.select" in mlir, f"a narrowed loop variable still needs the correction:\n{mlir}"
+
+
+def test_nested_narrowed_operation_does_not_skip_the_sign_correction():
+    """A sign proof must be carried out at the width each nested operation runs at.
+
+    The dividend of an INDEX `FloorMod` is here an INT32 `FloorDiv`. Proving the
+    whole subtree at the enclosing INDEX width accepts the induction variable and
+    never sees the narrowing: emission coerces `i` to INT32 as -2147483648, takes
+    the quotient -1073741824, and widens that *negative* value back to INDEX, so a
+    bare `remsi` returns -1 where floor-modulo gives 2. Each nested operation must
+    therefore execute at the dtype the proof is being made at.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("nested_narrowed_op", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 2147483648, 2147483649, 1):
+            quotient = ir.FloorDiv(i_var, ir.ConstInt(2, DataType.INT32, span), DataType.INT32, span)
+            nested = ir.FloorMod(quotient, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            value = ib.let("m", nested)
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "NestedNarrowedOp", span))
+    assert "arith.select" in mlir, f"a nested narrowed operation still needs the correction:\n{mlir}"
+
+
+def test_overflowing_product_does_not_skip_the_sign_correction():
+    """A non-negative dividend is not enough: the arithmetic must also not wrap.
+
+    Over an INDEX loop `0, 1, 2`, `i * 4611686018427387904` is non-negative term
+    by term, but wraps to INT64_MIN at `i == 2`, where a bare `remsi` yields -2
+    instead of the floor-modulo result 1. The shortcut that skips the correction
+    therefore does not recognise sums or products at all.
+    """
+    span = ir.Span.unknown()
+    output_type = ir.TensorType([1], DataType.INT64)
+    ib = IRBuilder()
+    with ib.function("overflowing_product", type=ir.FunctionType.InCore) as f:
+        output = f.param("output", output_type)
+        f.return_type(output_type)
+        # A real loop variable, so the dividend has a known non-negative start.
+        i_var = ib.var("i", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(i_var, 0, 3, 1):
+            scaled = ir.Mul(
+                i_var, ir.ConstInt(4611686018427387904, DataType.INDEX, span), DataType.INDEX, span
+            )
+            value = ib.let(
+                "m", ir.FloorMod(scaled, ir.ConstInt(3, DataType.INDEX, span), DataType.INDEX, span)
+            )
+            ib.let("store", tensor_ops.write(output, [0], ir.Cast(value, DataType.INT64, span)))
+        ib.return_stmt(output)
+    mlir = _generate_mlir(ir.Program([f.get_result()], "OverflowingProduct", span))
+    assert "arith.select" in mlir, f"the correction must survive an overflowing dividend:\n{mlir}"
+
+
 def test_float_floor_mod_keeps_float_remainder():
     """The signed integer correction must not change floating-point remainder."""
     mlir = _scalar_floor_mod_mlir(DataType.FP32)
