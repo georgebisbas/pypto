@@ -73,12 +73,40 @@ CompareResult RewriteSimplifier::Impl::TryCompare(const ExprPtr& x, int64_t val)
   if (!parent_) return CompareResult::kUnknown;
 
   ConstIntBound bound = parent_->const_int_bound(x);
+  // A kNegInf lower endpoint means "no lower bound" (INT64_MIN reachable), not the value
+  // INT64_MIN + 1, so it cannot support a claim about `val` from below.
+  if (bound.min_value == ConstIntBound::kNegInf) {
+    if (bound.max_value < val) return CompareResult::kLT;
+    if (bound.max_value == val) return CompareResult::kLE;
+    return CompareResult::kUnknown;
+  }
   if (bound.min_value == val && bound.max_value == val) return CompareResult::kEQ;
   if (bound.min_value > val) return CompareResult::kGT;
   if (bound.min_value == val) return CompareResult::kGE;
   if (bound.max_value < val) return CompareResult::kLT;
   if (bound.max_value == val) return CompareResult::kLE;
   return CompareResult::kUnknown;
+}
+
+bool RewriteSimplifier::Impl::OffsetRewriteIsSafe(const ExprPtr& x, int64_t c, bool negate_x,
+                                                  int64_t new_const) {
+  const DataType dtype = GetScalarDtype(x);
+  // 64-bit (INDEX, INT64, UINT64) keeps the index-arithmetic convention: no wrap check.
+  if (!dtype.IsInt() || dtype.GetBit() >= 64) return true;
+  if (!parent_) return false;
+  using detail::ConstIntFitsDtype;
+  if (!ConstIntFitsDtype(c, dtype) || !ConstIntFitsDtype(new_const, dtype)) return false;
+  const ConstIntBound b = parent_->const_int_bound(x);
+  // An endpoint outside the dtype (including the kNegInf / kPosInf sentinels) means
+  // "unbounded", for which the sum can wrap. Values here are < 2^32 in magnitude, so
+  // the int64 arithmetic below cannot overflow.
+  if (b.min_value > b.max_value || !ConstIntFitsDtype(b.min_value, dtype) ||
+      !ConstIntFitsDtype(b.max_value, dtype)) {
+    return false;
+  }
+  const int64_t lo = negate_x ? c - b.max_value : b.min_value + c;
+  const int64_t hi = negate_x ? c - b.min_value : b.max_value + c;
+  return ConstIntFitsDtype(lo, dtype) && ConstIntFitsDtype(hi, dtype);
 }
 
 void RewriteSimplifier::Impl::Update(const VarPtr& var, const ExprPtr& info) {
@@ -1015,12 +1043,23 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LtPtr& op) {
   // x < x - z => z < 0
   PYPTO_TRY_REWRITE(x < x - z, z < MakeConstInt(0, GetScalarDtype(a)));
 
-  // Constant rearrangement
-  PYPTO_TRY_REWRITE(x + c1 < c2, x < c2 - c1);
-  PYPTO_TRY_REWRITE(x - c1 < c2, x < c2 + c1);
-  PYPTO_TRY_REWRITE(c1 - x < c2, c1 - c2 < x);
-  PYPTO_TRY_REWRITE(c1 < x + c2, c1 - c2 < x);
-  PYPTO_TRY_REWRITE(c1 < x - c2, c1 + c2 < x);
+  // Constant rearrangement. Each rule needs the sum the program emits not to wrap at
+  // x's dtype (see OffsetRewriteIsSafe), or `x + c1 < c2` and `x < c2 - c1` disagree.
+  PYPTO_TRY_REWRITE_IF(
+      x + c1 < c2, x < c2 - c1,
+      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, false, c2.Eval()->value_ - c1.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      x - c1 < c2, x < c2 + c1,
+      OffsetRewriteIsSafe(x.Eval(), -c1.Eval()->value_, false, c2.Eval()->value_ + c1.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 - x < c2, c1 - c2 < x,
+      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, true, c1.Eval()->value_ - c2.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 < x + c2, c1 - c2 < x,
+      OffsetRewriteIsSafe(x.Eval(), c2.Eval()->value_, false, c1.Eval()->value_ - c2.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 < x - c2, c1 + c2 < x,
+      OffsetRewriteIsSafe(x.Eval(), -c2.Eval()->value_, false, c1.Eval()->value_ + c2.Eval()->value_));
 
   // Multiply by positive/negative constant
   PYPTO_TRY_REWRITE_IF(x * c1 < y * c1, x < y, c1.Eval()->value_ > 0);
@@ -1083,11 +1122,21 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LePtr& op) {
   PYPTO_TRY_REWRITE(x - y <= x - z, z <= y);
 
   // Constant rearrangement
-  PYPTO_TRY_REWRITE(x + c1 <= c2, x <= c2 - c1);
-  PYPTO_TRY_REWRITE(x - c1 <= c2, x <= c2 + c1);
-  PYPTO_TRY_REWRITE(c1 <= x + c2, c1 - c2 <= x);
-  PYPTO_TRY_REWRITE(c1 <= x - c2, c1 + c2 <= x);
-  PYPTO_TRY_REWRITE(c1 - x <= c2, c1 - c2 <= x);
+  PYPTO_TRY_REWRITE_IF(
+      x + c1 <= c2, x <= c2 - c1,
+      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, false, c2.Eval()->value_ - c1.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      x - c1 <= c2, x <= c2 + c1,
+      OffsetRewriteIsSafe(x.Eval(), -c1.Eval()->value_, false, c2.Eval()->value_ + c1.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 <= x + c2, c1 - c2 <= x,
+      OffsetRewriteIsSafe(x.Eval(), c2.Eval()->value_, false, c1.Eval()->value_ - c2.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 <= x - c2, c1 + c2 <= x,
+      OffsetRewriteIsSafe(x.Eval(), -c2.Eval()->value_, false, c1.Eval()->value_ + c2.Eval()->value_));
+  PYPTO_TRY_REWRITE_IF(
+      c1 - x <= c2, c1 - c2 <= x,
+      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, true, c1.Eval()->value_ - c2.Eval()->value_));
 
   // Multiply by positive/negative constant
   PYPTO_TRY_REWRITE_IF(x * c1 <= y * c1, x <= y, c1.Eval()->value_ > 0);
