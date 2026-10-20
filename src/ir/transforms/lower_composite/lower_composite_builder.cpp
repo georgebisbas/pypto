@@ -230,17 +230,40 @@ void LoweringBuilder::EmitWaitAll(const ExprPtr& signal, const ExprPtr& nranks_i
       span);
 }
 
+void LoweringBuilder::EmitBarrierNotify(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& credit,
+                                        const std::string& suffix, const Span& span) {
+  INTERNAL_CHECK_SPAN(!nested_, span)
+      << "Internal error: EmitBarrierNotify must only be called from a top-level lowering rule, "
+         "not from inside EmitFor / EmitIf / EmitIfExpr bodies.";
+  auto credit_i32 = credit ? credit : std::make_shared<ConstInt>(1, DataType::INT32, span);
+  EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, credit_i32, suffix, span);
+}
+
+void LoweringBuilder::EmitBarrierWait(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& expected,
+                                      const std::string& suffix, const Span& span) {
+  INTERNAL_CHECK_SPAN(!nested_, span)
+      << "Internal error: EmitBarrierWait must only be called from a top-level lowering rule, "
+         "not from inside EmitFor / EmitIf / EmitIfExpr bodies.";
+  EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected, suffix, span);
+}
+
 int64_t LoweringBuilder::EmitBarrier(const ExprPtr& signal, const CommSetup& comm, const std::string& suffix,
-                                     const Span& span) {
+                                     const Span& span, const ExprPtr& credit) {
   INTERNAL_CHECK_SPAN(!nested_, span)
       << "Internal error: EmitBarrier must only be called from a top-level lowering rule, not from inside "
       << "EmitFor / EmitIf / EmitIfExpr bodies. Loop- or condition-resident barriers must "
       << "emit notify/wait by hand with a call-local expected value.";
   const int64_t generation = ++barrier_count_;
-  auto one_i32 = std::make_shared<ConstInt>(1, DataType::INT32, span);
-  auto expected_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
-  EmitNotifyAll(signal, comm.nranks_idx, comm.my_rank, NotifyOp::kAtomicAdd, one_i32, suffix, span);
-  EmitWaitAll(signal, comm.nranks_idx, comm.my_rank, expected_i32, suffix, span);
+  auto credit_i32 = credit ? credit : std::make_shared<ConstInt>(1, DataType::INT32, span);
+  EmitBarrierNotify(signal, comm, credit_i32, suffix, span);
+  ExprPtr expected_i32;
+  if (auto c = As<ConstInt>(credit_i32); c && c->value_ == 1) {
+    expected_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+  } else {
+    auto gen_i32 = std::make_shared<ConstInt>(generation, DataType::INT32, span);
+    expected_i32 = MakeMul(gen_i32, credit_i32, span);
+  }
+  EmitBarrierWait(signal, comm, expected_i32, suffix, span);
   return generation;
 }
 

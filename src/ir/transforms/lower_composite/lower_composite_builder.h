@@ -144,13 +144,30 @@ class LoweringBuilder {
 
   // ---- Self-clearing credit barrier protocol (see lower_composite_common.h's protocol comment) ----
 
-  /// Emit one complete cross-rank barrier on ``signal``: ``AtomicAdd(1)`` into
-  /// every peer's cell, then wait for this call's generation on every peer's
-  /// cell. Returns the generation waited for (1-based, scoped to *this call*
-  /// only — every fresh ``LoweringBuilder`` starts counting at 0), so a rule
-  /// that fans out further barriers (the mesh allreduce's per-chunk barriers)
-  /// can continue the sequence from it, and so the rule can compute the total
-  /// credit count its ``EmitEpilogueReset`` call must subtract.
+  /// Notify half of a credit barrier: ``AtomicAdd(credit)`` into every peer's
+  /// cell. ``credit`` defaults to ``ConstInt(1)`` when null. Does not bump the
+  /// call-local generation counter — callers that need a generation use
+  /// ``EmitBarrier``.
+  void EmitBarrierNotify(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& credit,
+                         const std::string& suffix, const Span& span);
+
+  /// Wait half of a credit barrier: wait ``Ge(expected)`` on every peer's cell.
+  /// ``expected`` is the absolute value already scaled by credit/participants
+  /// (``generation * credit`` for a barrier issued with a non-unit ``credit``).
+  void EmitBarrierWait(const ExprPtr& signal, const CommSetup& comm, const ExprPtr& expected,
+                       const std::string& suffix, const Span& span);
+
+  /// Emit one complete cross-rank barrier on ``signal``: ``AtomicAdd(credit)``
+  /// into every peer's cell, then wait for ``generation * credit`` on every
+  /// peer's cell. Returns the generation waited for (1-based, scoped to *this
+  /// call* only — every fresh ``LoweringBuilder`` starts counting at 0), so a
+  /// rule that fans out further barriers (the mesh allreduce's per-chunk
+  /// barriers) can continue the sequence from it, and so the rule can compute
+  /// the total credit count its ``EmitEpilogueReset`` call must subtract.
+  ///
+  /// ``credit`` defaults to ``ConstInt(1)`` when null. Only the wait scales by
+  /// credit/participants relative to a bare generation; existing call sites that
+  /// omit ``credit`` keep today's ``+1`` / ``Ge(generation)`` semantics.
   ///
   /// Call this only from a rule's straight-line code — one call consumes exactly
   /// one generation, so invoking it inside an ``EmitFor`` body would reserve a
@@ -158,7 +175,7 @@ class LoweringBuilder {
   /// barriers must emit notify/wait by hand with a call-local expected value
   /// (see the ring / mesh-chunked rules below).
   int64_t EmitBarrier(const ExprPtr& signal, const CommSetup& comm, const std::string& suffix,
-                      const Span& span);
+                      const Span& span, const ExprPtr& credit = nullptr);
 
   /// Self-clearing epilogue: subtract ``total`` from every non-self peer's
   /// contribution to *my own* cells, restoring the signal to all-zero once
