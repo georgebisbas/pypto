@@ -104,16 +104,6 @@ class RewriteSimplifier::Impl : public ExprFunctor<ExprPtr> {
   /// Returns kUnknown in standalone mode (no parent Analyzer).
   CompareResult TryCompare(const ExprPtr& expr, int64_t val);
 
-  /// Whether `x + c` (or `c - x` when `negate_x`) cannot wrap at x's dtype and the
-  /// rewritten constant `new_const` is representable there.
-  ///
-  /// The ordering rewrites move a constant across `<` / `<=`, which is only valid
-  /// when the sum the program emits does not wrap: INT8 `c + 1 < 0` with `c == 127`
-  /// is true (the sum is -128), but `c < -1` is false. 64-bit dtypes follow the index
-  /// convention and are not checked; narrower ones need a proof from the bounds, so
-  /// standalone mode (no parent Analyzer) and unbounded operands decline.
-  bool OffsetRewriteIsSafe(const ExprPtr& x, int64_t c, bool negate_x, int64_t new_const);
-
   bool CanProveGE(const ExprPtr& expr, int64_t val) {
     auto r = TryCompare(expr, val);
     return r == CompareResult::kGE || r == CompareResult::kGT || r == CompareResult::kEQ;

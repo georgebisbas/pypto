@@ -2174,6 +2174,34 @@ class TestProvableComparisonFold:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Before)
 
+    def test_narrow_equality_with_a_moved_constant_is_kept(self):
+        """`c + 100 == -100` is true at c == 56 and must stay undecided at INT8.
+
+        Moving the constant gives `c == -200`, a literal the dtype cannot hold: it is stored as written (the
+        constant folder only checks int64 overflow), so the bound fold saw `[0, 127]` against `[-200]`,
+        called them disjoint, and decided `False` although c == 56 is reachable.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                seed = pl.tensor.create([16, 64], pl.FP32)
+                for i, (acc,) in pl.range(0, 128, init_values=(seed,)):
+                    c: pl.Scalar[pl.INT8] = pl.cast(i, pl.INT8)
+                    cond = c + pl.const(100, pl.INT8) == pl.const(-100, pl.INT8)
+                    nxt = pl.matmul_acc(acc, a, b, init_cond=cond)
+                    r = pl.yield_(nxt)
+                return pl.tensor.assemble(out, r, [0, 0])
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
     def test_multiplication_overflow_comparison_is_kept(self):
         """A product that overflows int64 wraps, so its sign is undecidable.
 

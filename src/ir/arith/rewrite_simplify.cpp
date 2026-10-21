@@ -69,44 +69,26 @@ ExprPtr RewriteSimplifier::Impl::RecursiveRewrite(const ExprPtr& expr) {
   return result;
 }
 
+/// Whether arithmetic at `dtype` can wrap in generated code.
+///
+/// Rewrites that move a value across a non-modular operator (`<`, `<=`, `==` with a folded constant, `min`,
+/// `max`, `floordiv`, `floormod`) are identities over the integers, not over a fixed-width type: for INT8 `c`
+/// in [120, 127], `c + 1 < 0` is true at `c == 127` (the sum is -128), but the rewritten `c < -1` is false
+/// everywhere. Narrow dtypes therefore skip those rules and keep the expression as written; the bound fold in
+/// `Simplify` still decides any comparison the operand bounds settle. 64-bit dtypes (INDEX, INT64, UINT64)
+/// keep the index-arithmetic convention of never wrapping.
+static bool WrapsAtNodeWidth(const DataType& dtype) { return dtype.IsInt() && dtype.GetBit() < 64; }
+
 CompareResult RewriteSimplifier::Impl::TryCompare(const ExprPtr& x, int64_t val) {
   if (!parent_) return CompareResult::kUnknown;
 
   ConstIntBound bound = parent_->const_int_bound(x);
-  // A kNegInf lower endpoint means "no lower bound" (INT64_MIN reachable), not the value
-  // INT64_MIN + 1, so it cannot support a claim about `val` from below.
-  if (bound.min_value == ConstIntBound::kNegInf) {
-    if (bound.max_value < val) return CompareResult::kLT;
-    if (bound.max_value == val) return CompareResult::kLE;
-    return CompareResult::kUnknown;
-  }
   if (bound.min_value == val && bound.max_value == val) return CompareResult::kEQ;
   if (bound.min_value > val) return CompareResult::kGT;
   if (bound.min_value == val) return CompareResult::kGE;
   if (bound.max_value < val) return CompareResult::kLT;
   if (bound.max_value == val) return CompareResult::kLE;
   return CompareResult::kUnknown;
-}
-
-bool RewriteSimplifier::Impl::OffsetRewriteIsSafe(const ExprPtr& x, int64_t c, bool negate_x,
-                                                  int64_t new_const) {
-  const DataType dtype = GetScalarDtype(x);
-  // 64-bit (INDEX, INT64, UINT64) keeps the index-arithmetic convention: no wrap check.
-  if (!dtype.IsInt() || dtype.GetBit() >= 64) return true;
-  if (!parent_) return false;
-  using detail::ConstIntFitsDtype;
-  if (!ConstIntFitsDtype(c, dtype) || !ConstIntFitsDtype(new_const, dtype)) return false;
-  const ConstIntBound b = parent_->const_int_bound(x);
-  // An endpoint outside the dtype (including the kNegInf / kPosInf sentinels) means
-  // "unbounded", for which the sum can wrap. Values here are < 2^32 in magnitude, so
-  // the int64 arithmetic below cannot overflow.
-  if (b.min_value > b.max_value || !ConstIntFitsDtype(b.min_value, dtype) ||
-      !ConstIntFitsDtype(b.max_value, dtype)) {
-    return false;
-  }
-  const int64_t lo = negate_x ? c - b.max_value : b.min_value + c;
-  const int64_t hi = negate_x ? c - b.min_value : b.max_value + c;
-  return ConstIntFitsDtype(lo, dtype) && ConstIntFitsDtype(hi, dtype);
 }
 
 void RewriteSimplifier::Impl::Update(const VarPtr& var, const ExprPtr& info) {
@@ -253,19 +235,21 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const AddPtr& op) {
   // floormod(x, y) + y * floordiv(x, y) => x
   PYPTO_TRY_REWRITE(floormod(x, y) + y * floordiv(x, y), x);
 
-  // Min/Max interactions
-  // min(x, y - z) + z => min(x + z, y)
-  PYPTO_TRY_REWRITE(min(x, y - z) + z, min(x + z, y));
-  // min(x - z, y) + z => min(x, y + z)
-  PYPTO_TRY_REWRITE(min(x - z, y) + z, min(x, y + z));
-  // z + min(x, y - z) => min(x + z, y)
-  PYPTO_TRY_REWRITE(z + min(x, y - z), min(x + z, y));
-  // max(x, y - z) + z => max(x + z, y)
-  PYPTO_TRY_REWRITE(max(x, y - z) + z, max(x + z, y));
-  // max(x - z, y) + z => max(x, y + z)
-  PYPTO_TRY_REWRITE(max(x - z, y) + z, max(x, y + z));
-  // z + max(x, y - z) => max(x + z, y)
-  PYPTO_TRY_REWRITE(z + max(x, y - z), max(x + z, y));
+  if (!WrapsAtNodeWidth(GetScalarDtype(ret))) {  // z moved across min/max may wrap
+    // Min/Max interactions
+    // min(x, y - z) + z => min(x + z, y)
+    PYPTO_TRY_REWRITE(min(x, y - z) + z, min(x + z, y));
+    // min(x - z, y) + z => min(x, y + z)
+    PYPTO_TRY_REWRITE(min(x - z, y) + z, min(x, y + z));
+    // z + min(x, y - z) => min(x + z, y)
+    PYPTO_TRY_REWRITE(z + min(x, y - z), min(x + z, y));
+    // max(x, y - z) + z => max(x + z, y)
+    PYPTO_TRY_REWRITE(max(x, y - z) + z, max(x + z, y));
+    // max(x - z, y) + z => max(x, y + z)
+    PYPTO_TRY_REWRITE(max(x - z, y) + z, max(x, y + z));
+    // z + max(x, y - z) => max(x + z, y)
+    PYPTO_TRY_REWRITE(z + max(x, y - z), max(x + z, y));
+  }
 
   // max(x, y) + min(x, y) => x + y (and commutation variants)
   PYPTO_TRY_REWRITE(max(x, y) + min(x, y), x + y);
@@ -365,56 +349,60 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const SubPtr& op) {
   // floordiv(x, c1) * c1 - x => 0 - floormod(x, c1) when c1 != 0
   PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 - x, MakeConstInt(0, GetScalarDtype(ret)) - floormod(x, c1),
                        c1.Eval()->value_ != 0);
-  // x - floordiv(x+y, c1) * c1 => floormod(x+y, c1) - y when c1 != 0
-  PYPTO_TRY_REWRITE_IF(x - floordiv(x + y, c1) * c1, floormod(x + y, c1) - y, c1.Eval()->value_ != 0);
-  // floordiv(x+y, c1) * c1 - x => y - floormod(x+y, c1) when c1 != 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x + y, c1) * c1 - x, y - floormod(x + y, c1), c1.Eval()->value_ != 0);
-  // x - floordiv(x-y, c1) * c1 => floormod(x-y, c1) + y when c1 != 0
-  PYPTO_TRY_REWRITE_IF(x - floordiv(x - y, c1) * c1, floormod(x - y, c1) + y, c1.Eval()->value_ != 0);
-  // floordiv(x-y, c1) * c1 - x => 0 - floormod(x-y, c1) - y when c1 != 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x - y, c1) * c1 - x,
-                       MakeConstInt(0, GetScalarDtype(ret)) - floormod(x - y, c1) - y,
-                       c1.Eval()->value_ != 0);
+  if (!WrapsAtNodeWidth(GetScalarDtype(ret))) {  // the sum inside floordiv may wrap
+    // x - floordiv(x+y, c1) * c1 => floormod(x+y, c1) - y when c1 != 0
+    PYPTO_TRY_REWRITE_IF(x - floordiv(x + y, c1) * c1, floormod(x + y, c1) - y, c1.Eval()->value_ != 0);
+    // floordiv(x+y, c1) * c1 - x => y - floormod(x+y, c1) when c1 != 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x + y, c1) * c1 - x, y - floormod(x + y, c1), c1.Eval()->value_ != 0);
+    // x - floordiv(x-y, c1) * c1 => floormod(x-y, c1) + y when c1 != 0
+    PYPTO_TRY_REWRITE_IF(x - floordiv(x - y, c1) * c1, floormod(x - y, c1) + y, c1.Eval()->value_ != 0);
+    // floordiv(x-y, c1) * c1 - x => 0 - floormod(x-y, c1) - y when c1 != 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x - y, c1) * c1 - x,
+                         MakeConstInt(0, GetScalarDtype(ret)) - floormod(x - y, c1) - y,
+                         c1.Eval()->value_ != 0);
+  }
 
-  // Min/Max interactions
-  // min(x, y) - x => min(0, y - x)
-  PYPTO_TRY_REWRITE(min(x, y) - x, min(MakeConstInt(0, GetScalarDtype(ret)), y - x));
-  // min(x, y) - y => min(x - y, 0)
-  PYPTO_TRY_REWRITE(min(x, y) - y, min(x - y, MakeConstInt(0, GetScalarDtype(ret))));
-  // max(x, y) - x => max(0, y - x)
-  PYPTO_TRY_REWRITE(max(x, y) - x, max(MakeConstInt(0, GetScalarDtype(ret)), y - x));
-  // max(x, y) - y => max(x - y, 0)
-  PYPTO_TRY_REWRITE(max(x, y) - y, max(x - y, MakeConstInt(0, GetScalarDtype(ret))));
-  // x - min(x, y) => max(0, x - y)
-  PYPTO_TRY_REWRITE(x - min(x, y), max(MakeConstInt(0, GetScalarDtype(ret)), x - y));
-  // x - max(x, y) => min(0, x - y)
-  PYPTO_TRY_REWRITE(x - max(x, y), min(MakeConstInt(0, GetScalarDtype(ret)), x - y));
+  if (!WrapsAtNodeWidth(GetScalarDtype(ret))) {  // differences moved across min/max may wrap
+    // Min/Max interactions
+    // min(x, y) - x => min(0, y - x)
+    PYPTO_TRY_REWRITE(min(x, y) - x, min(MakeConstInt(0, GetScalarDtype(ret)), y - x));
+    // min(x, y) - y => min(x - y, 0)
+    PYPTO_TRY_REWRITE(min(x, y) - y, min(x - y, MakeConstInt(0, GetScalarDtype(ret))));
+    // max(x, y) - x => max(0, y - x)
+    PYPTO_TRY_REWRITE(max(x, y) - x, max(MakeConstInt(0, GetScalarDtype(ret)), y - x));
+    // max(x, y) - y => max(x - y, 0)
+    PYPTO_TRY_REWRITE(max(x, y) - y, max(x - y, MakeConstInt(0, GetScalarDtype(ret))));
+    // x - min(x, y) => max(0, x - y)
+    PYPTO_TRY_REWRITE(x - min(x, y), max(MakeConstInt(0, GetScalarDtype(ret)), x - y));
+    // x - max(x, y) => min(0, x - y)
+    PYPTO_TRY_REWRITE(x - max(x, y), min(MakeConstInt(0, GetScalarDtype(ret)), x - y));
 
-  // min(x+y, z) - x => min(y, z-x)
-  PYPTO_TRY_REWRITE(min(x + y, z) - x, min(y, z - x));
-  PYPTO_TRY_REWRITE(min(y + x, z) - x, min(y, z - x));
-  // min(z, x+y) - x => min(z-x, y)
-  PYPTO_TRY_REWRITE(min(z, x + y) - x, min(z - x, y));
-  PYPTO_TRY_REWRITE(min(z, y + x) - x, min(z - x, y));
-  // max(x+y, z) - x => max(y, z-x)
-  PYPTO_TRY_REWRITE(max(x + y, z) - x, max(y, z - x));
-  PYPTO_TRY_REWRITE(max(y + x, z) - x, max(y, z - x));
-  // max(z, x+y) - x => max(z-x, y)
-  PYPTO_TRY_REWRITE(max(z, x + y) - x, max(z - x, y));
-  PYPTO_TRY_REWRITE(max(z, y + x) - x, max(z - x, y));
+    // min(x+y, z) - x => min(y, z-x)
+    PYPTO_TRY_REWRITE(min(x + y, z) - x, min(y, z - x));
+    PYPTO_TRY_REWRITE(min(y + x, z) - x, min(y, z - x));
+    // min(z, x+y) - x => min(z-x, y)
+    PYPTO_TRY_REWRITE(min(z, x + y) - x, min(z - x, y));
+    PYPTO_TRY_REWRITE(min(z, y + x) - x, min(z - x, y));
+    // max(x+y, z) - x => max(y, z-x)
+    PYPTO_TRY_REWRITE(max(x + y, z) - x, max(y, z - x));
+    PYPTO_TRY_REWRITE(max(y + x, z) - x, max(y, z - x));
+    // max(z, x+y) - x => max(z-x, y)
+    PYPTO_TRY_REWRITE(max(z, x + y) - x, max(z - x, y));
+    PYPTO_TRY_REWRITE(max(z, y + x) - x, max(z - x, y));
 
-  // x - min(x+y, z) => max(0-y, x-z)
-  PYPTO_TRY_REWRITE(x - min(x + y, z), max(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
-  PYPTO_TRY_REWRITE(x - min(y + x, z), max(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
-  // x - min(z, x+y) => max(x-z, 0-y)
-  PYPTO_TRY_REWRITE(x - min(z, x + y), max(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
-  PYPTO_TRY_REWRITE(x - min(z, y + x), max(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
-  // x - max(x+y, z) => min(0-y, x-z)
-  PYPTO_TRY_REWRITE(x - max(x + y, z), min(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
-  PYPTO_TRY_REWRITE(x - max(y + x, z), min(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
-  // x - max(z, x+y) => min(x-z, 0-y)
-  PYPTO_TRY_REWRITE(x - max(z, x + y), min(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
-  PYPTO_TRY_REWRITE(x - max(z, y + x), min(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
+    // x - min(x+y, z) => max(0-y, x-z)
+    PYPTO_TRY_REWRITE(x - min(x + y, z), max(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
+    PYPTO_TRY_REWRITE(x - min(y + x, z), max(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
+    // x - min(z, x+y) => max(x-z, 0-y)
+    PYPTO_TRY_REWRITE(x - min(z, x + y), max(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
+    PYPTO_TRY_REWRITE(x - min(z, y + x), max(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
+    // x - max(x+y, z) => min(0-y, x-z)
+    PYPTO_TRY_REWRITE(x - max(x + y, z), min(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
+    PYPTO_TRY_REWRITE(x - max(y + x, z), min(MakeConstInt(0, GetScalarDtype(ret)) - y, x - z));
+    // x - max(z, x+y) => min(x-z, 0-y)
+    PYPTO_TRY_REWRITE(x - max(z, x + y), min(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
+    PYPTO_TRY_REWRITE(x - max(z, y + x), min(x - z, MakeConstInt(0, GetScalarDtype(ret)) - y));
+  }
 
   // min(x, y) - min(y, x) => 0
   PYPTO_TRY_REWRITE(min(x, y) - min(y, x), MakeConstInt(0, GetScalarDtype(ret)));
@@ -496,84 +484,86 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorDivPtr& op) {
   PVar<ExprPtr> x, y, z;
   PVar<ConstIntPtr> c1, c2;
 
-  // x * c1 / c2 => x * (c1/c2) when c1 % c2 == 0 and c2 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x * c1, c2), x * floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // c1 * x / c2 => x * (c1/c2) when c1 % c2 == 0 and c2 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(c1 * x, c2), x * floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+  if (!WrapsAtNodeWidth(dtype)) {  // offsets and products moved across floordiv may wrap
+    // x * c1 / c2 => x * (c1/c2) when c1 % c2 == 0 and c2 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x * c1, c2), x * floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // c1 * x / c2 => x * (c1/c2) when c1 % c2 == 0 and c2 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(c1 * x, c2), x * floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
 
-  // x * c1 / c2 => floordiv(x, c2/c1) when c2 % c1 == 0 and c1 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x * c1, c2), floordiv(x, floordiv(c2, c1)),
-                       c1.Eval()->value_ > 0 && c2.Eval()->value_ % c1.Eval()->value_ == 0 &&
-                           c2.Eval()->value_ / c1.Eval()->value_ > 0);
+    // x * c1 / c2 => floordiv(x, c2/c1) when c2 % c1 == 0 and c1 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x * c1, c2), floordiv(x, floordiv(c2, c1)),
+                         c1.Eval()->value_ > 0 && c2.Eval()->value_ % c1.Eval()->value_ == 0 &&
+                             c2.Eval()->value_ / c1.Eval()->value_ > 0);
 
-  // floordiv(floordiv(x, c1), c2) => floordiv(x, c1 * c2) when c1 > 0 and c2 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(floordiv(x, c1), c2), floordiv(x, c1 * c2),
-                       c1.Eval()->value_ > 0 && c2.Eval()->value_ > 0);
+    // floordiv(floordiv(x, c1), c2) => floordiv(x, c1 * c2) when c1 > 0 and c2 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(floordiv(x, c1), c2), floordiv(x, c1 * c2),
+                         c1.Eval()->value_ > 0 && c2.Eval()->value_ > 0);
 
-  // floordiv(floordiv(x, c1) + c2, c3) => floordiv(x + c1*c2, c1*c3) when c1 > 0 and c3 > 0
-  {
-    PVar<ConstIntPtr> c3;
-    PYPTO_TRY_REWRITE_IF(floordiv(floordiv(x, c1) + c2, c3), floordiv(x + c1 * c2, c1 * c3),
-                         c1.Eval()->value_ > 0 && c3.Eval()->value_ > 0);
+    // floordiv(floordiv(x, c1) + c2, c3) => floordiv(x + c1*c2, c1*c3) when c1 > 0 and c3 > 0
+    {
+      PVar<ConstIntPtr> c3;
+      PYPTO_TRY_REWRITE_IF(floordiv(floordiv(x, c1) + c2, c3), floordiv(x + c1 * c2, c1 * c3),
+                           c1.Eval()->value_ > 0 && c3.Eval()->value_ > 0);
+    }
+
+    // floordiv(x, x) => 1  (requires x != 0 to preserve semantics)
+    PYPTO_TRY_REWRITE_IF(floordiv(x, x), MakeConstInt(1, GetScalarDtype(ret)),
+                         CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
+    // floordiv(x * c1, x) => c1  (requires x != 0)
+    PYPTO_TRY_REWRITE_IF(floordiv(x * c1, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
+    // floordiv(c1 * x, x) => c1  (requires x != 0)
+    PYPTO_TRY_REWRITE_IF(floordiv(c1 * x, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
+
+    // floordiv(x + c1, c2) => floordiv(x, c2) + c1/c2 when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x + c1, c2), floordiv(x, c2) + floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(c1 + x, c2) => floordiv(x, c2) + c1/c2 when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floordiv(c1 + x, c2), floordiv(x, c2) + floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+
+    // floordiv(x * c1 + y, c2) => x * (c1/c2) + floordiv(y, c2)
+    // when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x * c1 + y, c2), x * floordiv(c1, c2) + floordiv(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(c1 * x + y, c2) => x * (c1/c2) + floordiv(y, c2)
+    PYPTO_TRY_REWRITE_IF(floordiv(c1 * x + y, c2), x * floordiv(c1, c2) + floordiv(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(y + x * c1, c2) => floordiv(y, c2) + x * (c1/c2)
+    PYPTO_TRY_REWRITE_IF(floordiv(y + x * c1, c2), floordiv(y, c2) + x * floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(y + c1 * x, c2) => floordiv(y, c2) + x * (c1/c2)
+    PYPTO_TRY_REWRITE_IF(floordiv(y + c1 * x, c2), floordiv(y, c2) + x * floordiv(c1, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+
+    // Min/Max distribution
+    // floordiv(min(x*c1, y), c2) => min(x*floordiv(c1,c2), floordiv(y,c2))
+    PYPTO_TRY_REWRITE_IF(floordiv(min(x * c1, y), c2), min(x * floordiv(c1, c2), floordiv(y, c2)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(max(x*c1, y), c2) => max(x*floordiv(c1,c2), floordiv(y,c2))
+    PYPTO_TRY_REWRITE_IF(floordiv(max(x * c1, y), c2), max(x * floordiv(c1, c2), floordiv(y, c2)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(min(y, x*c1), c2) => min(floordiv(y,c2), x*floordiv(c1,c2))
+    PYPTO_TRY_REWRITE_IF(floordiv(min(y, x * c1), c2), min(floordiv(y, c2), x * floordiv(c1, c2)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floordiv(max(y, x*c1), c2) => max(floordiv(y,c2), x*floordiv(c1,c2))
+    PYPTO_TRY_REWRITE_IF(floordiv(max(y, x * c1), c2), max(floordiv(y, c2), x * floordiv(c1, c2)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+
+    // floordiv(x - floormod(x, c1), c1) => floordiv(x, c1) when c1 != 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x - floormod(x, c1), c1), floordiv(x, c1), c1.Eval()->value_ != 0);
+
+    // floordiv(x*y, y) => x when y != 0 (dormant in PR 3)
+    PYPTO_TRY_REWRITE_IF(floordiv(x * y, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+    PYPTO_TRY_REWRITE_IF(floordiv(y * x, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+
+    // floordiv(x*z + y, z) => x + floordiv(y, z) when z >= 0 (dormant)
+    PYPTO_TRY_REWRITE_IF(floordiv(x * z + y, z), x + floordiv(y, z), CanProveGE(z.Eval(), 0));
+    PYPTO_TRY_REWRITE_IF(floordiv(z * x + y, z), x + floordiv(y, z), CanProveGE(z.Eval(), 0));
+    PYPTO_TRY_REWRITE_IF(floordiv(y + x * z, z), floordiv(y, z) + x, CanProveGE(z.Eval(), 0));
+    PYPTO_TRY_REWRITE_IF(floordiv(y + z * x, z), floordiv(y, z) + x, CanProveGE(z.Eval(), 0));
   }
-
-  // floordiv(x, x) => 1  (requires x != 0 to preserve semantics)
-  PYPTO_TRY_REWRITE_IF(floordiv(x, x), MakeConstInt(1, GetScalarDtype(ret)),
-                       CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
-  // floordiv(x * c1, x) => c1  (requires x != 0)
-  PYPTO_TRY_REWRITE_IF(floordiv(x * c1, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
-  // floordiv(c1 * x, x) => c1  (requires x != 0)
-  PYPTO_TRY_REWRITE_IF(floordiv(c1 * x, x), c1, CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1));
-
-  // floordiv(x + c1, c2) => floordiv(x, c2) + c1/c2 when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x + c1, c2), floordiv(x, c2) + floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(c1 + x, c2) => floordiv(x, c2) + c1/c2 when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floordiv(c1 + x, c2), floordiv(x, c2) + floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-
-  // floordiv(x * c1 + y, c2) => x * (c1/c2) + floordiv(y, c2)
-  // when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x * c1 + y, c2), x * floordiv(c1, c2) + floordiv(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(c1 * x + y, c2) => x * (c1/c2) + floordiv(y, c2)
-  PYPTO_TRY_REWRITE_IF(floordiv(c1 * x + y, c2), x * floordiv(c1, c2) + floordiv(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(y + x * c1, c2) => floordiv(y, c2) + x * (c1/c2)
-  PYPTO_TRY_REWRITE_IF(floordiv(y + x * c1, c2), floordiv(y, c2) + x * floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(y + c1 * x, c2) => floordiv(y, c2) + x * (c1/c2)
-  PYPTO_TRY_REWRITE_IF(floordiv(y + c1 * x, c2), floordiv(y, c2) + x * floordiv(c1, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-
-  // Min/Max distribution
-  // floordiv(min(x*c1, y), c2) => min(x*floordiv(c1,c2), floordiv(y,c2))
-  PYPTO_TRY_REWRITE_IF(floordiv(min(x * c1, y), c2), min(x * floordiv(c1, c2), floordiv(y, c2)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(max(x*c1, y), c2) => max(x*floordiv(c1,c2), floordiv(y,c2))
-  PYPTO_TRY_REWRITE_IF(floordiv(max(x * c1, y), c2), max(x * floordiv(c1, c2), floordiv(y, c2)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(min(y, x*c1), c2) => min(floordiv(y,c2), x*floordiv(c1,c2))
-  PYPTO_TRY_REWRITE_IF(floordiv(min(y, x * c1), c2), min(floordiv(y, c2), x * floordiv(c1, c2)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floordiv(max(y, x*c1), c2) => max(floordiv(y,c2), x*floordiv(c1,c2))
-  PYPTO_TRY_REWRITE_IF(floordiv(max(y, x * c1), c2), max(floordiv(y, c2), x * floordiv(c1, c2)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-
-  // floordiv(x - floormod(x, c1), c1) => floordiv(x, c1) when c1 != 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x - floormod(x, c1), c1), floordiv(x, c1), c1.Eval()->value_ != 0);
-
-  // floordiv(x*y, y) => x when y != 0 (dormant in PR 3)
-  PYPTO_TRY_REWRITE_IF(floordiv(x * y, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
-  PYPTO_TRY_REWRITE_IF(floordiv(y * x, y), x, CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
-
-  // floordiv(x*z + y, z) => x + floordiv(y, z) when z >= 0 (dormant)
-  PYPTO_TRY_REWRITE_IF(floordiv(x * z + y, z), x + floordiv(y, z), CanProveGE(z.Eval(), 0));
-  PYPTO_TRY_REWRITE_IF(floordiv(z * x + y, z), x + floordiv(y, z), CanProveGE(z.Eval(), 0));
-  PYPTO_TRY_REWRITE_IF(floordiv(y + x * z, z), floordiv(y, z) + x, CanProveGE(z.Eval(), 0));
-  PYPTO_TRY_REWRITE_IF(floordiv(y + z * x, z), floordiv(y, z) + x, CanProveGE(z.Eval(), 0));
 
   // Bound-dependent: floordiv(x, c) => 0 when 0 <= x < c (dormant in PR 3)
   PYPTO_TRY_REWRITE_IF(
@@ -606,60 +596,82 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const FloorModPtr& op) {
   PVar<ExprPtr> x, y;
   PVar<ConstIntPtr> c1, c2;
 
-  // floormod(x * c1, c2) => 0 when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(x * c1, c2), MakeConstInt(0, GetScalarDtype(ret)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floormod(c1 * x, c2) => 0 when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(c1 * x, c2), MakeConstInt(0, GetScalarDtype(ret)),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+  // The one wrap-sensitive rewrite with a consumer: dropping the workaround `(x % m + k) % m`. It is only an
+  // identity when `x + k` cannot wrap, which the operand's bounds must prove (every value is checked to fit
+  // the dtype before any addition, so no arithmetic here can overflow).
+  const auto sum_fits_dtype = [&](const ExprPtr& v, int64_t k) {
+    if (!parent_ || !detail::ConstIntFitsDtype(k, dtype)) return false;
+    const ConstIntBound bound = parent_->const_int_bound(v);
+    return detail::ConstIntFitsDtype(bound.min_value, dtype) &&
+           detail::ConstIntFitsDtype(bound.max_value, dtype) && !AddWouldOverflow(bound.min_value, k) &&
+           !AddWouldOverflow(bound.max_value, k) && detail::ConstIntFitsDtype(bound.min_value + k, dtype) &&
+           detail::ConstIntFitsDtype(bound.max_value + k, dtype);
+  };
+  if (WrapsAtNodeWidth(dtype)) {
+    PYPTO_TRY_REWRITE_IF(floormod(x + c1, c2), floormod(x, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0 &&
+                             sum_fits_dtype(x.Eval(), c1.Eval()->value_));
+    PYPTO_TRY_REWRITE_IF(floormod(c1 + x, c2), floormod(x, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0 &&
+                             sum_fits_dtype(x.Eval(), c1.Eval()->value_));
+  }
 
-  // floormod(x + c1, c2) => floormod(x, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(x + c1, c2), floormod(x, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floormod(c1 + x, c2) => floormod(x, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(c1 + x, c2), floormod(x, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+  if (!WrapsAtNodeWidth(dtype)) {  // offsets and products moved across floormod may wrap
+    // floormod(x * c1, c2) => 0 when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(x * c1, c2), MakeConstInt(0, GetScalarDtype(ret)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(c1 * x, c2) => 0 when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(c1 * x, c2), MakeConstInt(0, GetScalarDtype(ret)),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
 
-  // floormod(x * c1 + y, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(x * c1 + y, c2), floormod(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floormod(c1 * x + y, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(c1 * x + y, c2), floormod(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floormod(y + x * c1, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(y + x * c1, c2), floormod(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
-  // floormod(y + c1 * x, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
-  PYPTO_TRY_REWRITE_IF(floormod(y + c1 * x, c2), floormod(y, c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(x + c1, c2) => floormod(x, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(x + c1, c2), floormod(x, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(c1 + x, c2) => floormod(x, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(c1 + x, c2), floormod(x, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
 
-  // floormod(x * c1, c2) => floormod(x * floormod(c1, c2), c2)
-  // Guard: c2 != 0 and c1 is actually reduced (avoid no-op rewrite)
-  PYPTO_TRY_REWRITE_IF(
-      floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
-      c2.Eval()->value_ != 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
+    // floormod(x * c1 + y, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(x * c1 + y, c2), floormod(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(c1 * x + y, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(c1 * x + y, c2), floormod(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(y + x * c1, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(y + x * c1, c2), floormod(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
+    // floormod(y + c1 * x, c2) => floormod(y, c2) when c2 > 0 and c1 % c2 == 0
+    PYPTO_TRY_REWRITE_IF(floormod(y + c1 * x, c2), floormod(y, c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ == 0);
 
-  // floormod(x * y, y) => 0  (requires y != 0 to preserve semantics)
-  PYPTO_TRY_REWRITE_IF(floormod(x * y, y), MakeConstInt(0, GetScalarDtype(ret)),
-                       CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
-  PYPTO_TRY_REWRITE_IF(floormod(y * x, y), MakeConstInt(0, GetScalarDtype(ret)),
-                       CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+    // floormod(x * c1, c2) => floormod(x * floormod(c1, c2), c2)
+    // Guard: c2 != 0 and c1 is actually reduced (avoid no-op rewrite)
+    PYPTO_TRY_REWRITE_IF(
+        floormod(x * c1, c2), floormod(x * floormod(c1, c2), c2),
+        c2.Eval()->value_ != 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
 
-  // floormod(x + y * c1, c2) => floormod(x + y * floormod(c1, c2), c2)
-  // Guard: c2 > 0 and c1 is actually reduced
-  PYPTO_TRY_REWRITE_IF(
-      floormod(x + y * c1, c2), floormod(x + y * floormod(c1, c2), c2),
-      c2.Eval()->value_ > 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
+    // floormod(x * y, y) => 0  (requires y != 0 to preserve semantics)
+    PYPTO_TRY_REWRITE_IF(floormod(x * y, y), MakeConstInt(0, GetScalarDtype(ret)),
+                         CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
+    PYPTO_TRY_REWRITE_IF(floormod(y * x, y), MakeConstInt(0, GetScalarDtype(ret)),
+                         CanProveGE(y.Eval(), 1) || CanProveLE(y.Eval(), -1));
 
-  // floormod(x * c1, x * c2) => x * floormod(c1, c2) when c2 != 0 and x != 0
-  PYPTO_TRY_REWRITE_IF(floormod(x * c1, x * c2), x * floormod(c1, c2),
-                       c2.Eval()->value_ != 0 && (CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1)));
+    // floormod(x + y * c1, c2) => floormod(x + y * floormod(c1, c2), c2)
+    // Guard: c2 > 0 and c1 is actually reduced
+    PYPTO_TRY_REWRITE_IF(
+        floormod(x + y * c1, c2), floormod(x + y * floormod(c1, c2), c2),
+        c2.Eval()->value_ > 0 && arith::floormod(c1.Eval()->value_, c2.Eval()->value_) != c1.Eval()->value_);
 
-  // floormod(x + c1, c2) => floormod(x + floormod(c1, c2), c2)
-  // when c2 > 0 and c1 % c2 != 0 and |c1| >= c2
-  PYPTO_TRY_REWRITE_IF(floormod(x + c1, c2), floormod(x + floormod(c1, c2), c2),
-                       c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ != 0 &&
-                           (c1.Eval()->value_ >= c2.Eval()->value_ || c1.Eval()->value_ < 0));
+    // floormod(x * c1, x * c2) => x * floormod(c1, c2) when c2 != 0 and x != 0
+    PYPTO_TRY_REWRITE_IF(floormod(x * c1, x * c2), x * floormod(c1, c2),
+                         c2.Eval()->value_ != 0 && (CanProveGE(x.Eval(), 1) || CanProveLE(x.Eval(), -1)));
+
+    // floormod(x + c1, c2) => floormod(x + floormod(c1, c2), c2)
+    // when c2 > 0 and c1 % c2 != 0 and |c1| >= c2
+    PYPTO_TRY_REWRITE_IF(floormod(x + c1, c2), floormod(x + floormod(c1, c2), c2),
+                         c2.Eval()->value_ > 0 && c1.Eval()->value_ % c2.Eval()->value_ != 0 &&
+                             (c1.Eval()->value_ >= c2.Eval()->value_ || c1.Eval()->value_ < 0));
+  }
 
   // Bound-dependent: floormod(x, c) => x when 0 <= x < c (dormant in PR 3)
   PYPTO_TRY_REWRITE_IF(
@@ -693,43 +705,45 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MinPtr& op) {
   // min(c1, min(x, c2)) => min(x, min(c1, c2))
   PYPTO_TRY_REWRITE(min(c1, min(x, c2)), min(x, min(c1, c2)));
 
-  // Factor out common subexpressions
-  // min(y - x, z - x) => min(y, z) - x
-  PYPTO_TRY_REWRITE(min(y - x, z - x), min(y, z) - x);
-  // min(x - y, x - z) => x - max(y, z)
-  PYPTO_TRY_REWRITE(min(x - y, x - z), x - max(y, z));
-  // min(x + y, x + z) => x + min(y, z)
-  PYPTO_TRY_REWRITE(min(x + y, x + z), x + min(y, z));
-  // min(y + x, x + z) => x + min(y, z)
-  PYPTO_TRY_REWRITE(min(y + x, x + z), x + min(y, z));
-  // min(x + y, z + x) => x + min(y, z)
-  PYPTO_TRY_REWRITE(min(x + y, z + x), x + min(y, z));
-  // min(y + x, z + x) => x + min(y, z)
-  PYPTO_TRY_REWRITE(min(y + x, z + x), x + min(y, z));
+  if (!WrapsAtNodeWidth(GetScalarDtype(ret))) {  // offsets moved across min may wrap
+    // Factor out common subexpressions
+    // min(y - x, z - x) => min(y, z) - x
+    PYPTO_TRY_REWRITE(min(y - x, z - x), min(y, z) - x);
+    // min(x - y, x - z) => x - max(y, z)
+    PYPTO_TRY_REWRITE(min(x - y, x - z), x - max(y, z));
+    // min(x + y, x + z) => x + min(y, z)
+    PYPTO_TRY_REWRITE(min(x + y, x + z), x + min(y, z));
+    // min(y + x, x + z) => x + min(y, z)
+    PYPTO_TRY_REWRITE(min(y + x, x + z), x + min(y, z));
+    // min(x + y, z + x) => x + min(y, z)
+    PYPTO_TRY_REWRITE(min(x + y, z + x), x + min(y, z));
+    // min(y + x, z + x) => x + min(y, z)
+    PYPTO_TRY_REWRITE(min(y + x, z + x), x + min(y, z));
 
-  // Constant comparison for add offsets
-  // min(x + c1, x + c2) => x + min(c1, c2) (resolves to x + smaller)
-  if ((min(x + c1, x + c2)).Match(ret)) {
-    if (c1.Eval()->value_ < c2.Eval()->value_) {
-      return RecursiveRewrite((x + c1).Eval());
-    } else {
-      return RecursiveRewrite((x + c2).Eval());
+    // Constant comparison for add offsets
+    // min(x + c1, x + c2) => x + min(c1, c2) (resolves to x + smaller)
+    if ((min(x + c1, x + c2)).Match(ret)) {
+      if (c1.Eval()->value_ < c2.Eval()->value_) {
+        return RecursiveRewrite((x + c1).Eval());
+      } else {
+        return RecursiveRewrite((x + c2).Eval());
+      }
     }
-  }
-  // min(x + c1, x) and min(x, x + c1)
-  if ((min(x + c1, x)).Match(ret) || (min(x, x + c1)).Match(ret)) {
-    if (c1.Eval()->value_ < 0) {
-      return RecursiveRewrite((x + c1).Eval());
-    } else {
-      return x.Eval();
+    // min(x + c1, x) and min(x, x + c1)
+    if ((min(x + c1, x)).Match(ret) || (min(x, x + c1)).Match(ret)) {
+      if (c1.Eval()->value_ < 0) {
+        return RecursiveRewrite((x + c1).Eval());
+      } else {
+        return x.Eval();
+      }
     }
-  }
-  // min(c1 - x, c2 - x) => min(c1, c2) - x
-  if ((min(c1 - x, c2 - x)).Match(ret)) {
-    if (c1.Eval()->value_ < c2.Eval()->value_) {
-      return RecursiveRewrite((c1 - x).Eval());
-    } else {
-      return RecursiveRewrite((c2 - x).Eval());
+    // min(c1 - x, c2 - x) => min(c1, c2) - x
+    if ((min(c1 - x, c2 - x)).Match(ret)) {
+      if (c1.Eval()->value_ < c2.Eval()->value_) {
+        return RecursiveRewrite((c1 - x).Eval());
+      } else {
+        return RecursiveRewrite((c2 - x).Eval());
+      }
     }
   }
 
@@ -824,43 +838,45 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MaxPtr& op) {
   // max(c1, max(x, c2)) => max(x, max(c1, c2))
   PYPTO_TRY_REWRITE(max(c1, max(x, c2)), max(x, max(c1, c2)));
 
-  // Factor out common subexpressions
-  // max(y - x, z - x) => max(y, z) - x
-  PYPTO_TRY_REWRITE(max(y - x, z - x), max(y, z) - x);
-  // max(x - y, x - z) => x - min(y, z)
-  PYPTO_TRY_REWRITE(max(x - y, x - z), x - min(y, z));
-  // max(x + y, x + z) => x + max(y, z)
-  PYPTO_TRY_REWRITE(max(x + y, x + z), x + max(y, z));
-  // max(y + x, x + z) => x + max(y, z)
-  PYPTO_TRY_REWRITE(max(y + x, x + z), x + max(y, z));
-  // max(x + y, z + x) => x + max(y, z)
-  PYPTO_TRY_REWRITE(max(x + y, z + x), x + max(y, z));
-  // max(y + x, z + x) => x + max(y, z)
-  PYPTO_TRY_REWRITE(max(y + x, z + x), x + max(y, z));
+  if (!WrapsAtNodeWidth(GetScalarDtype(ret))) {  // offsets moved across max may wrap
+    // Factor out common subexpressions
+    // max(y - x, z - x) => max(y, z) - x
+    PYPTO_TRY_REWRITE(max(y - x, z - x), max(y, z) - x);
+    // max(x - y, x - z) => x - min(y, z)
+    PYPTO_TRY_REWRITE(max(x - y, x - z), x - min(y, z));
+    // max(x + y, x + z) => x + max(y, z)
+    PYPTO_TRY_REWRITE(max(x + y, x + z), x + max(y, z));
+    // max(y + x, x + z) => x + max(y, z)
+    PYPTO_TRY_REWRITE(max(y + x, x + z), x + max(y, z));
+    // max(x + y, z + x) => x + max(y, z)
+    PYPTO_TRY_REWRITE(max(x + y, z + x), x + max(y, z));
+    // max(y + x, z + x) => x + max(y, z)
+    PYPTO_TRY_REWRITE(max(y + x, z + x), x + max(y, z));
 
-  // Constant comparison for add offsets
-  // max(x + c1, x + c2) => x + max(c1, c2)
-  if ((max(x + c1, x + c2)).Match(ret)) {
-    if (c1.Eval()->value_ > c2.Eval()->value_) {
-      return RecursiveRewrite((x + c1).Eval());
-    } else {
-      return RecursiveRewrite((x + c2).Eval());
+    // Constant comparison for add offsets
+    // max(x + c1, x + c2) => x + max(c1, c2)
+    if ((max(x + c1, x + c2)).Match(ret)) {
+      if (c1.Eval()->value_ > c2.Eval()->value_) {
+        return RecursiveRewrite((x + c1).Eval());
+      } else {
+        return RecursiveRewrite((x + c2).Eval());
+      }
     }
-  }
-  // max(x + c1, x) and max(x, x + c1)
-  if ((max(x + c1, x)).Match(ret) || (max(x, x + c1)).Match(ret)) {
-    if (c1.Eval()->value_ > 0) {
-      return RecursiveRewrite((x + c1).Eval());
-    } else {
-      return x.Eval();
+    // max(x + c1, x) and max(x, x + c1)
+    if ((max(x + c1, x)).Match(ret) || (max(x, x + c1)).Match(ret)) {
+      if (c1.Eval()->value_ > 0) {
+        return RecursiveRewrite((x + c1).Eval());
+      } else {
+        return x.Eval();
+      }
     }
-  }
-  // max(c1 - x, c2 - x) => max(c1, c2) - x
-  if ((max(c1 - x, c2 - x)).Match(ret)) {
-    if (c1.Eval()->value_ > c2.Eval()->value_) {
-      return RecursiveRewrite((c1 - x).Eval());
-    } else {
-      return RecursiveRewrite((c2 - x).Eval());
+    // max(c1 - x, c2 - x) => max(c1, c2) - x
+    if ((max(c1 - x, c2 - x)).Match(ret)) {
+      if (c1.Eval()->value_ > c2.Eval()->value_) {
+        return RecursiveRewrite((c1 - x).Eval());
+      } else {
+        return RecursiveRewrite((c2 - x).Eval());
+      }
     }
   }
 
@@ -963,12 +979,15 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const EqPtr& op) {
   PYPTO_TRY_REWRITE(y + x == z + x, y == z);
 
   // Constant rearrangement
-  // x - c1 == c2 => x == c1 + c2
-  PYPTO_TRY_REWRITE(x - c1 == c2, x == c1 + c2);
-  // x + c1 == c2 => x == c2 - c1
-  PYPTO_TRY_REWRITE(x + c1 == c2, x == c2 - c1);
-  // c1 - x == c2 => x == c1 - c2
-  PYPTO_TRY_REWRITE(c1 - x == c2, x == c1 - c2);
+  if (!WrapsAtNodeWidth(GetScalarDtype(a))) {  // constant moves can emit a literal outside the dtype
+    // x - c1 == c2 => x == c1 + c2
+    PYPTO_TRY_REWRITE(x - c1 == c2, x == c1 + c2);
+    // x + c1 == c2 => x == c2 - c1
+    PYPTO_TRY_REWRITE(x + c1 == c2, x == c2 - c1);
+    // c1 - x == c2 => x == c1 - c2
+    PYPTO_TRY_REWRITE(c1 - x == c2, x == c1 - c2);
+  }
+
   // c1 == x => x == c1  (canonicalize)
   PYPTO_TRY_REWRITE(c1 == x, x == c1);
 
@@ -1001,9 +1020,12 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const NePtr& op) {
   PYPTO_TRY_REWRITE(x + y != z + x, y != z);
   PYPTO_TRY_REWRITE(y + x != z + x, y != z);
 
-  // Constant rearrangement
-  PYPTO_TRY_REWRITE(x - c1 != c2, x != c1 + c2);
-  PYPTO_TRY_REWRITE(x + c1 != c2, x != c2 - c1);
+  if (!WrapsAtNodeWidth(GetScalarDtype(a))) {  // constant moves can emit a literal outside the dtype
+    // Constant rearrangement
+    PYPTO_TRY_REWRITE(x - c1 != c2, x != c1 + c2);
+    PYPTO_TRY_REWRITE(x + c1 != c2, x != c2 - c1);
+  }
+
   PYPTO_TRY_REWRITE(c1 != x, x != c1);
 
   return ret;
@@ -1029,55 +1051,46 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LtPtr& op) {
   // x < x => false
   PYPTO_TRY_REWRITE(x < x, MakeConstBool(false));
 
-  // Cancellation
-  PYPTO_TRY_REWRITE(x + y < x + z, y < z);
-  PYPTO_TRY_REWRITE(y + x < x + z, y < z);
-  PYPTO_TRY_REWRITE(x + y < z + x, y < z);
-  PYPTO_TRY_REWRITE(y + x < z + x, y < z);
-  PYPTO_TRY_REWRITE(y - x < z - x, y < z);
-  PYPTO_TRY_REWRITE(x - y < x - z, z < y);
+  if (!WrapsAtNodeWidth(GetScalarDtype(a))) {  // the sums moved across `<` may wrap
+    // Cancellation
+    PYPTO_TRY_REWRITE(x + y < x + z, y < z);
+    PYPTO_TRY_REWRITE(y + x < x + z, y < z);
+    PYPTO_TRY_REWRITE(x + y < z + x, y < z);
+    PYPTO_TRY_REWRITE(y + x < z + x, y < z);
+    PYPTO_TRY_REWRITE(y - x < z - x, y < z);
+    PYPTO_TRY_REWRITE(x - y < x - z, z < y);
 
-  // x < x + z => 0 < z
-  PYPTO_TRY_REWRITE(x < x + z, MakeConstInt(0, GetScalarDtype(a)) < z);
-  PYPTO_TRY_REWRITE(x < z + x, MakeConstInt(0, GetScalarDtype(a)) < z);
-  // x < x - z => z < 0
-  PYPTO_TRY_REWRITE(x < x - z, z < MakeConstInt(0, GetScalarDtype(a)));
+    // x < x + z => 0 < z
+    PYPTO_TRY_REWRITE(x < x + z, MakeConstInt(0, GetScalarDtype(a)) < z);
+    PYPTO_TRY_REWRITE(x < z + x, MakeConstInt(0, GetScalarDtype(a)) < z);
+    // x < x - z => z < 0
+    PYPTO_TRY_REWRITE(x < x - z, z < MakeConstInt(0, GetScalarDtype(a)));
 
-  // Constant rearrangement. Each rule needs the sum the program emits not to wrap at
-  // x's dtype (see OffsetRewriteIsSafe), or `x + c1 < c2` and `x < c2 - c1` disagree.
-  PYPTO_TRY_REWRITE_IF(
-      x + c1 < c2, x < c2 - c1,
-      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, false, c2.Eval()->value_ - c1.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      x - c1 < c2, x < c2 + c1,
-      OffsetRewriteIsSafe(x.Eval(), -c1.Eval()->value_, false, c2.Eval()->value_ + c1.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 - x < c2, c1 - c2 < x,
-      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, true, c1.Eval()->value_ - c2.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 < x + c2, c1 - c2 < x,
-      OffsetRewriteIsSafe(x.Eval(), c2.Eval()->value_, false, c1.Eval()->value_ - c2.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 < x - c2, c1 + c2 < x,
-      OffsetRewriteIsSafe(x.Eval(), -c2.Eval()->value_, false, c1.Eval()->value_ + c2.Eval()->value_));
+    // Constant rearrangement
+    PYPTO_TRY_REWRITE(x + c1 < c2, x < c2 - c1);
+    PYPTO_TRY_REWRITE(x - c1 < c2, x < c2 + c1);
+    PYPTO_TRY_REWRITE(c1 - x < c2, c1 - c2 < x);
+    PYPTO_TRY_REWRITE(c1 < x + c2, c1 - c2 < x);
+    PYPTO_TRY_REWRITE(c1 < x - c2, c1 + c2 < x);
 
-  // Multiply by positive/negative constant
-  PYPTO_TRY_REWRITE_IF(x * c1 < y * c1, x < y, c1.Eval()->value_ > 0);
-  PYPTO_TRY_REWRITE_IF(x * c1 < y * c1, y < x, c1.Eval()->value_ < 0);
+    // Multiply by positive/negative constant
+    PYPTO_TRY_REWRITE_IF(x * c1 < y * c1, x < y, c1.Eval()->value_ > 0);
+    PYPTO_TRY_REWRITE_IF(x * c1 < y * c1, y < x, c1.Eval()->value_ < 0);
 
-  // FloorDiv comparisons
-  // floordiv(x, c1) < c2 => x < c1 * c2 when c1 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x, c1) < c2, x < c1 * c2, c1.Eval()->value_ > 0);
-  // c1 < floordiv(x, c2) => (c1+1)*c2 - 1 < x when c2 > 0
-  PYPTO_TRY_REWRITE_IF(c1 < floordiv(x, c2), (c1 + 1) * c2 - 1 < x, c2.Eval()->value_ > 0);
-  // floordiv(x, c1) * c1 < x => 0 < floormod(x, c1) when c1 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x, MakeConstInt(0, GetScalarDtype(a)) < floormod(x, c1),
-                       c1.Eval()->value_ > 0);
-  // floordiv(x, c1) * c1 < x + y => 0 < floormod(x, c1) + y when c1 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x + y, MakeConstInt(0, GetScalarDtype(a)) < floormod(x, c1) + y,
-                       c1.Eval()->value_ > 0);
-  // floordiv(x, c1) * c1 < x - y => y < floormod(x, c1) when c1 > 0
-  PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x - y, y < floormod(x, c1), c1.Eval()->value_ > 0);
+    // FloorDiv comparisons
+    // floordiv(x, c1) < c2 => x < c1 * c2 when c1 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x, c1) < c2, x < c1 * c2, c1.Eval()->value_ > 0);
+    // c1 < floordiv(x, c2) => (c1+1)*c2 - 1 < x when c2 > 0
+    PYPTO_TRY_REWRITE_IF(c1 < floordiv(x, c2), (c1 + 1) * c2 - 1 < x, c2.Eval()->value_ > 0);
+    // floordiv(x, c1) * c1 < x => 0 < floormod(x, c1) when c1 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x, MakeConstInt(0, GetScalarDtype(a)) < floormod(x, c1),
+                         c1.Eval()->value_ > 0);
+    // floordiv(x, c1) * c1 < x + y => 0 < floormod(x, c1) + y when c1 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x + y,
+                         MakeConstInt(0, GetScalarDtype(a)) < floormod(x, c1) + y, c1.Eval()->value_ > 0);
+    // floordiv(x, c1) * c1 < x - y => y < floormod(x, c1) when c1 > 0
+    PYPTO_TRY_REWRITE_IF(floordiv(x, c1) * c1 < x - y, y < floormod(x, c1), c1.Eval()->value_ > 0);
+  }
 
   // Min/Max decomposition into boolean
   // min(x, y) < z => x < z || y < z
@@ -1112,35 +1125,27 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const LePtr& op) {
   // x <= x => true
   PYPTO_TRY_REWRITE(x <= x, MakeConstBool(true));
 
-  // Cancellation
-  PYPTO_TRY_REWRITE(x + y <= x + z, y <= z);
-  PYPTO_TRY_REWRITE(y + x <= x + z, y <= z);
-  PYPTO_TRY_REWRITE(x + y <= z + x, y <= z);
-  PYPTO_TRY_REWRITE(y + x <= z + x, y <= z);
-  PYPTO_TRY_REWRITE(y - x <= z - x, y <= z);
-  // x - y <= x - z => z <= y
-  PYPTO_TRY_REWRITE(x - y <= x - z, z <= y);
+  if (!WrapsAtNodeWidth(GetScalarDtype(a))) {  // the sums moved across `<=` may wrap
+    // Cancellation
+    PYPTO_TRY_REWRITE(x + y <= x + z, y <= z);
+    PYPTO_TRY_REWRITE(y + x <= x + z, y <= z);
+    PYPTO_TRY_REWRITE(x + y <= z + x, y <= z);
+    PYPTO_TRY_REWRITE(y + x <= z + x, y <= z);
+    PYPTO_TRY_REWRITE(y - x <= z - x, y <= z);
+    // x - y <= x - z => z <= y
+    PYPTO_TRY_REWRITE(x - y <= x - z, z <= y);
 
-  // Constant rearrangement
-  PYPTO_TRY_REWRITE_IF(
-      x + c1 <= c2, x <= c2 - c1,
-      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, false, c2.Eval()->value_ - c1.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      x - c1 <= c2, x <= c2 + c1,
-      OffsetRewriteIsSafe(x.Eval(), -c1.Eval()->value_, false, c2.Eval()->value_ + c1.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 <= x + c2, c1 - c2 <= x,
-      OffsetRewriteIsSafe(x.Eval(), c2.Eval()->value_, false, c1.Eval()->value_ - c2.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 <= x - c2, c1 + c2 <= x,
-      OffsetRewriteIsSafe(x.Eval(), -c2.Eval()->value_, false, c1.Eval()->value_ + c2.Eval()->value_));
-  PYPTO_TRY_REWRITE_IF(
-      c1 - x <= c2, c1 - c2 <= x,
-      OffsetRewriteIsSafe(x.Eval(), c1.Eval()->value_, true, c1.Eval()->value_ - c2.Eval()->value_));
+    // Constant rearrangement
+    PYPTO_TRY_REWRITE(x + c1 <= c2, x <= c2 - c1);
+    PYPTO_TRY_REWRITE(x - c1 <= c2, x <= c2 + c1);
+    PYPTO_TRY_REWRITE(c1 <= x + c2, c1 - c2 <= x);
+    PYPTO_TRY_REWRITE(c1 <= x - c2, c1 + c2 <= x);
+    PYPTO_TRY_REWRITE(c1 - x <= c2, c1 - c2 <= x);
 
-  // Multiply by positive/negative constant
-  PYPTO_TRY_REWRITE_IF(x * c1 <= y * c1, x <= y, c1.Eval()->value_ > 0);
-  PYPTO_TRY_REWRITE_IF(x * c1 <= y * c1, y <= x, c1.Eval()->value_ < 0);
+    // Multiply by positive/negative constant
+    PYPTO_TRY_REWRITE_IF(x * c1 <= y * c1, x <= y, c1.Eval()->value_ > 0);
+    PYPTO_TRY_REWRITE_IF(x * c1 <= y * c1, y <= x, c1.Eval()->value_ < 0);
+  }
 
   return ret;
 }
