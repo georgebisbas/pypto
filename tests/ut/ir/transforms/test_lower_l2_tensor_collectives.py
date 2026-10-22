@@ -23,6 +23,7 @@ public collective.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto._function_attrs import REQUIRE_CONTIGUOUS_OPERANDS_ATTR
 from pypto.pypto_core import ir, passes
 
 SIZE = 64
@@ -155,6 +156,20 @@ def test_synthesized_kernel_carries_builtin_template_attrs():
     # them (asserted end-to-end in the ST).
     template_vars = dict(item.split("=", 1) for item in attrs["builtin_template_vars"].split(","))
     assert template_vars == {"dtype_cpp": "float"}
+
+
+def test_synthesized_kernel_requires_contiguous_operands():
+    """The kernel opts in to the runtime contiguity check (RFC #2521 O1 criterion 7).
+
+    The builtin kernel reads every operand as dense row-major; this attribute is
+    what makes orchestration codegen check each operand's runtime
+    ``is_contiguous`` flag before the submit.
+    """
+    result = passes.lower_l2_tensor_collectives()(_build_program())
+
+    kernel = _get_func(result, _KERNEL_NAME)
+    assert kernel is not None
+    assert dict(kernel.attrs)[REQUIRE_CONTIGUOUS_OPERANDS_ATTR] is True
 
 
 def test_synthesized_kernel_returns_its_target_parameter():

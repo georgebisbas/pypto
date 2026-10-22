@@ -256,9 +256,14 @@ struct BuiltinKernelSpec {
         spec.param_names[i], CanonicalParamType(spec.param_distributed[i], call->args_[i], call->span_),
         call->span_));
   }
+  // The builtin kernel addresses every operand as dense row-major from its view
+  // origin. The type deducer rejects statically provable violations; this attr
+  // asks orchestration codegen for the runtime half (RFC #2521 O1 criterion 7):
+  // a contiguity check on each operand before the submit.
   std::vector<std::pair<std::string, std::any>> attrs = {
       {kAttrBuiltinTemplateDir, spec.template_dir},
       {kAttrBuiltinTemplateVars, spec.template_vars},
+      {kAttrRequireContiguousOperands, true},
   };
   // Window-as-result: the kernel returns `target`, matching the public op's
   // result so the call site stays a plain rebind.

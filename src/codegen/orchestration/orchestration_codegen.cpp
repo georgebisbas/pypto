@@ -3079,12 +3079,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// historical per-path emission order so generated orchestration C++ is
     /// byte-identical across the refactor. See ``BuildDirectCallDispatchPlan``.
     bool deps_before_launch{false};
+    /// Runtime operand checks emitted ahead of the task (see
+    /// ``BuildContiguityGuardLines``); empty for every kernel without
+    /// ``kAttrRequireContiguousOperands``, so other dispatches are unchanged.
+    std::vector<std::string> guard_lines;
 
     /// Emit the full task-dispatch sequence using the supplied codegen's emit surface.
     /// Consumes ``*this`` (rvalue-reference) — the plan is moved-from after emission.
     void Emit(OrchestrationStmtCodegen& cg) && {
       cg.EmitBlankLine();
       cg.EmitIndentedLine(comment);
+      for (const auto& line : guard_lines) {
+        cg.EmitIndentedLine(line);
+      }
       cg.EmitTaskParamsDecl(task_var);
       for (const auto& p : params) {
         cg.EmitIndentedLine(task_var + "." + ArgDirectionToMethodName(p.direction) + "(" + p.value + ");");
@@ -3182,7 +3189,51 @@ class OrchestrationStmtCodegen : public CodegenBase {
         ShouldCaptureTaskOutputs(call, capture_plain_task_id), std::move(submit.pre_lines));
     // Direct calls historically emit set_dependencies before the launch spec.
     plan.deps_before_launch = true;
+    plan.guard_lines = BuildContiguityGuardLines(call, callee_func);
     return plan;
+  }
+
+  /// Runtime half of a kernel's ``kAttrRequireContiguousOperands`` contract:
+  /// one ``is_contiguous`` check per tensor argument, chained with ``else if``
+  /// so only the first violation is reported.
+  ///
+  /// The checks latch ``SIMPLER_ERROR_INVALID_ARGS`` and deliberately do not
+  /// ``return``: this dispatch may sit inside a scope, a loop, or a function
+  /// whose return type is not ``void``, and the runtime already turns every
+  /// later ``submit_task`` / scope boundary into a no-op once a fatal is
+  /// latched, so the guarded submit below never launches.
+  ///
+  /// ``call->args_[i]`` binds ``callee_func->params_[i]`` for every tensor
+  /// argument: a Call has full coverage, and a Submit's caller-supplied args are
+  /// the leading region (its gap and CommCtx suffix carry no tensor operands).
+  std::vector<std::string> BuildContiguityGuardLines(const CallPtr& call, const FunctionPtr& callee_func) {
+    std::vector<std::string> lines;
+    if (!callee_func->GetAttr<bool>(kAttrRequireContiguousOperands, false)) {
+      return lines;
+    }
+    const std::string prefix = "rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, \"" + callee_func->name_ + ": ";
+    std::string keyword = "if";
+    for (size_t i = 0; i < call->args_.size() && i < callee_func->params_.size(); ++i) {
+      const auto& arg = call->args_[i];
+      if (!AsTensorTypeLike(arg->GetType())) {
+        continue;
+      }
+      const std::string var_name = TryGetVarName(arg);
+      INTERNAL_CHECK_SPAN(!var_name.empty(), call->span_)
+          << "Internal error: tensor argument " << i << " of '" << callee_func->name_
+          << "' does not resolve to a variable, so its contiguity cannot be checked";
+      lines.push_back(keyword + " (!" + GetExternalTensorName(var_name) + ".is_contiguous) {");
+      lines.push_back("    " + prefix + callee_func->params_[i]->name_hint_ +
+                      " must be a contiguous row-major view\");");
+      keyword = "} else if";
+    }
+    if (!lines.empty()) {
+      lines.insert(lines.begin(),
+                   "// " + callee_func->name_ +
+                       " reads every operand as dense row-major (require_contiguous_operands)");
+      lines.push_back("}");
+    }
+    return lines;
   }
 
   /// ``kernel_func`` is the AIC/AIV kernel the wrapper dispatches (``spmd_func`` is
