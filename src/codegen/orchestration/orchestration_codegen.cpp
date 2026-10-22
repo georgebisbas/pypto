@@ -3222,6 +3222,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``call->args_[i]`` binds ``callee_func->params_[i]`` for every tensor
   /// argument: a Call has full coverage, and a Submit's caller-supplied args are
   /// the leading region (its gap and CommCtx suffix carry no tensor operands).
+  ///
+  /// **The verdict must agree on every rank.** Suppressing one rank's submit while
+  /// its peers launch leaves them blocked in the kernel's ``ExchangeBarrier`` — a
+  /// hang rather than a rejection, which the kernel template states as its own
+  /// precondition ("early returns must agree on every rank"). That holds here
+  /// because operand strides are a property of the program, not of the data: every
+  /// rank runs the same chip orchestration over windows of the same shape, so a
+  /// violating operand violates on all ranks at once and every rank skips. The
+  /// three runtime checks in the HOST rail's entry template (``nranks``,
+  /// ``core_num``, signal stride) rest on the same symmetry. A caller that built
+  /// genuinely rank-divergent operand strides would break it, and no cheap
+  /// preflight can detect that — agreeing across ranks needs a working collective,
+  /// which is the thing being guarded.
   std::vector<std::string> BuildContiguityGuardLines(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<std::string> lines;
     if (!callee_func->GetAttr<bool>(kAttrRequireContiguousOperands, false)) {

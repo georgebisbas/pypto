@@ -201,7 +201,12 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   `is_contiguous` check per tensor operand ahead of the submit, latching
   `SIMPLER_ERROR_INVALID_ARGS` on the first violation (the runtime then drops
   the submit). That covers a view whose strides only exist at dispatch time,
-  which the type deducer cannot see. The other check that would need a runtime
+  which the type deducer cannot see. The verdict must agree on every rank —
+  suppressing one rank's submit while its peers launch would leave them in the
+  kernel's `ExchangeBarrier` (a hang, not a rejection). It does agree, because
+  operand strides are a property of the program rather than the data: every rank
+  runs the same chip orchestration over windows of the same shape. The HOST
+  entry's `nranks` / `core_num` / signal-stride checks rest on the same symmetry. The other check that would need a runtime
   form (signal stride `>= B`) is still enforced statically at lowering, where
   both `S` and the folded `B` are compile-time values.
 - **Rank count.** The kernel reads `CommContext::rankNum`, so an explicit device
