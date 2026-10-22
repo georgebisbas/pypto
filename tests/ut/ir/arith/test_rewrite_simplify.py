@@ -595,6 +595,17 @@ class TestComparisonRules:
         assert result.left is x
         assert_is_const_int(result.right, 12)
 
+    def test_index_constant_move_is_not_wrap_gated(self):
+        """i + 1 < 5 => i < 4 at INDEX, even for an unbounded i.
+
+        The wrap gate skips constant moves only for dtypes narrower than 64 bits; INDEX keeps the
+        index-arithmetic convention of never wrapping. This pins that the gate does not over-trigger
+        and turn off `i + 1 < n` normalisation for index arithmetic.
+        """
+        i = ir.Var("i", ir.ScalarType(IDX), S)
+        e = ir.Lt(ir.Add(i, ci(1, IDX), IDX, S), ci(5, IDX), DataType.BOOL, S)
+        assert_expr_equal(Analyzer().simplify(e), ir.Lt(i, ci(4, IDX), DataType.BOOL, S))
+
     def test_lt_min_decompose(self):
         """min(x, y) < z => x < z || y < z"""
         result = simplifier(ir.Lt(ir.Min(x, y, INT, S), z, DataType.BOOL, S))
