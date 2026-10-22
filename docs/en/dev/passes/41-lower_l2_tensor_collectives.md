@@ -71,7 +71,7 @@ function added to the program:
 | Parameters | `input, target, signal, send_counts, recv_counts` — canonical types, **not** the call site's: `input` / `send_counts` are declared plain `Tensor`, the other three `DistributedTensor` |
 | Directions | `In, InOut, InOut, In, InOut` |
 | Body | `return target` — one `ReturnStmt`, never compiled |
-| Attrs | `builtin_template_dir`, `builtin_template_vars` |
+| Attrs | `builtin_template_dir`, `builtin_template_vars`, `require_contiguous_operands` |
 
 One function is synthesized per variant and shared by every call site of that
 variant.
@@ -182,7 +182,7 @@ passes earlier, so re-reporting them here would blame the wrong pass.
 - **A runtime `core_num`.** Only a compile-time `core_num` is accepted. A runtime value would need `B`
   computed in the emitted orchestration and a runtime `S >= B` check, and orchestration has no surface for
   raising that fatal today. The HOST rail accepts a runtime value because its entry runs on the host.
-- **Operand validation is static, and aliasing is only partly covered.** The
+- **Operand validation is static apart from contiguity, and aliasing is only partly covered.** The
   `pld.tensor.all_to_all_v` type deducer rejects what the operand types alone
   prove: a non-ND layout, a stride vector that is not the packed one, a
   `valid_shape` narrower than the shape, and `input` being the *same
@@ -195,10 +195,15 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   within the same `host_orch` body and runs `CheckPairwiseDistinctWindows` over
   all five. This rail — like the InCore composite rail — sees the operands as
   enclosing-pipeline parameters and has no such provenance, so pairwise-distinct
-  windows are the caller's obligation here. There is also no runtime re-check
-  before the AIV task is submitted; the check that would need one (signal
-  stride `>= B`) is enforced statically at lowering instead, where both `S`
-  and the folded `B` are compile-time values.
+  windows are the caller's obligation here. **Contiguity is the one operand property
+  re-checked at runtime**: the synthesized kernel carries
+  `require_contiguous_operands`, and orchestration codegen emits one
+  `is_contiguous` check per tensor operand ahead of the submit, latching
+  `SIMPLER_ERROR_INVALID_ARGS` on the first violation (the runtime then drops
+  the submit). That covers a view whose strides only exist at dispatch time,
+  which the type deducer cannot see. The other check that would need a runtime
+  form (signal stride `>= B`) is still enforced statically at lowering, where
+  both `S` and the folded `B` are compile-time values.
 - **Rank count.** The kernel reads `CommContext::rankNum`, so an explicit device
   subset smaller than the context's rank count would be handled differently from
   the HOST rail, which passes the comm domain's `domain_size`.
