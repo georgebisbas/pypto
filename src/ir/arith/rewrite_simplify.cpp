@@ -79,6 +79,10 @@ ExprPtr RewriteSimplifier::Impl::RecursiveRewrite(const ExprPtr& expr) {
 /// keep the index-arithmetic convention of never wrapping.
 static bool WrapsAtNodeWidth(const DataType& dtype) { return dtype.IsInt() && dtype.GetBit() < 64; }
 
+/// Whether `a <= b + 1`, without computing `b + 1`: that overflows at b == INT64_MAX. `a - 1` is evaluated
+/// only when a > b, so a > INT64_MIN and it cannot overflow either.
+static bool AtMostOneAbove(int64_t a, int64_t b) { return a <= b || a - 1 == b; }
+
 CompareResult RewriteSimplifier::Impl::TryCompare(const ExprPtr& x, int64_t val) {
   if (!parent_) return CompareResult::kUnknown;
 
@@ -1242,9 +1246,9 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const AndPtr& op) {
   // Range contradictions
   // x < c1 && c2 < x => false when c2 + 1 >= c1
   PYPTO_TRY_REWRITE_IF((x < c1) && (c2 < x), MakeConstBool(false),
-                       c2.Eval()->value_ + 1 >= c1.Eval()->value_);
+                       AtMostOneAbove(c1.Eval()->value_, c2.Eval()->value_));
   PYPTO_TRY_REWRITE_IF((c2 < x) && (x < c1), MakeConstBool(false),
-                       c2.Eval()->value_ + 1 >= c1.Eval()->value_);
+                       AtMostOneAbove(c1.Eval()->value_, c2.Eval()->value_));
 
   // x <= c1 && c2 <= x => false when c2 > c1
   PYPTO_TRY_REWRITE_IF((x <= c1) && (c2 <= x), MakeConstBool(false), c2.Eval()->value_ > c1.Eval()->value_);
@@ -1298,9 +1302,9 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const OrPtr& op) {
 
   // x <= c1 || c2 <= x => true when c2 <= c1 + 1
   PYPTO_TRY_REWRITE_IF((x <= c1) || (c2 <= x), MakeConstBool(true),
-                       c2.Eval()->value_ <= c1.Eval()->value_ + 1);
+                       AtMostOneAbove(c2.Eval()->value_, c1.Eval()->value_));
   PYPTO_TRY_REWRITE_IF((c2 <= x) || (x <= c1), MakeConstBool(true),
-                       c2.Eval()->value_ <= c1.Eval()->value_ + 1);
+                       AtMostOneAbove(c2.Eval()->value_, c1.Eval()->value_));
 
   // x < y || x == y => x <= y
   PYPTO_TRY_REWRITE((x < y) || (x == y), x <= y);

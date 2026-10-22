@@ -16,6 +16,7 @@ from pypto.arith import Analyzer, ConstIntBound, RewriteSimplifier
 S = ir.Span.unknown()
 INT = DataType.INT64
 IDX = DataType.INDEX
+INT64_MAX = 2**63 - 1
 
 
 def make_var(name: str) -> ir.Var:
@@ -698,6 +699,17 @@ class TestBooleanRules:
         result = simplifier(ir.And(lt1, lt2, DataType.BOOL, S))
         assert_is_const_bool(result, False)
 
+    def test_and_range_contradiction_at_int64_max(self):
+        """x < 5 && INT64_MAX < x => false; the guard must not compute INT64_MAX + 1.
+
+        The guard was `c2 + 1 >= c1`, which overflows (undefined behaviour) at c2 == INT64_MAX and in
+        practice wrapped to INT64_MIN, so the contradiction was missed.
+        """
+        lt1 = ir.Lt(x, ci(5), DataType.BOOL, S)
+        lt2 = ir.Lt(ci(INT64_MAX), x, DataType.BOOL, S)
+        result = simplifier(ir.And(lt1, lt2, DataType.BOOL, S))
+        assert_is_const_bool(result, False)
+
     def test_or_eq_ne_tautology(self):
         """x == y || x != y => true"""
         eq = ir.Eq(x, y, DataType.BOOL, S)
@@ -710,6 +722,17 @@ class TestBooleanRules:
         le = ir.Le(x, y, DataType.BOOL, S)
         lt = ir.Lt(y, x, DataType.BOOL, S)
         result = simplifier(ir.Or(le, lt, DataType.BOOL, S))
+        assert_is_const_bool(result, True)
+
+    def test_or_range_tautology_at_int64_max(self):
+        """x <= INT64_MAX || 7 <= x => true; the guard must not compute INT64_MAX + 1.
+
+        The guard was `c2 <= c1 + 1`, which overflows (undefined behaviour) at c1 == INT64_MAX and in
+        practice wrapped to INT64_MIN, so the tautology was missed.
+        """
+        le1 = ir.Le(x, ci(INT64_MAX), DataType.BOOL, S)
+        le2 = ir.Le(ci(7), x, DataType.BOOL, S)
+        result = simplifier(ir.Or(le1, le2, DataType.BOOL, S))
         assert_is_const_bool(result, True)
 
     def test_or_lt_eq_to_le(self):
