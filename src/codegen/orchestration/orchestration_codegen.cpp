@@ -3223,28 +3223,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// argument: a Call has full coverage, and a Submit's caller-supplied args are
   /// the leading region (its gap and CommCtx suffix carry no tensor operands).
   ///
-  /// **Known limitation: the verdict is per rank and is not coordinated.**
-  /// Suppressing one rank's submit while its peers launch leaves them blocked in
-  /// the kernel's ``ExchangeBarrier`` — a hang rather than a rejection, which the
-  /// kernel template states as its own precondition ("early returns must agree on
-  /// every rank"). A latched fatal cannot be undone into a launch either: the
-  /// runtime drops every later ``submit_task``, so "report but still participate"
-  /// is not available.
-  ///
-  /// Divergence is reachable. ``CheckStaticContiguousPayload`` bails out rather
-  /// than rejecting once an extent or stride is dynamic, so an operand sliced from
-  /// a tensor whose extent comes from a runtime scalar compiles, and its
-  /// contiguity can differ per rank when the host supplies different values. That
-  /// is exactly the case this guard exists for, so its value and its hazard share
-  /// one input.
-  ///
-  /// It is still preferred to the alternative: unguarded, the same operand is read
-  /// with the wrong layout and corrupts the exchange silently. Guarded, the
-  /// uniform case fails cleanly on every rank, and the divergent case fails as a
-  /// watchdog hang with a fatal naming the operand on the offending rank — loud
-  /// either way. Coordinating the verdict would need a collective, which is the
-  /// thing being guarded; the alternative is rejecting non-statically-contiguous
-  /// operands at compile time, which would also reject programs that work today.
+  /// The verdict is per rank and cannot be coordinated: suppressing one rank's
+  /// submit while its peers launch would leave them blocked in the kernel's
+  /// ``ExchangeBarrier``. LowerL2TensorCollectives therefore rejects at compile
+  /// time every operand built in the orchestration that is not provably row-major
+  /// (an unproven ``tensor.slice`` or a ``tensor.transpose``), so the only operands
+  /// that reach this check are host-supplied ones, which argument packing makes
+  /// row-major on every rank. It stays as defence in depth.
   std::vector<std::string> BuildContiguityGuardLines(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<std::string> lines;
     if (!callee_func->GetAttr<bool>(kAttrRequireContiguousOperands, false)) {

@@ -449,10 +449,14 @@ those, by resolving each operand back to its `WindowBuffer` (see below); on the
 InCore and CHIP rails the operands arrive as function parameters with no such
 provenance, so distinctness is the caller's obligation.
 
-Contiguity is also enforced at runtime on the managed CHIP/L2 rail, for views
-whose strides only exist at dispatch time. `LowerL2TensorCollectives` marks the
-synthesized kernel `require_contiguous_operands`, and orchestration codegen
-emits one `is_contiguous` check per operand ahead of its `rt_submit_aiv_task`.
+On the managed CHIP/L2 rail, an operand built in the orchestration must be
+provably row-major: `LowerL2TensorCollectives` rejects one derived from a
+`tensor.transpose` or from a `tensor.slice` that narrows more than the leading
+dimension of a statically shaped tensor. Such a view's contiguity could
+otherwise differ per rank, and a one-sided runtime rejection would hang the
+peers in the kernel's barrier. As a backstop, the pass marks the synthesized
+kernel `require_contiguous_operands`, and orchestration codegen emits one
+`is_contiguous` check per operand ahead of its `rt_submit_aiv_task`.
 The first non-contiguous operand latches `SIMPLER_ERROR_INVALID_ARGS` naming it
 (`__builtin_all_to_all_v__fp32: signal must be a contiguous row-major view`),
 and the runtime then drops the submit. A non-zero view offset is fine — the

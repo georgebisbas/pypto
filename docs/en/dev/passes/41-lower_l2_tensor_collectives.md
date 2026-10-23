@@ -195,23 +195,22 @@ passes earlier, so re-reporting them here would blame the wrong pass.
   within the same `host_orch` body and runs `CheckPairwiseDistinctWindows` over
   all five. This rail — like the InCore composite rail — sees the operands as
   enclosing-pipeline parameters and has no such provenance, so pairwise-distinct
-  windows are the caller's obligation here. **Contiguity is the one operand property
-  re-checked at runtime**: the synthesized kernel carries
+  windows are the caller's obligation here. **Contiguity is decided at compile
+  time here, with a runtime backstop.** The type deducer cannot see a slice's
+  strides (a sliced type carries none), and a runtime verdict would be per rank:
+  suppressing one rank's submit while its peers launch leaves them in the
+  kernel's `ExchangeBarrier`, a hang rather than a rejection. So this pass
+  traces each operand back through every value that can reach it (`reshape`,
+  ND `view`, loop-carried and `if`/`for`/`while` results) and rejects one
+  derived from a `tensor.transpose` or from a `tensor.slice` it cannot prove
+  row-major. A slice that narrows only the leading dimension of a statically
+  shaped tensor is accepted. Params, windows, `tensor.create` and kernel results
+  are row-major. The synthesized kernel also carries
   `require_contiguous_operands`, and orchestration codegen emits one
   `is_contiguous` check per tensor operand ahead of the submit, latching
-  `SIMPLER_ERROR_INVALID_ARGS` on the first violation (the runtime then drops
-  the submit). That covers a view whose strides only exist at dispatch time,
-  which the type deducer cannot see. **The verdict is per rank and is not
-  coordinated**, which is a known limitation: suppressing one rank's submit while
-  its peers launch leaves them in the kernel's `ExchangeBarrier` (a hang, not a
-  rejection), and a latched fatal cannot be turned back into a launch because the
-  runtime drops every later submit. Divergence is reachable — the static check
-  bails out once an extent or stride is dynamic, so an operand sliced from a
-  runtime-sized tensor compiles and its contiguity can differ per rank. That is
-  the same input the guard exists for. It is still preferred to the unguarded
-  behaviour, where the operand is read with the wrong layout and corrupts the
-  exchange silently: the uniform case now fails cleanly on every rank, and the
-  divergent case fails as a watchdog hang with a fatal naming the operand. The other check that would need a runtime
+  `SIMPLER_ERROR_INVALID_ARGS` on the first violation; after the compile-time
+  check it only sees host-supplied operands, which argument packing makes
+  row-major. The other check that would need a runtime
   form (signal stride `>= B`) is still enforced statically at lowering, where
   both `S` and the folded `B` are compile-time values.
 - **Rank count.** The kernel reads `CommContext::rankNum`, so an explicit device

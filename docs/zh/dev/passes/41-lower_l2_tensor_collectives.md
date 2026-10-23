@@ -175,19 +175,17 @@ pass 之前就已运行，在这里重复报告会指向错误的 pass。
   `LowerHostTensorCollectives` 能在同一个 `host_orch` 函数体内把每个操作数溯源回
   其 `WindowBuffer`，并对五个操作数运行 `CheckPairwiseDistinctWindows`。本通路
   —— 与 InCore composite 通路一样 —— 看到的操作数是外层 pipeline 的参数，没有这样
-  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。**连续性是唯一在运行期复检的
-  操作数属性**：合成的 kernel 带有 `require_contiguous_operands`，orchestration
-  codegen 会在提交之前为每个 tensor 操作数生成一条 `is_contiguous` 检查，并在第一
-  个违规处锁存 `SIMPLER_ERROR_INVALID_ARGS`（随后运行时丢弃该次提交）。这覆盖了
-  步长只在派发时才确定、类型推导看不到的视图。**该判定是按 rank 独立做出的，并未跨 rank 协调**，这是一项已知限制：
-  若只抑制某一个 rank 的提交而其对端仍然启动，对端会阻塞在 kernel 的
-  `ExchangeBarrier` 上（表现为挂死，而非拒绝）；而且一旦锁存 fatal，运行时会丢弃
-  其后所有提交，因此也无法「报错但仍参与」。这种分歧是可达的：静态检查在 extent
-  或 stride 为动态值时会直接放行，因此从运行期尺寸的 tensor 上切出的操作数能够通过
-  编译，其连续性可能因 rank 而异——而这正是该 guard 所针对的输入。即便如此，它仍
-  优于不加检查：不加检查时该操作数会以错误的布局被读取并静默损坏数据；加上检查后，
-  一致的情形在所有 rank 上干净地失败，分歧的情形则表现为看门狗挂死，并在违规 rank
-  上留下指明操作数的 fatal。另一项需要运行期形式的检查
+  的溯源能力，因此在这里「窗口两两互不相同」是调用方的义务。**连续性在本 pass 中于编译期判定，
+  并保留运行期兜底**。类型推导看不到切片的步长（切片类型不携带 stride），而运行期判定是按
+  rank 独立做出的：若只抑制某一个 rank 的提交而其对端仍然启动，对端会阻塞在 kernel 的
+  `ExchangeBarrier` 上（表现为挂死，而非拒绝）。因此本 pass 会沿着所有可能到达操作数的值
+  （`reshape`、ND `view`、循环携带值以及 `if`/`for`/`while` 的结果）追溯每个操作数，并拒绝
+  由 `tensor.transpose`、或由无法证明为行主序的 `tensor.slice` 派生的操作数。仅收窄静态形状
+  tensor 首维的切片会被接受；参数、窗口、`tensor.create` 与 kernel 结果均为行主序。合成的
+  kernel 仍带有 `require_contiguous_operands`，orchestration codegen 会在提交之前为每个
+  tensor 操作数生成一条 `is_contiguous` 检查，并在第一个违规处锁存
+  `SIMPLER_ERROR_INVALID_ARGS`；经过编译期检查后，它只会看到由 host 提供、并已在参数打包时
+  保证为行主序的操作数。另一项需要运行期形式的检查
   （signal stride `>= B`）仍由 lowering 阶段静态校验：`S` 与折叠出的 `B` 都是编译
   期常量。
 - **rank 数**。kernel 读取 `CommContext::rankNum`，因此当显式设备子集小于 context
