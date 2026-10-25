@@ -32,6 +32,18 @@ target_include_directories(pypto_bounded_kernel_index_test PRIVATE ${CMAKE_SOURC
 target_compile_options(pypto_bounded_kernel_index_test PRIVATE -UNDEBUG)
 add_test(NAME pypto_bounded_kernel_index_test COMMAND pypto_bounded_kernel_index_test)
 
+add_executable(pypto_span_filename_test
+    span_filename_test.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/error.cpp
+    ${CMAKE_SOURCE_DIR}/src/ir/core.cpp
+)
+target_include_directories(pypto_span_filename_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(pypto_span_filename_test PRIVATE libbacktrace)
+# Keep assert-based contract checks enabled in release builds as well.
+target_compile_options(pypto_span_filename_test PRIVATE -UNDEBUG)
+add_test(NAME pypto_span_filename_test COMMAND pypto_span_filename_test)
+
 add_executable(pypto_vf_ir_contract_test
     vf_ir_contract_test.cpp
     ${CMAKE_SOURCE_DIR}/src/core/backtrace.cpp

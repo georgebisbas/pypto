@@ -245,9 +245,9 @@ class TileInnermostDimVisitor : public IRVisitor {
       return;
     }
 
-    SiteKey key{span.filename_,  span.begin_line_,     span.begin_column_,   op_name,
-                info.dtype_name, info.innermost_bytes, info.innermost_elems, info.memory,
-                info.rows,       info.row_bytes,       info.transfer_bytes};
+    SiteKey key{span.filename_.str(), span.begin_line_,     span.begin_column_, op_name,   info.dtype_name,
+                info.innermost_bytes, info.innermost_elems, info.memory,        info.rows, info.row_bytes,
+                info.transfer_bytes};
     auto [it, inserted] = sites_.try_emplace(key, info, span, op_name);
     (void)inserted;
     ++it->second.count;

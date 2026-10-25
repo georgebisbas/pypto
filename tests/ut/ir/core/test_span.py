@@ -25,6 +25,18 @@ class TestSpan:
         assert span.end_line == 1
         assert span.end_column == 10
 
+    def test_span_filename_is_str(self):
+        """The binding materializes the interned filename as a Python str.
+
+        `Span` stores a `Filename` handle internally; the Python surface must
+        still hand back a real `str`, and two spans created from the same name
+        must agree on it.
+        """
+        span = ir.Span("test.py", 1, 1, 1, 1)
+        assert isinstance(span.filename, str)
+        assert span.filename == "test.py"
+        assert ir.Span("test.py", 2, 2, 2, 2).filename == span.filename
+
     def test_span_to_string(self):
         """Test Span to_string method."""
         span = ir.Span("test.py", 10, 20, 10, 30)

@@ -362,7 +362,8 @@ void BindIR(nb::module_& m) {
                   "Create an unknown/invalid span for cases where source location is unavailable")
       .def("__repr__", &Span::to_string)
       .def("__str__", &Span::to_string)
-      .def_ro("filename", &Span::filename_, "Source filename")
+      .def_prop_ro(
+          "filename", [](const Span& span) -> std::string { return span.filename_.str(); }, "Source filename")
       .def_ro("begin_line", &Span::begin_line_, "Beginning line (1-indexed)")
       .def_ro("begin_column", &Span::begin_column_, "Beginning column (1-indexed)")
       .def_ro("end_line", &Span::end_line_, "Ending line (1-indexed)")

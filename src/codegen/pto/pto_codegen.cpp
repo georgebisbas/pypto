@@ -2655,7 +2655,7 @@ std::string PTOCodegen::LocSuffix() const {
   if (span.filename_.empty() || !span.is_valid()) return "";
   // is_valid() admits an unknown column (-1); MLIR does not.
   const int column = span.begin_column_ > 0 ? span.begin_column_ : 1;
-  return " loc(\"" + EscapeMlirString(span.filename_) + "\":" + std::to_string(span.begin_line_) + ":" +
+  return " loc(\"" + EscapeMlirString(span.filename_.str()) + "\":" + std::to_string(span.begin_line_) + ":" +
          std::to_string(column) + ")";
 }
 

@@ -251,7 +251,7 @@ class IRSerializer::Impl {
 
   msgpack::object SerializeSpan(const Span& span, msgpack::zone& zone) {
     std::map<std::string, msgpack::object> span_map;
-    span_map["filename"] = msgpack::object(span.filename_, zone);
+    span_map["filename"] = msgpack::object(span.filename_.str(), zone);
     span_map["begin_line"] = msgpack::object(span.begin_line_, zone);
     span_map["begin_column"] = msgpack::object(span.begin_column_, zone);
     span_map["end_line"] = msgpack::object(span.end_line_, zone);

@@ -20,8 +20,10 @@ if TYPE_CHECKING:
 class Span:
     """Source location information tracking file, line, and column positions."""
 
-    filename: Final[str]
-    """Source filename."""
+    @property
+    def filename(self) -> str:
+        """Source filename."""
+        ...
 
     begin_line: Final[int]
     """Beginning line (1-indexed)."""
