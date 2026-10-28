@@ -394,6 +394,15 @@ shape 更窄的 `valid_shape`，或同一个操作数同时充当两种角色—
 CHIP 通路上，操作数是以函数参数的形式到达的，没有这样的溯源能力，因此互不相同是
 调用方的义务。
 
+在托管 CHIP/L2 通路上，于 orchestration 中构建的操作数必须可证明为行主序，否则
+`LowerL2TensorCollectives` 会拒绝它（证明范围及原因见
+[pass 参考](passes/41-lower_l2_tensor_collectives.md#当前限制)）。作为兜底，orchestration
+codegen 在其 `rt_submit_aiv_task` 之前为每个操作数生成一条 `is_contiguous` 检查。第一个不连续的
+操作数会锁存 `SIMPLER_ERROR_INVALID_ARGS` 并给出其名称
+（`__builtin_all_to_all_v__fp32: signal must be a contiguous row-major view`），
+随后运行时丢弃该次提交。非零视图偏移是允许的——kernel 会加上 `start_offset`——
+只有非行主序的步长向量会被拒绝。
+
 `MAX_RECV = target.shape[0] // NR`。降级在运行时读取 `send_counts[dest]`、钳制到
 `[0, MAX_RECV]`，并填充接收侧计数向量 `recv_counts[src, 0]`。builtin 内核
 （HOST 与托管 CHIP/L2 通路）以**拉取**方式完成：每个 rank 先把自身的发送向量

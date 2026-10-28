@@ -402,5 +402,61 @@ def test_indexed_rejects_host_call(tmp_path, dtype_name):
         )
 
 
+_OPERANDS = ("input", "target", "signal", "send_counts", "recv_counts")
+
+
+def _assert_operand_guards(source: str, kernel: str, operands: tuple[str, ...]) -> None:
+    """One chained ``is_contiguous`` check per operand, in order, ahead of the submit."""
+    keywords = re.findall(r"(if|\} else if) \(!\w+\.is_contiguous\) \{", source)
+    assert keywords == ["if"] + ["} else if"] * (len(operands) - 1), source
+    for operand in operands:
+        fatal = f"{kernel}: {operand} must be a contiguous row-major view"
+        assert f'rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "{fatal}");' in source, source
+    assert source.rindex(".is_contiguous") < source.index("rt_submit_aiv_task"), source
+
+
+def test_chip_rail_checks_operand_contiguity_before_the_submit(tmp_path):
+    """RFC #2521 O1 criterion 7: the runtime backstop. The orchestration checks each
+    operand's ``is_contiguous`` flag ahead of the collective's submit, latching
+    ``SIMPLER_ERROR_INVALID_ARGS`` on the first violation (which also turns the submit
+    into a no-op). The compile-time proof lives in ``LowerL2TensorCollectives``."""
+    chip = _compile(_build_chip_rail_program(), tmp_path, "chip_contig")
+    _assert_operand_guards(
+        _chip_orchestration_sources(chip.output_dir), "__builtin_all_to_all_v__fp32", _OPERANDS
+    )
+
+
+def test_indexed_rail_checks_all_six_operands_before_the_submit(tmp_path):
+    """The indexed kernel reads `index` as dense row-major too, so it gets a sixth check."""
+    result = ir.compile(
+        _build_indexed_rail_program(host=False, dtype_name="fp32"),
+        output_dir=str(tmp_path / "indexed_contig"),
+        platform="a5",
+        skip_ptoas=True,
+        dump_passes=False,
+        distributed_config=DistributedConfig(device_ids=list(range(NR)), num_sub_workers=0),
+    )
+    _assert_operand_guards(
+        _chip_orchestration_sources(result.output_dir),
+        "__builtin_indexed_all_to_all_v__fp32",
+        (*_OPERANDS, "index"),
+    )
+
+
+def test_ordinary_chip_tasks_get_no_contiguity_check(tmp_path):
+    """Only the builtin kernel opts in; an ordinary InCore task is emitted as before.
+
+    The HOST rail's ``touch_orch`` dispatches a plain DSL kernel over the same
+    five windows. Its orchestration must carry no operand checks — the attribute,
+    not the operand types, is what decides.
+    """
+    host = _compile(_build_host_rail_program(), tmp_path, "host_no_contig")
+    sources = sorted((host.output_dir / "next_levels" / "touch_orch").rglob("*.cpp"))
+    orchestration = [s for s in sources if "orchestration" in s.parts]
+    assert orchestration, f"expected touch_orch's orchestration source under {host.output_dir}"
+    for path in orchestration:
+        assert "is_contiguous" not in path.read_text(), path
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
