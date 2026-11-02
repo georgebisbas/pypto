@@ -263,9 +263,12 @@ Pass LowerHostTensorCollectives();
  * own task DAG, so ``compute -> collective -> consume`` is ordered by ordinary
  * TensorMap dependencies and the host dispatches one pipeline per rank.
  *
- * ``pld.tensor.all_to_all_v`` is supported with a compile-time ``core_num``: the
- * pass folds the admitted block count ``B = CalAllToAllVBlocks(P, L)`` and launches
- * ``B`` blocks; a runtime ``core_num`` is rejected.
+ * ``pld.tensor.all_to_all_v`` is supported with either a compile-time or a
+ * runtime ``core_num``. A compile-time one folds the admitted block count
+ * ``B = CalAllToAllVBlocks(P, L)`` at lowering and launches ``B`` blocks; a
+ * runtime one emits the same formula as orchestration arithmetic over a rank
+ * count read from the comm context, and validates the admitted width at the
+ * dispatch before the task is submitted.
  */
 Pass LowerL2TensorCollectives();
 

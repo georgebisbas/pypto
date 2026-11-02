@@ -935,6 +935,35 @@ inline constexpr const char* kAttrCoreNum = "core_num";
 inline constexpr const char* kAttrSyncStart = "sync_start";
 
 /**
+ * @brief The unclamped admitted block count ``B`` of a runtime-width collective.
+ *
+ * Value type: ``ExprPtr``. Written by ``LowerL2TensorCollectives`` only when the
+ * managed CHIP/L2 collective has a runtime ``core_num``; absent otherwise.
+ *
+ * ``kAttrCoreNum`` carries ``max(B, 1)``, because the clamp is what lets range
+ * analysis prove the launch positive and so keeps ``LegalizeSpmdLaunches`` from
+ * wrapping the dispatch in ``if (B > 0)`` -- a wrapper that would swallow the
+ * runtime guards below. The guards need the value *before* that clamp, which is
+ * what this attr carries. Reading it off ``kAttrCoreNum``'s ``Max`` operand
+ * instead would couple the guard emitter to the clamp's shape.
+ *
+ * SSA / substitution passes MUST rewrite Vars inside it, like ``kAttrCoreNum``.
+ */
+inline constexpr const char* kAttrRuntimeBlocks = "runtime_blocks";
+
+/**
+ * @brief The runtime rank count ``P`` a runtime-width collective computed ``B`` from.
+ *
+ * Value type: ``ExprPtr``. Written alongside ``kAttrRuntimeBlocks``; the guard
+ * emitter compares it against the signal's static ``NR`` (RFC #2521 frozen item
+ * #5 makes the signal ``[NR, S]`` with ``NR`` the rank count, so the two must
+ * agree or every counts address the kernel derives from ``NR`` is wrong).
+ *
+ * SSA / substitution passes MUST rewrite Vars inside it, like ``kAttrCoreNum``.
+ */
+inline constexpr const char* kAttrRuntimeRankCount = "runtime_rank_count";
+
+/**
  * @brief Reserved attr key for a selective device-timing tag on ``pl.submit``.
  *
  * Value type: ``int`` in ``0..15``. Written by the DSL parser and read by
@@ -964,7 +993,8 @@ inline constexpr const char* kAttrTaskTimingSlot = "task_timing_slot";
  * separately because a Var is remapped rather than recursed into.
  */
 [[nodiscard]] inline bool IsExprValuedCallAttr(const std::string& key) {
-  return key == kAttrDevice || key == kAttrCoreNum;
+  return key == kAttrDevice || key == kAttrCoreNum || key == kAttrRuntimeBlocks ||
+         key == kAttrRuntimeRankCount;
 }
 
 /**

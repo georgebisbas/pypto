@@ -391,7 +391,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   std::vector<std::string> BuildContiguityGuardLines(const ir::CallPtr& call,
                                                      const ir::FunctionPtr& callee_func);
+  std::vector<std::string> BuildRuntimeWidthGuardLines(const ir::CallPtr& call,
+                                                       const ir::FunctionPtr& callee_func);
   void CheckWrapperNeedsNoContiguityGuard(const ir::FunctionPtr& kernel_func, const ir::CallPtr& call);
+  /// Assert that a wrapper-dispatched inner kernel carries no runtime launch
+  /// width (``kAttrRuntimeBlocks``); see the definition for the ordering
+  /// invariant this protects.
+  void CheckWrapperNeedsNoRuntimeWidthGuard(const ir::CallPtr& inner_call);
 
   void EmitDepArrayInsert(const std::string& name, const std::string& deps_arr, const std::string& deps_cnt);
   void EmitManualDeps(const ir::CallPtr& call, const std::string& task_var);

@@ -122,6 +122,50 @@ def _build_chip_rail_program(dtype_name: str = "fp32", core_num: int = 1, signal
     return ChipRail
 
 
+def _build_runtime_core_num_program(signal_stride: int = 8):
+    """CHIP rail with ``core_num`` as a runtime scalar rather than a literal.
+
+    Same five windows as ``_build_chip_rail_program``; the only difference is
+    that the block limit arrives at run time, which is what RFC #2521 O2 adds.
+    """
+    dtype = pl.FP32
+    payload_bytes = TOTAL * SIZE * dtype.get_byte()
+    i32_bytes = NR * pl.INT32.get_byte()
+    signal_bytes = NR * signal_stride * pl.INT32.get_byte()
+
+    @pl.program
+    class RuntimeCoreNum:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_pipeline(
+            self,
+            stage: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            data: pl.InOut[pld.DistributedTensor[[TOTAL, SIZE], dtype]],
+            signal: pl.InOut[pld.DistributedTensor[[NR, signal_stride], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[NR, 1], pl.INT32]],
+            core_num: pl.Scalar[pl.INDEX],
+        ) -> pld.DistributedTensor[[TOTAL, SIZE], dtype]:
+            return pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self, core_num: pl.Scalar[pl.INDEX]):
+            stage_buf = pld.alloc_window_buffer(payload_bytes)
+            data_buf = pld.alloc_window_buffer(payload_bytes)
+            signal_buf = pld.alloc_window_buffer(signal_bytes)
+            counts_buf = pld.alloc_window_buffer(i32_bytes)
+            recv_buf = pld.alloc_window_buffer(i32_bytes)
+
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(stage_buf, [TOTAL, SIZE], dtype=dtype)
+                data = pld.window(data_buf, [TOTAL, SIZE], dtype=dtype)
+                sig = pld.window(signal_buf, [NR, signal_stride], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [NR, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [NR, 1], dtype=pl.INT32)
+                self.chip_pipeline(stage, data, sig, counts, recv, core_num, device=r)
+
+    return RuntimeCoreNum
+
+
 def _build_host_rail_program(dtype_name: str = "fp32"):
     """HOST/L3 rail: the collective written in the host orchestrator.
 
@@ -251,6 +295,123 @@ def test_chip_rail_multi_block_request_emits_the_launch_spec(tmp_path):
     source = _chip_orchestration_sources(chip.output_dir)
     assert re.search(r"\.launch_spec\.\w+\(2\);", source), source
     assert ".launch_spec.set_require_sync_start(true);" in source, source
+
+
+def test_runtime_core_num_computes_the_width_from_the_comm_context(tmp_path):
+    """``B`` is emitted arithmetic over a rank count read off the CommCtx.
+
+    RFC #2521 frozen item #3 fixes ``B = CalAllToAllVBlocks(P, L)`` as a pure
+    function of ``(P, L)``. With ``L`` only known at run time the compiler
+    cannot fold it, so the same formula is emitted branch-free -- the
+    expression codegen has no ternary, and ``min``/``max`` alone cannot
+    express ``L < P ? L : (L / P) * P``.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime")
+    source = _chip_orchestration_sources(chip.output_dir)
+    rank_read = re.search(r"int32_t (\w+) = \*reinterpret_cast<const int32_t\*>\(\w+ \+ 20\);", source)
+    assert rank_read, source
+    assert re.search(r"= \(\w+ % \w+\);", source), source
+    assert re.search(r"= static_cast<int64_t>\(\(\w+ <= \w+\)\);", source), source
+    assert re.search(r"= \(\w+ - \(\w+ \* \w+\)\);", source), source
+
+
+def test_runtime_core_num_launch_width_is_clamped_and_unwrapped(tmp_path):
+    """The width is clamped inline so the dispatch keeps its straight line.
+
+    ``LegalizeSpmdLaunches`` wraps any launch it cannot prove positive in
+    ``if (B > 0)``. The guards below are emitted *at* the dispatch, so that
+    wrapper would hide them from a non-positive request -- the one input they
+    exist to catch. Range analysis proves ``max(x, 1) >= 1`` from the
+    expression, so the clamp rides the attr and no wrapper is emitted.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_clamp")
+    source = _chip_orchestration_sources(chip.output_dir)
+    assert re.search(r"\.launch_spec\.\w+\(std::max<int64_t>\(\w+, 1\)\);", source), source
+    assert ".launch_spec.set_require_sync_start(true);" in source, source
+    # A wrapper would materialise the count as ``spmd_core_num`` and guard the
+    # whole dispatch. That name appears nowhere else in the emitted source, so
+    # its absence is what proves the guards below stay reachable for a
+    # non-positive request. ``if (`` alone is not enough: the guard chain itself
+    # starts with one.
+    assert "spmd_core_num" not in source, source
+    dispatch = source[: source.index("rt_submit_aiv_task")]
+    assert "rt_available_aiv_count" in dispatch, dispatch
+
+
+def test_runtime_core_num_emits_the_runtime_checks(tmp_path):
+    """Every RFC #2521 §12.3 failure the orchestration can see is reported.
+
+    One chained ``else if`` so a dispatch names its first fault rather than
+    four, and no ``return`` after the fatal: the runtime latches the error and
+    no-ops every later submit, and the dispatch may sit inside a scope.
+    """
+    chip = _compile(_build_runtime_core_num_program(signal_stride=8), tmp_path, "chip_runtime_guards")
+    source = _chip_orchestration_sources(chip.output_dir)
+    kernel = "__builtin_all_to_all_v__fp32"
+    messages = (
+        "core_num must be positive",
+        "communicator rank count must be positive",
+        f"signal rows ({NR}) must equal the communicator rank count",
+        "signal stride (8) is smaller than the admitted block count",
+        "admitted block count exceeds the available AIV count",
+    )
+    for message in messages:
+        assert f'rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, "{kernel}: {message}' in source, source
+    guard_block = source[source.index("computes its launch width") :]
+    guard_block = guard_block[: guard_block.index("CoreTaskArgs")]
+    assert guard_block.count("} else if (") == len(messages) - 1, guard_block
+    assert "return;" not in guard_block, guard_block
+
+
+def test_runtime_core_num_cannot_divide_by_a_zero_rank_count(tmp_path):
+    """The width arithmetic is total, so a bad rank count reaches its guard.
+
+    The arithmetic runs in the prelude and the guards run at the dispatch, so a
+    communicator reporting ``P = 0`` would hit ``% P`` before anything could
+    reject it — undefined behaviour in the generated C++ instead of the explicit
+    error RFC #2521 §12.3 asks for. The divisor is floored to 1 and the real
+    ``P`` is kept for the check, which still rejects the run because ``NR`` is
+    deducer-enforced positive.
+    """
+    chip = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_div")
+    source = _chip_orchestration_sources(chip.output_dir)
+    divisor = re.search(r"int64_t (\w+) = std::max<int64_t>\((\w+), 1\);", source)
+    assert divisor, source
+    floored, raw = divisor.group(1), divisor.group(2)
+    # Every division and comparison uses the floored copy...
+    assert f"% {floored})" in source, source
+    assert f"({floored} <= " in source, source
+    assert f"% {raw})" not in source, source
+    # ...while the guard tests the value the communicator actually reported.
+    assert f"if ({raw} <= 0)" in source or f"else if ({raw} <= 0)" in source, source
+    kernel = "__builtin_all_to_all_v__fp32"
+    assert f'"{kernel}: communicator rank count must be positive"' in source, source
+
+
+def test_literal_core_num_emits_no_runtime_checks(tmp_path):
+    """A literal request is checked at compile time and costs nothing at run time."""
+    chip = _compile(_build_chip_rail_program(core_num=2, signal_stride=2), tmp_path, "chip_literal_guards")
+    source = _chip_orchestration_sources(chip.output_dir)
+    assert "computes its launch width at run time" not in source, source
+    assert "rt_available_aiv_count" not in source, source
+
+
+def test_runtime_core_num_still_renders_the_shared_kernel(tmp_path):
+    """One binary serves any runtime ``L`` (RFC #2521 §12.1).
+
+    The width lives in the launch spec, so the kernel is the same bytes the
+    literal rail renders -- which is also the tripwire for a change that tried
+    to pass the width as a kernel argument.
+    """
+    runtime = _compile(_build_runtime_core_num_program(), tmp_path, "chip_runtime_kernel")
+    literal = _compile(_build_chip_rail_program(core_num=2, signal_stride=2), tmp_path, "chip_literal_kernel")
+    runtime_kernel = (
+        runtime.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _l2_kernel_of("fp32")
+    )
+    literal_kernel = (
+        literal.output_dir / "next_levels" / "chip_pipeline" / "kernels" / "aiv" / _l2_kernel_of("fp32")
+    )
+    assert runtime_kernel.read_text() == literal_kernel.read_text()
 
 
 def test_chip_rail_single_block_request_emits_no_launch_spec(tmp_path):

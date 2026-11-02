@@ -968,6 +968,12 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildDirect
   // Direct calls historically emit set_dependencies before the launch spec.
   plan.deps_before_launch = true;
   plan.guard_lines = BuildContiguityGuardLines(call, callee_func);
+  // Operand shape first, then launch width: a non-contiguous operand is a
+  // property of the call the caller wrote, while the width depends on values
+  // only known at run time, so the more basic fault reports first.
+  for (auto& line : BuildRuntimeWidthGuardLines(call, callee_func)) {
+    plan.guard_lines.push_back(std::move(line));
+  }
   return plan;
 }
 
@@ -986,6 +992,22 @@ void OrchestrationStmtCodegen::CheckWrapperNeedsNoContiguityGuard(const Function
       << "Internal error: kernel '" << kernel_func->name_
       << "' requires contiguous operands but is dispatched through a wrapper plan, which emits no "
          "operand guards; LowerL2TensorCollectives must run after every outlining pass";
+}
+
+/// Assert that a wrapper-dispatched inner kernel carries no runtime-width attrs.
+///
+/// ``BuildRuntimeWidthGuardLines`` is wired into the direct-call plan only, for
+/// the same pipeline-ordering reason as the contiguity guard above:
+/// ``LowerL2TensorCollectives`` runs after every outlining pass, so the kernel
+/// call it synthesizes is dispatched directly and never becomes a wrapper's
+/// inner call. If a future reordering put that call inside an ``Spmd`` /
+/// ``Group`` wrapper, the RFC #2521 §12.3 guards would be silently dropped.
+/// Fail loudly here instead.
+void OrchestrationStmtCodegen::CheckWrapperNeedsNoRuntimeWidthGuard(const CallPtr& inner_call) {
+  INTERNAL_CHECK_SPAN(inner_call->GetAttr<ExprPtr>(kAttrRuntimeBlocks, nullptr) == nullptr, inner_call->span_)
+      << "Internal error: kernel '" << inner_call->op_->name_
+      << "' computes its launch width at run time but is dispatched through a wrapper plan, which "
+         "emits no runtime guards; LowerL2TensorCollectives must run after every outlining pass";
 }
 
 /// Runtime half of a kernel's ``kAttrRequireContiguousOperands`` contract:
@@ -1028,6 +1050,77 @@ std::vector<std::string> OrchestrationStmtCodegen::BuildContiguityGuardLines(con
   if (!lines.empty()) {
     lines.insert(lines.begin(), "// " + callee_func->name_ +
                                     " reads every operand as dense row-major (require_contiguous_operands)");
+    lines.emplace_back("}");
+  }
+  return lines;
+}
+
+/// Runtime validation for a managed collective whose launch width is computed
+/// at run time (RFC #2521 O2, §12.3).
+///
+/// Emitted only when ``LowerL2TensorCollectives`` attached ``kAttrRuntimeBlocks``
+/// -- i.e. only for a runtime ``core_num``. A literal one is fully checked at
+/// compile time and emits nothing here, so the common path is unchanged.
+///
+/// Shape follows the contiguity guard above, deliberately: one chained
+/// ``else if`` so a dispatch reports its first fault rather than five, and no
+/// ``return`` after the fatal, because the runtime latches the error and turns
+/// every later submit and scope boundary into a no-op. The dispatch is not
+/// wrapped in ``if (B > 0)`` -- the clamp in ``kAttrCoreNum`` is what keeps
+/// LegalizeSpmdLaunches from adding that wrapper, which would otherwise hide
+/// these checks from exactly the inputs they exist to catch.
+std::vector<std::string> OrchestrationStmtCodegen::BuildRuntimeWidthGuardLines(
+    const CallPtr& call, const FunctionPtr& callee_func) {
+  std::vector<std::string> lines;
+  auto blocks = call->GetAttr<ExprPtr>(kAttrRuntimeBlocks, nullptr);
+  if (!blocks) return lines;
+
+  const std::string name = callee_func->name_;
+  const std::string fatal = "rt_report_fatal(SIMPLER_ERROR_INVALID_ARGS, \"" + name + ": ";
+  const std::string b = GenerateExprString(blocks);
+  std::string keyword = "if";
+  auto guard = [&](const std::string& cond, const std::string& message) {
+    lines.push_back(keyword + " (" + cond + ") {");
+    lines.push_back("    " + fatal + message + "\");");
+    keyword = "} else if";
+  };
+
+  // L <= 0 is exactly B <= 0: the width formula is monotonic and returns L
+  // unchanged below P, so a non-positive request is the only way to get here.
+  guard(b + " <= 0", "core_num must be positive, got a non-positive admitted block count");
+
+  // The signal is [NR, S] with both static (deducer-enforced), so NR and S are
+  // literals here while B and P are not. RFC #2521 frozen item #5 makes the
+  // signal's rows the rank count, and every counts address the kernel derives
+  // comes from NR -- a mismatch is a malformed program, not a slow one.
+  auto signal_type = call->args_.size() > 2 ? As<DistributedTensorType>(call->args_[2]->GetType()) : nullptr;
+  if (signal_type && signal_type->shape_.size() == 2) {
+    auto nranks = As<ConstInt>(signal_type->shape_[0]);
+    auto stride = As<ConstInt>(signal_type->shape_[1]);
+    if (auto rank_count = call->GetAttr<ExprPtr>(kAttrRuntimeRankCount, nullptr); rank_count && nranks) {
+      const std::string p = GenerateExprString(rank_count);
+      // Reported first, and separately from the NR mismatch below: a zero or
+      // negative rank count means the communicator itself is wrong, which is a
+      // different fault from a signal shaped for the wrong world. The width
+      // arithmetic divided by a floored copy of this value precisely so that
+      // execution could reach this check instead of dividing by zero.
+      guard(p + " <= 0", "communicator rank count must be positive");
+      guard(p + " != " + std::to_string(nranks->value_),
+            "signal rows (" + std::to_string(nranks->value_) + ") must equal the communicator rank count");
+    }
+    if (stride) {
+      guard(b + " > " + std::to_string(stride->value_), "signal stride (" + std::to_string(stride->value_) +
+                                                            ") is smaller than the admitted block count");
+    }
+  }
+
+  // set_block_num takes an int16_t with no range check, and a sync_start gang
+  // wider than the available AIV count is rejected at submit with a less
+  // actionable message. Catch both here, while the request is still nameable.
+  guard(b + " > (int64_t)rt_available_aiv_count()", "admitted block count exceeds the available AIV count");
+
+  if (!lines.empty()) {
+    lines.insert(lines.begin(), "// " + name + " computes its launch width at run time (RFC #2521 O2)");
     lines.emplace_back("}");
   }
   return lines;
@@ -1199,6 +1292,7 @@ void OrchestrationStmtCodegen::GenerateSpmdCallCode(const CallPtr& call, const F
   auto info = FindWrapperInnerCall(spmd_func);
   INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
       << "Internal error: no inner call found in Spmd function '" << spmd_func->name_ << "'";
+  CheckWrapperNeedsNoRuntimeWidthGuard(info.inner_call);
 
   if (info.inner_callee->func_type_ == FunctionType::Group) {
     // The Group is dispatched THROUGH this Spmd wrapper: ``call`` invokes
@@ -1231,6 +1325,9 @@ void OrchestrationStmtCodegen::GenerateGroupCallCode(const CallPtr& call, const 
   std::string group_name = group_func->name_;
 
   auto info = FindGroupCallees(group_func);
+  INTERNAL_CHECK_SPAN(info.inner_call != nullptr, call->span_)
+      << "Internal error: no inner call found in Group '" << group_name << "'";
+  CheckWrapperNeedsNoRuntimeWidthGuard(info.inner_call);
 
   // AIV-only Group: pure vector SPMD kernel (no AIC callee), dispatched with
   // core_num/sync_start from the Group. BuildSingleKernelSubmit picks the
