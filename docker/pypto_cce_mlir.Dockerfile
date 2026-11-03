@@ -58,6 +58,7 @@ RUN python3 -m pip install --no-cache-dir \
       "nanobind>=2.0.0,<3" \
       "ninja>=1.11.0" \
       "cmake>=3.15" \
+ && python3 -m pip install --no-cache-dir \
       torch --index-url https://download.pytorch.org/whl/cpu
 
 WORKDIR /opt/pypto
