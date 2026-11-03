@@ -15,10 +15,20 @@ ARG CANN_ARCH=x86_64-linux
 FROM ${CCE_MLIR_IMAGE} AS cce_build
 ARG CCE_MLIR_REPO
 ARG CCE_MLIR_REF
+ARG CCE_MLIR_GITLAB_USER=gitlab-ci-token
 
 RUN --mount=type=secret,id=cce_mlir_git_token,required=true \
- git -c http.extraheader="PRIVATE-TOKEN: $(cat /run/secrets/cce_mlir_git_token)" \
-      clone "$CCE_MLIR_REPO" /opt/cce-mlir \
+ set -eu; \
+ printf '%s\n' \
+      '#!/bin/sh' \
+      'case "$1" in' \
+      '  *Username*) printf "%s\\n" "${CCE_MLIR_GITLAB_USER}" ;;' \
+      '  *Password*) cat /run/secrets/cce_mlir_git_token ;;' \
+      'esac' > /tmp/cce-mlir-git-askpass; \
+ chmod 700 /tmp/cce-mlir-git-askpass; \
+ export CCE_MLIR_GITLAB_USER GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/tmp/cce-mlir-git-askpass; \
+ git clone "$CCE_MLIR_REPO" /opt/cce-mlir; \
+ rm -f /tmp/cce-mlir-git-askpass \
  && git -C /opt/cce-mlir checkout --detach "$CCE_MLIR_REF" \
  && python3 -m pip install -e /opt/cce-mlir --no-build-isolation \
       --config-settings=build-dir=/opt/cce-mlir/build \
