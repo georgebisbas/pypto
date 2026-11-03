@@ -23,6 +23,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
+from pypto.backend.kernel_compiler import KERNEL_COMPILERS, default_kernel_compiler
 from pypto.backend.pto_backend import PartialCodegenError, generate, multi_chip_orch_names
 from pypto.compile_profiling import CompileProfiler, get_active_profiler
 from pypto.pypto_core import backend as _backend_core
@@ -285,7 +286,7 @@ def make_default_output_dir(name: str) -> str:
     return tempfile.mkdtemp(prefix=f"{name}_{timestamp}_", dir=base)
 
 
-def compile(  # noqa: PLR0913
+def compile(  # noqa: PLR0912, PLR0913
     program: _ir_core.Program,
     *,
     output_dir: str | None = None,
@@ -306,7 +307,7 @@ def compile(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
-    kernel_compiler: str = "ptoas",
+    kernel_compiler: str | None = None,
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -406,8 +407,9 @@ def compile(  # noqa: PLR0913
         kernel_compiler: Device-kernel compiler route. ``"ptoas"`` (default)
             keeps the production PTOAS path for every backend. ``"cce_mlir"``
             routes InCore kernels through cce-mlir, which requires an onboard
-            ``a2a3`` target. The PTOAS-only options (``skip_ptoas``,
-            ``dump_ptoas_passes``) are ignored by that route.
+            ``a2a3`` target. When omitted, ``PYPTO_KERNEL_COMPILER`` selects the
+            default; an explicit value always wins. The PTOAS-only options
+            (``skip_ptoas``, ``dump_ptoas_passes``) are ignored by that route.
 
     Returns:
         A :class:`CompiledProgram` that wraps the output directory and can
@@ -424,8 +426,15 @@ def compile(  # noqa: PLR0913
     """
     if platform is not None:
         _warn_deprecated_platform("ir.compile")
-    if kernel_compiler not in ("ptoas", "cce_mlir"):
-        raise ValueError(f"kernel_compiler must be 'ptoas' or 'cce_mlir', got {kernel_compiler!r}")
+    if kernel_compiler is None:
+        kernel_compiler = default_kernel_compiler()
+    elif kernel_compiler not in KERNEL_COMPILERS:
+        supported = ", ".join(KERNEL_COMPILERS)
+        raise ValueError(f"kernel_compiler must be one of {supported}, got {kernel_compiler!r}")
+    if kernel_compiler == "cce_mlir" and execution_mode is None:
+        # The route only produces an onboard AICore object; an omitted mode
+        # would otherwise fall through to the simulator default.
+        execution_mode = ExecutionMode.ONBOARD
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
     if kernel_compiler == "cce_mlir" and mode is ExecutionMode.SIM:
         raise ValueError(

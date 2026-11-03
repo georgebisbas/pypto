@@ -79,6 +79,19 @@ compiled = kernel.compile(
 )
 ```
 
+Any unmodified example can select the route from the environment instead of
+editing its `RunConfig`:
+
+```bash
+PYPTO_KERNEL_COMPILER=cce_mlir python examples/beginner/05_matmul.py
+```
+
+The variable supplies the default only; an explicit `kernel_compiler=` argument
+wins. Selecting `cce_mlir` also makes `ONBOARD` the default execution mode,
+because the route cannot target the simulator. On a device host, run the
+example through the queue as usual (`task-submit --device auto ... --run
+'PYPTO_KERNEL_COMPILER=cce_mlir python examples/...'`).
+
 `ir.compile(program, kernel_compiler="cce_mlir")` accepts the same option. The
 route requires an onboard `a2a3` target, ignores the PTOAS-only options, and
 emits a runtime artifact whose kernel entries carry `link_objects`:

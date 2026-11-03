@@ -75,6 +75,17 @@ compiled = kernel.compile(
 )
 ```
 
+任何未修改的示例都可以通过环境变量选择该路线，无需编辑其 `RunConfig`：
+
+```bash
+PYPTO_KERNEL_COMPILER=cce_mlir python examples/beginner/05_matmul.py
+```
+
+该变量只提供默认值；显式的 `kernel_compiler=` 参数优先。选择 `cce_mlir` 时，
+`ONBOARD` 也成为默认 execution mode，因为该路线无法面向模拟器。在设备主机上，
+仍通过队列运行（`task-submit --device auto ... --run
+'PYPTO_KERNEL_COMPILER=cce_mlir python examples/...'`）。
+
 `ir.compile(program, kernel_compiler="cce_mlir")` 接受同样的选项。该路线要求
 onboard `a2a3` 目标，忽略仅属于 PTOAS 的选项，并生成带有 `link_objects` 的
 runtime 产物：

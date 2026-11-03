@@ -59,6 +59,7 @@ from pypto._target import (
     _warn_deprecated_platform,
 )
 from pypto.backend import BackendType
+from pypto.backend.kernel_compiler import KERNEL_COMPILERS, default_kernel_compiler
 from pypto.ir.pass_manager import OptimizationStrategy, PassDumpLevel
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase, MemoryPlanner
 
@@ -172,6 +173,17 @@ def _normalize_swimlane_level(value: int | bool, source: str) -> int:
             f"4=+orch phases), got {value}"
         )
     return value
+
+
+def _default_execution_mode(kernel_compiler: str | None = None) -> ExecutionMode:
+    """Default execution mode for a config that omits it.
+
+    Selecting cce-mlir (explicitly or through ``PYPTO_KERNEL_COMPILER``) also
+    selects onboard, because the route only produces an onboard AICore object.
+    An explicit ``execution_mode`` still wins and is validated against the route.
+    """
+    compiler = kernel_compiler or default_kernel_compiler()
+    return ExecutionMode.ONBOARD if compiler == "cce_mlir" else ExecutionMode.SIM
 
 
 @dataclass(kw_only=True)
@@ -363,6 +375,7 @@ class RunConfig:
 
     arch: BackendType = field(default_factory=lambda: BackendType.Ascend910)
     execution_mode: ExecutionMode = ExecutionMode.SIM
+    kernel_compiler: str | None = None
     device_id: int = 0
     rtol: float = 1e-5
     atol: float = 1e-5
@@ -396,7 +409,6 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
-    kernel_compiler: str = "ptoas"
     dump_ptoas_passes: bool = False
 
     if TYPE_CHECKING:
@@ -448,6 +460,21 @@ class RunConfig:
         ) -> None: ...
 
     def __post_init__(self) -> None:
+        # Resolve the compiler route first: the environment may select cce-mlir
+        # for an example that constructs a bare ``RunConfig()``, and that route
+        # only exists onboard.
+        if self.kernel_compiler is None:
+            self.kernel_compiler = default_kernel_compiler()
+        elif self.kernel_compiler not in KERNEL_COMPILERS:
+            supported = ", ".join(KERNEL_COMPILERS)
+            raise ValueError(
+                f"RunConfig.kernel_compiler must be one of {supported}, got {self.kernel_compiler!r}"
+            )
+        if self.kernel_compiler == "cce_mlir" and self.execution_mode is ExecutionMode.SIM:
+            raise ValueError(
+                "kernel_compiler='cce_mlir' produces an onboard AICore device "
+                "object; it cannot target a simulator build"
+            )
         # The two axes replace what used to be a membership test on the packed
         # platform string. They make a *disagreeing* platform unrepresentable,
         # but not a nonsensical one: ``execution_mode="sim"`` is not
@@ -728,6 +755,9 @@ def _run_config_init(self: RunConfig, *args: Any, **kwargs: Any) -> None:
                 "enable_l2_swimlane; pass only enable_chip_swimlane."
             )
         kwargs["enable_chip_swimlane"] = alias
+    if "execution_mode" not in kwargs:
+        # An omitted mode follows the selected route: cce-mlir is onboard-only.
+        kwargs["execution_mode"] = _default_execution_mode(kwargs.get("kernel_compiler"))
     _RUN_CONFIG_INIT(self, *args, **kwargs)
 
 
@@ -916,17 +946,25 @@ class CompileOptions:
     # active, so an unset planner has to defer to that context.
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
-    kernel_compiler: str = "ptoas"
+    kernel_compiler: str | None = None
     distributed_config: "DistributedConfig | None" = None
 
     def __post_init__(self) -> None:
+        compiler = self.kernel_compiler
+        if compiler is None:
+            compiler = default_kernel_compiler()
+        elif compiler not in KERNEL_COMPILERS:
+            supported = ", ".join(KERNEL_COMPILERS)
+            raise ValueError(f"CompileOptions.kernel_compiler must be one of {supported}, got {compiler!r}")
+        object.__setattr__(self, "kernel_compiler", compiler)
         if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
             )
-        if self.kernel_compiler not in ("ptoas", "cce_mlir"):
+        if self.kernel_compiler == "cce_mlir" and self.execution_mode is ExecutionMode.SIM:
             raise ValueError(
-                f"CompileOptions.kernel_compiler must be 'ptoas' or 'cce_mlir', got {self.kernel_compiler!r}"
+                "kernel_compiler='cce_mlir' produces an onboard AICore device "
+                "object; it cannot target a simulator build"
             )
         _resolve_target(self.backend_type, self.execution_mode)
 
@@ -969,6 +1007,9 @@ def _compile_options_init(self: CompileOptions, *args: Any, **kwargs: Any) -> No
     if "platform" in kwargs:
         _warn_deprecated_platform("CompileOptions")
         kwargs["backend_type"], kwargs["execution_mode"] = _parse_platform(kwargs.pop("platform"))
+    if "execution_mode" not in kwargs:
+        # An omitted mode follows the selected route: cce-mlir is onboard-only.
+        kwargs["execution_mode"] = _default_execution_mode(kwargs.get("kernel_compiler"))
     _COMPILE_OPTIONS_INIT(self, *args, **kwargs)
 
 
