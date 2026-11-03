@@ -65,7 +65,7 @@ def generate_adapter_source(kernel: CceKernel) -> str:
     declaration = ", ".join(f"__gm__ {parameter.element.c_type}*" for parameter in parameters)
     lines = [
         _HEADER,
-        f'extern "C" __aicore__ void {kernel.device_symbol}({declaration});',
+        f'extern "C" __aicore__ void {kernel.symbol_name}({declaration});',
         "",
         'extern "C" __aicore__ void kernel_entry(__gm__ int64_t* args) {',
     ]
@@ -81,7 +81,7 @@ def generate_adapter_source(kernel: CceKernel) -> str:
             f"{name}_tensor->start_offset;"
         )
         call_arguments.append(name)
-    lines.append(f"    {kernel.device_symbol}({', '.join(call_arguments)});")
+    lines.append(f"    {kernel.symbol_name}({', '.join(call_arguments)});")
     lines.append("}")
     lines.append("")
     return "\n".join(lines)

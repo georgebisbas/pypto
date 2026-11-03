@@ -30,7 +30,7 @@ from .adapter import generate_adapter_source
 from .elf import symbol_names
 from .emit import emit_module
 from .manifest import build_manifest
-from .pipeline import cann_toolkit, extract_device_object, lower_to_llvm
+from .pipeline import cann_toolkit, compile_device_function
 
 __all__ = ["CceMlirBackend", "generate"]
 
@@ -99,8 +99,8 @@ class CceMlirBackend:
             core_dir = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
             module = emit_module(kernel)
             emitted_text = str(module)
-            lowered_text = lower_to_llvm(module, toolkit=toolkit)
-            device_object = extract_device_object(module)
+            device_object = compile_device_function(module, kernel, toolkit=toolkit)
+            lowered_text = str(module)
             try:
                 symbols = symbol_names(device_object)
             except Exception as exc:  # ElfError is the expected case
@@ -108,10 +108,10 @@ class CceMlirBackend:
                     "invalid-device-object",
                     f"kernel {kernel.function_name!r} produced an unreadable device object: {exc}",
                 ) from exc
-            if kernel.device_symbol not in symbols:
+            if kernel.symbol_name not in symbols:
                 raise CceMlirError(
                     "missing-device-symbol",
-                    f"device object for {kernel.function_name!r} does not define {kernel.device_symbol!r}",
+                    f"device object for {kernel.function_name!r} does not define {kernel.symbol_name!r}",
                 )
 
             source_path = f"kernels/{core_dir}/{kernel.function_name}.cpp"

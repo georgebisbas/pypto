@@ -102,6 +102,7 @@ def build_manifest(
         "module": kernel.module_name,
         "symbol": kernel.symbol_name,
         "device_symbol": kernel.device_symbol,
+        "function_symbol": kernel.symbol_name,
         "target": kernel.target.value,
         "kernel_kind": kernel.kind.value,
         "parameters": [

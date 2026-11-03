@@ -34,17 +34,6 @@ import pypto.language as pl  # noqa: E402
 from pypto.backend import BackendType  # noqa: E402
 from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
-# cce-mlir emits its device body with kernel-entry ABI and `.ascend.meta`
-# launch metadata. Calling it from a CCEC-compiled `kernel_entry` traps on
-# AICore (`retCode=0x26 aicore exception`); cce-mlir cannot yet lower a plain
-# callable device function (a non-kernel `npu.func` leaves a live
-# unrealized_conversion_cast because only kernels get the void ABI). Keep the
-# cases as strict xfail so a future cce-mlir ABI fix surfaces as XPASS.
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="cce-mlir device objects use kernel-entry ABI; nesting under kernel_entry traps on AICore",
-)
-
 
 def _config(tmp_path: Path) -> RunConfig:
     return RunConfig(

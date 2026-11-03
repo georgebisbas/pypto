@@ -47,7 +47,7 @@ the lowering refuses anything it cannot derive.
 | Operand roles (read/write/destination) | `ir.get_op_buffer_arg_effect` |
 | Kernel kind | `func_type` (AIC → cube, AIV → vector), cross-checked against allocated tiers |
 | Target | `BackendHandler.get_pto_target_arch()` (`a2a3` → `a3`) |
-| Symbols | `Function.name`; the `<name>__kernel0` suffix is cce-mlir's translation contract |
+| Symbols | `Function.name`. The standalone runner keeps cce-mlir's `<name>__kernel0`; the PyPTO runtime product uses the bare `<name>` |
 
 No fixture shape, byte count, layout or symbol is written literally.
 
@@ -156,19 +156,25 @@ pointers. `adapter.py` generates the bridge and the runtime's kernel compiler
 accepts extra link objects, linking the adapter object **first** so
 `kernel_entry` sits at offset 0 of the extracted `.text`.
 
-The structural link is verified in
-`tests/ut/backend/cce_mlir/test_adapter_link.py` (entry ordering and symbol
-resolution), and `ir.compile(kernel_compiler="cce_mlir")` produces the runtime
-artifact (`kernel_config.py` with `link_objects`, adapter source, device object,
-orchestration). Executing that artifact through `CompiledProgram` on an Ascend
-910B2 **launches the kernel but traps on AICore**
-(`retCode=0x26 aicore exception`): cce-mlir compiles the body as a kernel entry
-with launch-time metadata, not as a callable device function. Asking cce-mlir
-for a non-kernel `npu.func` currently fails lowering
-(`cce-lower-to-hivm left a live unrealized_conversion_cast`), because only
-kernel functions receive the void ABI. The numerical ST is therefore a strict
-`xfail` until cce-mlir gains a callable-device-function ABI, or until the
-artifact is launched through ACL as a separate runtime artifact kind.
+`ir.compile(kernel_compiler="cce_mlir")` produces the runtime artifact
+(`kernel_config.py` with `link_objects`, adapter source, device object,
+orchestration) and the link is verified in
+`tests/ut/backend/cce_mlir/test_adapter_link.py` (`kernel_entry` at `.text`
+offset 0, standalone symbol resolved).
+
+The device object is a **standalone callable function**, not cce-mlir's kernel
+entry. cce-mlir's translator stamps the per-function AI-core
+`target-cpu`/`target-features` only on functions carrying the kernel marker, so
+`pipeline.compile_device_function` keeps that marker through
+`npu-lower-pto-to-cce-pipeline` and `npu-lower-cce-to-llvm-device-only-pipeline`,
+translates with `cce-translate`, then rewrites the translated LLVM IR: the bare
+`<name>` symbol replaces `<name>__kernel0` and the `!hivm.annotations` kernel
+metadata is dropped. `bisheng` compiles the result, and the adapter links it
+under `kernel_entry`. cce-mlir should eventually grow a native
+callable-device-function mode to replace this rewrite.
+
+`tests/st/runtime/cce_mlir/test_cce_mlir_numerical.py` runs cube matmul and
+vector add through `CompiledProgram` on an Ascend 910B2 and passes.
 
 ## Known limitations
 

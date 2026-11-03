@@ -129,7 +129,13 @@ def _elementwise_emitter(constructor: Any, arity: int) -> Any:
         destination = op.write_tensor
         assert destination is not None
         sources = [builder.value(tensor) for tensor in op.read_tensors[:arity]]
-        value = constructor(builder.tensor_type(destination), *sources, builder.value(destination)).result
+        # PyPTO's Buffer IR reuses the destination tile as the first source for
+        # in-place elementwise ops. cce-mlir's destination-passing lowering does
+        # not preserve that aliasing, so give the op a distinct destination and
+        # let the typed value binding forward the result.
+        aliased = any(tensor.value_id == destination.value_id for tensor in op.read_tensors[:arity])
+        destination_value = builder.empty_like(destination) if aliased else builder.value(destination)
+        value = constructor(builder.tensor_type(destination), *sources, destination_value).result
         builder.bind(destination, value)
 
     return emit

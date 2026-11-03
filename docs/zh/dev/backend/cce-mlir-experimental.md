@@ -45,7 +45,7 @@ PyPTO @pl.jit kernel
 | 操作数角色（读/写/目标） | `ir.get_op_buffer_arg_effect` |
 | Kernel 类型 | `func_type`（AIC → cube，AIV → vector），并与分配的 tier 交叉校验 |
 | Target | `BackendHandler.get_pto_target_arch()`（`a2a3` → `a3`） |
-| 符号 | `Function.name`；`<name>__kernel0` 后缀是 cce-mlir 的翻译合约 |
+| 符号 | `Function.name`。独立 runner 保留 cce-mlir 的 `<name>__kernel0`；PyPTO runtime 产物使用裸 `<name>` |
 
 不字面写入任何 fixture 形状、字节数、layout 或符号。
 
@@ -149,15 +149,22 @@ PyPTO 以 `kernel_entry(__gm__ int64_t* args)` 调度，每个参数是一个设
 runtime 的 kernel 编译器接受额外链接对象，并**首先**链接适配器对象，使 `kernel_entry`
 位于提取出的 `.text` 偏移 0。
 
-结构化链接已在 `tests/ut/backend/cce_mlir/test_adapter_link.py` 验证（入口顺序与符号
-解析），且 `ir.compile(kernel_compiler="cce_mlir")` 已生成 runtime 产物
-（带 `link_objects` 的 `kernel_config.py`、适配器源码、device object、orchestration）。
-在 Ascend 910B2 上通过 `CompiledProgram` 执行该产物会**启动 kernel 但在 AICore 上
-陷入异常**（`retCode=0x26 aicore exception`）：cce-mlir 将函数体编译为带启动元数据的
-kernel entry，而不是可调用的 device function。让 cce-mlir 生成非 kernel 的
-`npu.func` 目前会降低失败（`cce-lower-to-hivm left a live unrealized_conversion_cast`），
-因为只有 kernel 函数会获得 void ABI。因此数值 ST 目前是严格 `xfail`，直到 cce-mlir
-提供可调用 device function ABI，或以独立的 runtime 产物类型经 ACL 启动。
+`ir.compile(kernel_compiler="cce_mlir")` 已生成 runtime 产物（带 `link_objects`
+的 `kernel_config.py`、适配器源码、device object、orchestration），链接已在
+`tests/ut/backend/cce_mlir/test_adapter_link.py` 验证（`kernel_entry` 位于 `.text`
+偏移 0，standalone 符号已解析）。
+
+device object 是**可独立调用的函数**，而不是 cce-mlir 的 kernel entry。cce-mlir
+的翻译器只为带 kernel 标记的函数添加每个函数的 AI-core
+`target-cpu`/`target-features`，因此 `pipeline.compile_device_function` 在
+`npu-lower-pto-to-cce-pipeline` 与 `npu-lower-cce-to-llvm-device-only-pipeline`
+期间保留该标记，经 `cce-translate` 翻译后再重写 LLVM IR：用裸 `<name>` 替换
+`<name>__kernel0`，并丢弃 `!hivm.annotations` kernel 元数据。随后由 `bisheng`
+编译，适配器将其链接到 `kernel_entry` 之下。cce-mlir 后续应提供原生的可调用
+device function 模式来替代这一重写。
+
+`tests/st/runtime/cce_mlir/test_cce_mlir_numerical.py` 已在 Ascend 910B2 上通过
+`CompiledProgram` 运行 cube matmul 与 vector add 并通过。
 
 ## 已知限制
 

@@ -20,12 +20,12 @@ def _adapter(kernel):
     return lowered, generate_adapter_source(lowered)
 
 
-def test_adapter_calls_the_derived_device_symbol_once():
+def test_adapter_calls_the_derived_function_symbol_once():
     lowered, source = _adapter(kernels.cube_matmul)
 
-    assert source.count(f'extern "C" __aicore__ void {lowered.device_symbol}(') == 1
+    assert source.count(f'extern "C" __aicore__ void {lowered.symbol_name}(') == 1
     assert source.count('extern "C" __aicore__ void kernel_entry(') == 1
-    assert source.count(f"    {lowered.device_symbol}(") == 1
+    assert source.count(f"    {lowered.symbol_name}(") == 1
 
 
 def test_adapter_unpacks_one_pointer_per_parameter_in_order():
@@ -34,7 +34,7 @@ def test_adapter_unpacks_one_pointer_per_parameter_in_order():
     for index, parameter in enumerate(lowered.parameters):
         assert f"args[{index}]" in source
         assert parameter.element.c_type in source
-    call = source.split(f"    {lowered.device_symbol}(")[1].split(");")[0]
+    call = source.split(f"    {lowered.symbol_name}(")[1].split(");")[0]
     assert len(call.split(",")) == len(lowered.parameters)
 
 

@@ -18,6 +18,7 @@ from pypto.backend.cce_mlir.elf import is_relocatable, symbol_names  # noqa: E40
 from pypto.backend.cce_mlir.emit import emit_module  # noqa: E402
 from pypto.backend.cce_mlir.pipeline import (  # noqa: E402
     cann_toolkit,
+    compile_device_function,
     compile_device_object,
 )
 
@@ -42,6 +43,22 @@ def test_built_module_compiles_to_a_device_object(kernel):
     assert data[:4] == b"\x7fELF"
     assert is_relocatable(data)
     assert lowered.device_symbol in symbol_names(data)
+
+
+@pytest.mark.parametrize("kernel", [kernels.cube_matmul, kernels.vector_add])
+def test_standalone_function_defines_the_bare_symbol(kernel):
+    toolkit = _toolkit()
+    (lowered,) = lower_program(kernel.lower(), target=CceTarget.A3)
+    module = emit_module(lowered)
+
+    data = compile_device_function(module, lowered, toolkit=toolkit)
+
+    symbols = symbol_names(data)
+    assert data[:4] == b"\x7fELF"
+    assert is_relocatable(data)
+    assert lowered.symbol_name in symbols
+    assert lowered.device_symbol not in symbols
+    assert all("__kernel0" not in name for name in symbols)
 
 
 def test_missing_expected_symbol_is_refused():

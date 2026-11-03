@@ -17,17 +17,27 @@ business.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from .elf import ElfError, is_relocatable, symbol_names
 from .errors import CceMlirError
+from .kernel_ir import CceKernel
 
 __all__ = [
     "cann_toolkit",
+    "compile_device_function",
     "compile_device_object",
     "extract_device_object",
     "lower_to_llvm",
 ]
+
+# cce-mlir spells the bisheng arch with a "-cube" suffix for both core kinds;
+# the per-function target-cpu selects cube vs vector.
+_DEVICE_ARCH: dict[str, str] = {"a3": "dav-c220-cube", "a5": "dav-c310-cube"}
 
 _ELF_MAGIC = b"\x7fELF"
 
@@ -162,4 +172,132 @@ def compile_device_object(
                 "missing-device-symbol",
                 f"device object does not define {expected_symbol!r}",
             )
+    return data
+
+
+def _tool(binary: str, fallback: Path | None = None) -> str:
+    """Resolve a driver binary, preferring ``PATH``."""
+    found = shutil.which(binary)
+    if found is not None:
+        return found
+    if fallback is not None and fallback.is_file():
+        return str(fallback)
+    raise CceMlirError(
+        "missing-toolchain",
+        f"{binary!r} was not found on PATH or at {fallback}",
+    )
+
+
+def _run_tool(command: list[str], *, label: str) -> str:
+    """Run a compiler driver, raising its stderr on failure."""
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise CceMlirError(
+            "driver-failed",
+            f"{label} failed with exit code {completed.returncode}:\n{completed.stderr.strip()}",
+        )
+    return completed.stdout
+
+
+def _as_standalone_function(text: str, device_symbol: str, symbol: str) -> str:
+    """Turn cce-mlir's translated kernel entry into a plain device function.
+
+    cce-mlir's translator only applies AI-core target attributes to functions
+    that carry the kernel marker, and it attaches kernel annotations and renames
+    the symbol in the same step. For the PyPTO runtime the body must be a
+    callable function: keep the target attributes, drop the kernel annotations
+    and use the bare symbol. Upstream should grow a native mode for this.
+    """
+    text = text.replace(device_symbol, symbol)
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not line.startswith("!hivm.annotations") and not (line.startswith("!") and '"kernel"' in line)
+    )
+
+
+def compile_device_function(
+    module: Any,
+    kernel: CceKernel,
+    *,
+    toolkit: CceToolkit | None = None,
+) -> bytes:
+    """Compile the kernel body as a standalone, linkable device function.
+
+    Unlike :func:`compile_device_object`, which produces cce-mlir's kernel entry
+    (`<name>__kernel0`), this product defines the bare `<name>` symbol with a
+    pointer-only ABI and no kernel metadata, so a PyPTO ``kernel_entry`` adapter
+    can call it.
+
+    The kernel marker is kept through cce-mlir's lowering and translation
+    because that is the only path that stamps the per-function AI-core
+    ``target-cpu``/``target-features``; the translated LLVM IR then has its
+    kernel symbol and annotations rewritten.
+
+    Args:
+        module: A built module from
+            :func:`pypto.backend.cce_mlir.emit.emit_module`.
+        kernel: Typed kernel IR for the symbols and target.
+        toolkit: CANN toolkit; discovered when ``None``.
+
+    Returns:
+        Raw ``ET_REL`` ELF bytes defining ``kernel.symbol_name``.
+
+    Raises:
+        CceMlirError: On a pipeline, translation, or codegen failure, or when
+            the object does not define the standalone symbol.
+    """
+    from cce_mlir.passmanager import PassManager
+
+    effective = toolkit or cann_toolkit()
+    with module.context:
+        pass_manager = PassManager("builtin.module")
+        pass_manager.add("npu-lower-pto-to-cce-pipeline")
+        pass_manager.run(module.operation)
+        pass_manager = PassManager("builtin.module")
+        pass_manager.add("npu-lower-cce-to-llvm-device-only-pipeline")
+        pass_manager.run(module.operation)
+
+    translate = _tool("cce-translate", Path("/opt/cce-mlir/build/bin/cce-translate"))
+    bisheng = _tool("bisheng", Path(effective.root) / "bin" / "bisheng")
+
+    with tempfile.TemporaryDirectory(prefix="pypto-cce-function-") as directory:
+        mlir_path = Path(directory) / "device.mlir"
+        mlir_path.write_text(str(module), encoding="utf-8")
+        llvm_ir = _run_tool(
+            [translate, str(mlir_path), "--cce-to-llvmir"],
+            label="cce-translate",
+        )
+        llvm_ir = _as_standalone_function(llvm_ir, kernel.device_symbol, kernel.symbol_name)
+        llvm_path = Path(directory) / "device.ll"
+        llvm_path.write_text(llvm_ir + "\n", encoding="utf-8")
+        object_path = Path(directory) / "device.o"
+        _run_tool(
+            [
+                bisheng,
+                "-x",
+                "ir",
+                "-c",
+                "--cce-aicore-only",
+                "--target=hiipu64-hisilicon-cce",
+                f"--cce-aicore-arch={_DEVICE_ARCH[kernel.target.value]}",
+                "-mllvm",
+                "-cce-aicore-stack-size=0x8000",
+                "-mllvm",
+                "-cce-aicore-function-stack-size=0x8000",
+                "-mllvm",
+                "-cce-aicore-addr-transform",
+                "-o",
+                str(object_path),
+                str(llvm_path),
+            ],
+            label="bisheng",
+        )
+        data = object_path.read_bytes()
+
+    if kernel.symbol_name not in symbol_names(data):
+        raise CceMlirError(
+            "missing-device-symbol",
+            f"standalone device function does not define {kernel.symbol_name!r}",
+        )
     return data

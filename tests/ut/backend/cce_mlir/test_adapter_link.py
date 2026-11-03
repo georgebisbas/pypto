@@ -29,7 +29,7 @@ from pypto.backend.cce_mlir.elf import entry_point, symbol_values  # noqa: E402
 from pypto.backend.cce_mlir.emit import emit_module  # noqa: E402
 from pypto.backend.cce_mlir.pipeline import (  # noqa: E402
     cann_toolkit,
-    compile_device_object,
+    compile_device_function,
 )
 
 from . import kernels  # noqa: E402
@@ -91,10 +91,8 @@ def test_adapter_links_with_kernel_entry_first(tmp_path):
     ccec, linker, includes = _toolchain()
 
     (lowered,) = lower_program(kernels.cube_matmul.lower(), target=CceTarget.A3)
-    # cce-mlir's full pipeline needs the host driver to keep the device module
-    # alive; the extracted object is independent of it.
     module = emit_module(lowered)
-    device_object = compile_device_object(module, toolkit=toolkit, expected_symbol=lowered.device_symbol)
+    device_object = compile_device_function(module, lowered, toolkit=toolkit)
     device_path = tmp_path / "device.o"
     device_path.write_bytes(device_object)
 
@@ -131,7 +129,8 @@ def test_adapter_links_with_kernel_entry_first(tmp_path):
     values = symbol_values(relocatable.read_bytes())
     assert "kernel_entry" in values
     assert values["kernel_entry"] == 0
-    assert lowered.device_symbol in values
+    assert lowered.symbol_name in values
+    assert lowered.device_symbol not in values
 
     final = tmp_path / "combined.elf"
     subprocess.run(
