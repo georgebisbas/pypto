@@ -8,27 +8,19 @@
 
 ARG CANN_IMAGE=quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 ARG CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:cpu-latest
-ARG CCE_MLIR_REPO=https://gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir.git
+ARG CCE_MLIR_REPO=git@gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git
 ARG CCE_MLIR_REF=983beae64d7cfec3903782d34621150a68a1df87
 ARG CANN_ARCH=x86_64-linux
 
 FROM ${CCE_MLIR_IMAGE} AS cce_build
 ARG CCE_MLIR_REPO
 ARG CCE_MLIR_REF
-ARG CCE_MLIR_GITLAB_USER=gitlab-ci-token
 
-RUN --mount=type=secret,id=cce_mlir_git_token,required=true \
+RUN --mount=type=ssh,id=cce_mlir_ssh,required=true \
  set -eu; \
- printf '%s\n' \
-      '#!/bin/sh' \
-      'case "$1" in' \
-      '  *Username*) printf "%s\\n" "${CCE_MLIR_GITLAB_USER}" ;;' \
-      '  *Password*) cat /run/secrets/cce_mlir_git_token ;;' \
-      'esac' > /tmp/cce-mlir-git-askpass; \
- chmod 700 /tmp/cce-mlir-git-askpass; \
- export CCE_MLIR_GITLAB_USER GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/tmp/cce-mlir-git-askpass; \
- git clone "$CCE_MLIR_REPO" /opt/cce-mlir; \
- rm -f /tmp/cce-mlir-git-askpass \
+ mkdir -p -m 0700 /root/.ssh; \
+ ssh-keyscan -H gitlab.huaweirc.ch >> /root/.ssh/known_hosts; \
+ git clone "$CCE_MLIR_REPO" /opt/cce-mlir \
  && git -C /opt/cce-mlir checkout --detach "$CCE_MLIR_REF" \
  && python3 -m pip install -e /opt/cce-mlir --no-build-isolation \
       --config-settings=build-dir=/opt/cce-mlir/build \
