@@ -38,15 +38,19 @@ if TYPE_CHECKING:
     from .distributed_compiled_program import DistributedCompiledProgram
 
 
-def _write_files(files: dict[str, str], output_dir: str) -> None:
+def _write_files(files: dict[str, str | bytes], output_dir: str) -> None:
     """Write a dict of {relative_path: content} to output_dir."""
     for filepath, content in files.items():
         full_path = os.path.join(output_dir, filepath)
         file_dir = os.path.dirname(full_path)
         if file_dir:
             os.makedirs(file_dir, exist_ok=True)
-        with open(full_path, "w") as f:
-            f.write(content)
+        if isinstance(content, bytes):
+            with open(full_path, "wb") as f:
+                f.write(content)
+        else:
+            with open(full_path, "w") as f:
+                f.write(content)
 
 
 def _ensure_orchestration_headers(output_dir: str) -> None:
@@ -302,6 +306,7 @@ def compile(  # noqa: PLR0913
     emit_source_loc: bool | None = None,
     dump_ptoas_passes: bool = False,
     runtime: _passes.RuntimeKind | None = None,
+    kernel_compiler: str = "ptoas",
 ) -> "CompiledProgram | DistributedCompiledProgram":
     """Compile a Program through passes and codegen.
 
@@ -398,6 +403,11 @@ def compile(  # noqa: PLR0913
             ``PassContext``. Its wire name is written to
             ``RUNTIME_CONFIG["runtime"]`` in the generated ``kernel_config.py``
             and is what a ``ChipWorker`` must match to bind the program.
+        kernel_compiler: Device-kernel compiler route. ``"ptoas"`` (default)
+            keeps the production PTOAS path for every backend. ``"cce_mlir"``
+            routes InCore kernels through cce-mlir, which requires an onboard
+            ``a2a3`` target. The PTOAS-only options (``skip_ptoas``,
+            ``dump_ptoas_passes``) are ignored by that route.
 
     Returns:
         A :class:`CompiledProgram` that wraps the output directory and can
@@ -414,7 +424,14 @@ def compile(  # noqa: PLR0913
     """
     if platform is not None:
         _warn_deprecated_platform("ir.compile")
+    if kernel_compiler not in ("ptoas", "cce_mlir"):
+        raise ValueError(f"kernel_compiler must be 'ptoas' or 'cce_mlir', got {kernel_compiler!r}")
     backend_type, mode = _resolve_target(backend_type, execution_mode, platform)
+    if kernel_compiler == "cce_mlir" and mode is ExecutionMode.SIM:
+        raise ValueError(
+            "kernel_compiler='cce_mlir' produces an onboard AICore device object; "
+            "it cannot target a simulator build"
+        )
     platform = _platform_string(backend_type, mode)
     _select_backend(backend_type=backend_type, platform=platform)
 
@@ -473,9 +490,23 @@ def compile(  # noqa: PLR0913
 
         # Codegen target selection is owned by the per-backend BackendHandler;
         # any value of the ``BackendType`` enum is a valid PTO codegen target.
+        if kernel_compiler == "cce_mlir":
+            arch = _backend_core.get_handler().get_pto_target_arch()
+            if arch != "a2a3":
+                raise ValueError(
+                    "kernel_compiler='cce_mlir' supports the a2a3 target only; "
+                    f"the configured backend reports {arch!r}"
+                )
+            # Optional route: importing it eagerly would pull cce-mlir wiring
+            # into every compile.
+            from pypto.backend.cce_mlir.backend import generate as _cce_generate  # noqa: PLC0415
+
+            codegen_generate = _cce_generate
+        else:
+            codegen_generate = generate
         try:
             with _stage("codegen"):
-                files = generate(
+                files = codegen_generate(
                     transformed_program,
                     output_dir,
                     skip_ptoas=skip_ptoas,

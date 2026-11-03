@@ -396,6 +396,7 @@ class RunConfig:
     distributed_config: "DistributedConfig | None" = None
     analyze_auto_scopes_for_deps: bool = False
     memory_planner: MemoryPlanner | None = None
+    kernel_compiler: str = "ptoas"
     dump_ptoas_passes: bool = False
 
     if TYPE_CHECKING:
@@ -598,6 +599,7 @@ class RunConfig:
             analyze_auto_scopes_for_deps=self.analyze_auto_scopes_for_deps,
             output_dir=self.save_kernels_dir,
             memory_planner=self.memory_planner,
+            kernel_compiler=self.kernel_compiler,
             distributed_config=self.distributed_config,
         )
 
@@ -914,12 +916,17 @@ class CompileOptions:
     # active, so an unset planner has to defer to that context.
     output_dir: str | None = None
     memory_planner: MemoryPlanner | None = None
+    kernel_compiler: str = "ptoas"
     distributed_config: "DistributedConfig | None" = None
 
     def __post_init__(self) -> None:
         if type(self.execution_mode) is not ExecutionMode:
             raise TypeError(
                 f"CompileOptions.execution_mode must be an ExecutionMode, got {self.execution_mode!r}"
+            )
+        if self.kernel_compiler not in ("ptoas", "cce_mlir"):
+            raise ValueError(
+                f"CompileOptions.kernel_compiler must be 'ptoas' or 'cce_mlir', got {self.kernel_compiler!r}"
             )
         _resolve_target(self.backend_type, self.execution_mode)
 
@@ -940,6 +947,7 @@ class CompileOptions:
             "diagnostic_phase": self.diagnostic_phase,
             "disabled_diagnostics": self.disabled_diagnostics,
             "analyze_auto_scopes_for_deps": self.analyze_auto_scopes_for_deps,
+            "kernel_compiler": self.kernel_compiler,
         }
         for name in ("output_dir", "memory_planner", "distributed_config"):
             value = getattr(self, name)

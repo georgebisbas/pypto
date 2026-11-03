@@ -3600,6 +3600,7 @@ class JITFunction:
             enable_pypto_l0c_double_buffer=_resolve_enable_pypto_l0c_double_buffer(),
             enable_buffer_ir=_resolve_enable_buffer_ir(),
             runtime=_resolve_runtime(),
+            kernel_compiler=compile_kwargs.get("kernel_compiler", "ptoas"),
         )
 
         with self._cache_lock:

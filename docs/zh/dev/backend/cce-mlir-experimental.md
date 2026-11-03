@@ -1,54 +1,109 @@
 # 实验性的 PyPTO 到 cce-mlir 桥接
 
-本文档记录从小型 PyPTO kernel 到 cce-mlir PTO/NPU MLIR 的可复现实验桥接。
-它位于 PyPTO fork 的 `feat/cce-mlir-experimental` 分支，是独立的实验切片；
-不会修改 PyPTO 生产环境中的 `ir.compile`、`BackendType`、runtime 或 PTOAS 路径。
+本文档描述 `feat/cce-mlir-experimental` 分支上的 cce-mlir 编译路线。它是独立路线：
+PyPTO 生产环境的 `ir.compile`、`BackendType`、runtime 和 PTOAS 均未改变。
 
 ## 已实现内容
 
-示例降低（lower）`examples/cce_mlir/fixtures/pypto_matmul.py` 中固定形状的
-`matmul_64x128x64` fixture：
+`pypto.backend.cce_mlir` 将 PyPTO 的 **Buffer 阶段 InCore IR** 降低为 cce-mlir 的
+PTO/NPU MLIR，并在进程内运行 cce-mlir 的 pipeline：
 
 ```text
-PyPTO JITFunction
-  -> PyPTO Buffer/InCore IR
-  -> IR visitor 提取 KernelSpec
-  -> 带显式 layout 和 memory space 的 cce-mlir PTO/NPU MLIR
-  -> cce-opt npu-lower-pto-to-llvm-pipeline
-  -> CANN/ACL device artifact
+PyPTO @pl.jit kernel
+  -> pass pipeline with enable_buffer_ir
+  -> Buffer-stage InCore function
+  -> typed CceKernel IR          (pypto.backend.cce_mlir.analysis)
+  -> in-memory MLIR module       (dialect bindings, no text templates)
+  -> cce-mlir PassManager        (no cce-opt subprocess)
+  -> ET_REL device object + host driver
 ```
 
-支持的合约是 A3 cube matmul：A、B 为 FP16，C 为 FP32，静态二维 shape，且各维是
-16 的倍数。降低过程识别真实的 PyPTO `Buffer` IR 操作（`buffer.load`、
-`buffer.copy`、`buffer.matmul`、`buffer.store`），而不是解析 Python fixture 的
-源代码。发射器显式表达 GM/L1/L0A/L0B/L0C 之间的数据搬运和 layout 转换。
+每个发射（emit）的值都来自 PyPTO IR 或已注册的后端元数据；无法推导的内容一律拒绝。
 
-产物目录包含：
+## 包结构
+
+| 模块 | 职责 |
+| --- | --- |
+| `analysis.py` | Buffer IR → 有类型的 kernel IR；合约校验 |
+| `layout.py` | memory space 与 fractal 编码推导 |
+| `kernel_ir.py` | 与后端无关的有类型 kernel 表示 |
+| `registry.py`、`emitters.py` | 以已注册 PyPTO op 名为键的 emitter 注册表 |
+| `emit.py` | 有类型 IR → `cce_mlir.ir.Module`（使用 dialect 绑定） |
+| `pipeline.py` | 进程内 `PassManager` 运行与 device object 提取 |
+| `elf.py` | ELF64 检查（可重定位、符号、入口点） |
+| `adapter.py` | `kernel_entry` C++ 适配器生成 |
+| `manifest.py`、`driver.py` | 可复现 manifest 与独立编译驱动 |
+
+## 推导规则
+
+| 输出 | 来源 |
+| --- | --- |
+| Memory tier（`gm`、`ub`、`l1`、`l0a`、`l0b`、`l0c`） | `BufferType.memory_space` |
+| Tensor 编码 | cce-mlir layout 工厂：NZ staging `{16, 256/bits}` perm `{1,0}`、ZZ L0A、ZN L0B、固定 16x16 L0C 累加器、GM/UB 为 dense。并与 `BufferType.blayout/slayout/fractal` 交叉校验 |
+| 形状、字节数 | `BufferType.shape` 与 dtype 的字节宽度 |
+| 参数顺序与方向 | `Function.params` + `Function.param_directions` |
+| 操作数角色（读/写/目标） | `ir.get_op_buffer_arg_effect` |
+| Kernel 类型 | `func_type`（AIC → cube，AIV → vector），并与分配的 tier 交叉校验 |
+| Target | `BackendHandler.get_pto_target_arch()`（`a2a3` → `a3`） |
+| 符号 | `Function.name`；`<name>__kernel0` 后缀是 cce-mlir 的翻译合约 |
+
+不字面写入任何 fixture 形状、字节数、layout 或符号。
+
+## 支持的合约
+
+- Cube：`buffer.matmul`、`buffer.matmul_acc`，`Left × Right → Acc`，FP16/BF16
+  输入、FP32 累加器。
+- Vector：UB tile 上的 `buffer.add/mul/sub/div/maximum/minimum` 与
+  `buffer.abs/exp/sqrt/neg/relu/log/recip`。
+- 搬运：`buffer.load`（GM → L1/UB）、`buffer.store`（L0C/UB → GM）、
+  `buffer.copy`（L1 → L0A/L0B、UB → UB）。
+- 静态二维形状、整窗搬运、A3、单 block。
+
+带类型诊断拒绝：窗口或部分搬运、动态 valid shape、标量 kernel 参数、标量
+elementwise 变体、控制流、Bias/A5 scale 空间、cube/vector 混合 kernel、SPMD block
+查询、`buffer.extract/subview/reshape/set_validshape`，以及任何未注册 emitter 的算子。
+
+## 选择该路线
+
+该路线需要显式启用，PTOAS 默认路径不变：
+
+```python
+from pypto.runtime import ExecutionMode, RunConfig
+
+compiled = kernel.compile(
+    config=RunConfig(kernel_compiler="cce_mlir", execution_mode=ExecutionMode.ONBOARD)
+)
+```
+
+`ir.compile(program, kernel_compiler="cce_mlir")` 接受同样的选项。该路线要求
+onboard `a2a3` 目标，忽略仅属于 PTOAS 的选项，并生成带有 `link_objects` 的
+runtime 产物：
+
+```text
+kernel_config.py                      每个 kernel 的 link_objects -> .cce.o
+orchestration/<orch>.cpp              复用现有 orchestration codegen
+kernels/<aic|aiv>/<name>.cpp          kernel_entry 适配器
+kernels/<aic|aiv>/<name>.cce.o        cce-mlir device object
+cce_mlir/<name>.mlir                  发射出的 module
+cce_mlir/<name>.lowered.mlir          经 cce-mlir pipeline 后的 module
+cce_mlir/<name>.manifest.json         合约、版本、object 摘要
+```
+
+## 产物
 
 | 文件 | 含义 |
 | --- | --- |
-| `<kernel>.mlir` | 桥接器发射的输入 module |
-| `<kernel>.lowered.mlir` | 编译成功时的 `cce-opt` 标准输出 |
-| `<kernel>.manifest.json` | kernel 合约、版本、命令和 ABI 审计 |
-| `<kernel>.report.json` | 状态、命令、返回码和诊断文本 |
-
-manifest 明确记录 cce-mlir 的 ACL launcher symbol 与 PyPTO 当前外部 kernel 的
-`kernel_entry(__gm__ int64_t*)` ABI 不匹配。因此若要通过 PyPTO runtime 调用，
-仍需要专用 adapter；该产物不会被静默地标记为 PyPTO external source。
+| `<kernel>.mlir` | 通过 cce-mlir 绑定构造的 module |
+| `<kernel>.lowered.mlir` | 经 `npu-lower-pto-to-llvm-pipeline` 后的 module |
+| `<kernel>.o` | 提取出的 `ET_REL` device object |
+| `<kernel>.manifest.json` | 推导合约、版本、object 摘要、符号、队列任务 id |
+| `report.json` | 编译状态与诊断 |
 
 ## 使用 Docker 复现
 
-该 Dockerfile 仅依赖本仓库，不读取 `pypto-3.0-notes`，也不会从该 checkout
-复制文件。默认会在固定 commit
-`983beae64d7cfec3903782d34621150a68a1df87` checkout cce-mlir，并使用
-cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0.0 A3/A2-A3
-镜像。
-
-在 PyPTO 仓库根目录构建：
+在 PyPTO 仓库根目录（ARM64 Ascend 主机）构建：
 
 ```bash
-git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
-
 docker build \
   --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
   --secret id=cce_mlir_known_hosts,src="$HOME/.ssh/known_hosts" \
@@ -59,73 +114,48 @@ docker build \
   .
 ```
 
-上面的命令适用于 ARM64 Ascend 主机。cce-mlir 项目分别发布
-`cpu-latest`、`npu-x86_64-latest` 和 `npu-aarch64-latest` builder 镜像；
-builder 镜像和 `CANN_ARCH` 必须与主机架构匹配。为兼容普通 x86 Docker 主机，
-Dockerfile 默认使用 `cpu-latest` 和 `x86_64-linux`。
-registry 认证（`docker login`）和仓库认证（转发的 SSH agent）是两个独立步骤。
-SSH agent 和主机上已验证的 `known_hosts` 文件只在 clone 步骤可用，不会复制到镜像中。
-`known_hosts` 必须包含 `ssh.gitlab.huaweirc.ch` 的主机密钥；先运行上面的
-`git ls-remote` 命令一次即可交互式建立该记录。
-
-为了审计构建过程，应使用不可变的 `@sha256:<digest>` 覆盖两个镜像引用，并在构建
-日志中记录 cce-mlir commit。Dockerfile 保留可读 tag 作为默认值，是因为不同 registry
-镜像和架构的 digest 可能不同。
-
-在镜像中编译：
+编译（不需要设备）：
 
 ```bash
 docker run --rm \
+  -v "$PWD/artifacts:/opt/pypto/artifacts" \
   pypto-cce-mlir:910b \
   compile --output-dir /opt/pypto/artifacts/cce_mlir
 ```
 
-在具备匹配 Ascend container runtime 和设备访问权限的 NPU 主机上运行：
+在 NPU 上运行**必须经过队列**，不能手选设备。按
+`pypto-3.0-notes/tools/npu-task-submit-runbook.md` 启动加入队列的容器，然后提交：
 
 ```bash
-docker run --rm --runtime=ascend \
-  --device=/dev/davinci0 \
-  -e ASCEND_VISIBLE_DEVICES=0 \
-  pypto-cce-mlir:910b \
-  run --device 0 --output-dir /opt/pypto/artifacts/cce_mlir
+docker exec <queue-container> task-submit --device auto --device-num 1 \
+  --max-time 1800 --timeout 0 \
+  --run 'python3 -m examples.cce_mlir run --output-dir /tmp/cce_run'
 ```
 
-`run` 是 cce-mlir `npu_runner` smoke test，并使用 NumPy FP32 matmul 校验输出。
-只有设备调用成功后才会打印 `NPU smoke test passed`；仅编译成功并不能证明 NPU 已执行。
+成功时打印 `NPU smoke test passed`。驱动从 `TASK_DEVICE`（或 `task-submit`
+追加的 `--device` 值）读取分配到的逻辑设备，绝不修改 `ASCEND_RT_VISIBLE_DEVICES`。
 
-## 不使用 Docker 复现
+## Runtime ABI 状态
 
-在环境中已安装 PyPTO 和 cce-mlir 时：
+PyPTO 以 `kernel_entry(__gm__ int64_t* args)` 调度，每个参数是一个设备 `Tensor`
+描述符；cce-mlir 发射的 `<name>__kernel0` 接收裸 GM 指针。`adapter.py` 生成桥接代码，
+runtime 的 kernel 编译器接受额外链接对象，并**首先**链接适配器对象，使 `kernel_entry`
+位于提取出的 `.text` 偏移 0。
 
-```bash
-PYTHONPATH=. python3 -m examples.cce_mlir compile \
-  --cce-opt /opt/cce-mlir/build/bin/cce-opt \
-  --cann-root /usr/local/Ascend/cann-9.0.0 \
-  --cann-arch x86_64-linux \
-  --output-dir artifacts/cce_mlir
-```
-
-当 `cce-opt` 或 CANN 配置缺失时，命令仍会生成输入 MLIR、manifest 和 report，
-并返回明确的阻塞状态：`blocked_missing_cce_opt` 或
-`blocked_missing_cann_configuration`。
-
-## 范围和下一层集成
-
-本分支验证了最小但有用的 compiler-infrastructure 路径：
-
-1. PyPTO 继续作为 source-level 和 Buffer-IR producer。
-2. cce-mlir 负责 target-specific memory space、layout、PTO 操作和 CANN/LLVM 降低。
-3. 桥接器只负责合约提取、发射、产物元数据以及 cce-mlir runner smoke test。
-
-下一步应先实现 cce-mlir 生成的 ACL launcher ABI 到 PyPTO external-kernel ABI 的
-显式 adapter，并在真实 NPU 上确认 binary 和 symbol 合约稳定后再做。完整 PyPTO
-backend 还需要 target registration、shape/layout 覆盖、runtime ownership 和数值测试；
-这些内容不在本分支范围内。
+结构化链接已在 `tests/ut/backend/cce_mlir/test_adapter_link.py` 验证（入口顺序与符号
+解析），且 `ir.compile(kernel_compiler="cce_mlir")` 已生成 runtime 产物
+（带 `link_objects` 的 `kernel_config.py`、适配器源码、device object、orchestration）。
+在 Ascend 910B2 上通过 `CompiledProgram` 执行该产物会**启动 kernel 但在 AICore 上
+陷入异常**（`retCode=0x26 aicore exception`）：cce-mlir 将函数体编译为带启动元数据的
+kernel entry，而不是可调用的 device function。让 cce-mlir 生成非 kernel 的
+`npu.func` 目前会降低失败（`cce-lower-to-hivm left a live unrealized_conversion_cast`），
+因为只有 kernel 函数会获得 void ABI。因此数值 ST 目前是严格 `xfail`，直到 cce-mlir
+提供可调用 device function ABI，或以独立的 runtime 产物类型经 ACL 启动。
 
 ## 已知限制
 
-- 只发射固定的 A3 cube 合约。
-- 本切片尚未实现 A5/vector 降低。
-- 本地开发主机可能无法运行 `cce-opt`，因为共享库和 CANN 安装由容器提供。
-- Docker 构建需要访问 cce-mlir GitLab registry/repository 和 Ascend CANN registry。
-- NPU 执行需要 Ascend 主机、兼容的 driver/runtime 和设备透传；CPU 编译不能验证硬件执行。
+- 仅 A3；PyPTO 的 Buffer IR 选择门是 `a2a3`。
+- 每个 kernel 一个 block；不支持 SPMD block 查询。
+- `npu-lower-pto-to-llvm-pipeline` 需要独立 host driver 才能保留 device module，
+  因此 device object 路径目前也会发射它。
+- cce-mlir 由 Docker 镜像提供；缺失时跳过 MLIR 与 pipeline 测试，有类型前端仍可运行。

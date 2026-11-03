@@ -170,17 +170,24 @@ class KernelCompiler:
         runtime_name: str | None = None,
         extra_include_dirs: list[str] | None = None,
         build_dir: str | None = None,
+        extra_objects: list[str] | None = None,
     ) -> bytes:
         """Compile a simulator SO or linked device ELF in a private build directory.
 
         SDK toolchains supply fixed target flags. PyPTO owns the invocation,
         output validation and cleanup, including failed compiles and links.
         ``build_dir`` optionally selects the parent for temporary build files.
+        ``extra_objects`` are linked after the compiled adapter under
+        ``kernel_entry``; a cce-mlir device object is such an artifact.
         """
         source = self._source_path(source_path)
         if core_type not in ("aic", "aiv"):
             raise ValueError(f"Unknown core_type: {core_type!r}; expected 'aic' or 'aiv'")
         simulation = self.platform.endswith("sim")
+        if extra_objects and simulation:
+            raise RuntimeError(
+                "linked device objects are onboard-only artifacts and cannot be used with a simulator build"
+            )
         if not simulation and pto_isa_root is None:
             raise ValueError("pto_isa_root is required for incore compilation")
         toolchain = self.sdk.gxx15 if simulation else self.sdk.ccec
@@ -209,7 +216,15 @@ class KernelCompiler:
             assert self.sdk.ccec is not None, "Device linking requires the CCEC toolchain"
             linked = output.with_suffix(".elf")
             return self._run(
-                [self.sdk.ccec.linker_path, "-e", "kernel_entry", "-o", str(linked), str(output)],
+                [
+                    self.sdk.ccec.linker_path,
+                    "-e",
+                    "kernel_entry",
+                    "-o",
+                    str(linked),
+                    str(output),
+                    *(extra_objects or []),
+                ],
                 linked,
                 "Incore-link",
             )

@@ -126,6 +126,7 @@ class TestMakeCacheKey:
             ("dep_layouts", ()),
             ("runtime", "tensormap_and_ringbuffer"),
             ("enable_buffer_ir", False),
+            ("kernel_compiler", "ptoas"),
             ("buffer_ir_version", 0),
         )
 

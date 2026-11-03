@@ -129,11 +129,17 @@ fixable = ["ALL"]
 # Embeds a verbatim pass dump as a fixture; tile annotations carry their MemRef
 # inline and cannot be wrapped without changing what is under test.
 "tests/ut/tools/test_memory_map.py" = ["E501"]
-# The bridge embeds cce-mlir's verbatim textual IR; line breaks inside those
-# operations would change the representation and make it harder to compare
-# with the validated prototype.
-"examples/cce_mlir/lowering.py" = ["E501", "PLC0415"]
+# The cce-mlir bindings are an optional runtime dependency; the example imports
+# them only inside the `run` command so `compile` works without them.
 "examples/cce_mlir/__main__.py" = ["PLC0415"]
+# The cce-mlir backend keeps its typed front end importable without the
+# external bindings, so the MLIR/pipeline modules import them at entry points.
+"python/pypto/backend/cce_mlir/_dialects.py" = ["PLC0415"]
+"python/pypto/backend/cce_mlir/driver.py" = ["PLC0415"]
+"python/pypto/backend/cce_mlir/emit.py" = ["PLC0415"]
+"python/pypto/backend/cce_mlir/pipeline.py" = ["PLC0415"]
+"tests/ut/backend/cce_mlir/*.py" = ["PLC0415"]
+"tests/ut/backend/test_cce_mlir_experimental.py" = ["PLC0415"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import hashlib
 import importlib.util
 import logging
 import os
@@ -121,7 +122,7 @@ def _kernel_cache_file(
             *compiler.get_kernel_include_dirs(runtime_name),
             *(kernel.get("extra_include_dirs") or ()),
         ]
-    return kernel_binary_cache_path(
+    base = kernel_binary_cache_path(
         cache_dir,
         source=kernel["source"],
         core_type=kernel["core_type"],
@@ -132,6 +133,18 @@ def _kernel_cache_file(
         runtime_name=runtime_name,
         include_dirs=include_dirs,
     )
+    link_objects = [Path(path) for path in kernel.get("link_objects") or ()]
+    if not link_objects:
+        return base
+    # A linked kernel's binary depends on the extra objects, not only on the
+    # adapter source. Fold their contents into the cache name so a rebuilt
+    # device object never reuses a stale binary.
+    digest = hashlib.sha256()
+    for link_object in link_objects:
+        digest.update(link_object.name.encode())
+        digest.update(b"\0")
+        digest.update(link_object.read_bytes())
+    return base.with_name(f"{base.stem}_{digest.hexdigest()[:16]}{base.suffix}")
 
 
 def _clean_git_revision(repo_root: Path) -> tuple[bool, str | None]:
@@ -295,7 +308,13 @@ def _compile_single_kernel(
 
     ext = ".so" if platform.endswith("sim") else ".o"
     is_external = bool(kernel.get("external", False))
-    output_file = None if is_external else source.with_suffix(ext)
+    link_objects = [str(Path(path)) for path in kernel.get("link_objects") or ()]
+    if link_objects and platform.endswith("sim"):
+        raise RuntimeError(
+            f"kernel {kernel.get('name', source.stem)!r} links a cce-mlir device "
+            "object, which is an onboard-only artifact"
+        )
+    output_file = None if (is_external or link_objects) else source.with_suffix(ext)
 
     raw = None if force_rebuild or output_file is None else _load_binary(output_file)
     if raw is None:
@@ -305,6 +324,7 @@ def _compile_single_kernel(
             pto_isa_root=pto_isa_root,
             runtime_name=runtime_name,
             extra_include_dirs=kernel.get("extra_include_dirs"),
+            extra_objects=link_objects or None,
         )
         if output_file is not None:
             _save_binary(raw, output_file)

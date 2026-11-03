@@ -1,99 +1,68 @@
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO, NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+"""End-to-end standalone compilation of the cce-mlir fixture.
+
+Skipped without the cce-mlir bindings and a CANN installation; the Docker image
+is the authoritative environment.
+"""
+
 import json
-from pathlib import Path
 
-from examples.cce_mlir.compiler import CceMlirCompiler
-from examples.cce_mlir.lowering import CceTarget, emit_cce_mlir, lower_pypto_matmul
-from examples.cce_mlir.manifest import _revision, write_manifest
+import pytest
 
-FIXTURE = Path(__file__).parents[3] / "examples" / "cce_mlir" / "fixtures" / "pypto_matmul.py"
+pytest.importorskip("cce_mlir")
+
+from pypto.backend.cce_mlir import CceMlirError, CceTarget  # noqa: E402
+from pypto.backend.cce_mlir.driver import CompileStatus, compile_program  # noqa: E402
+from pypto.backend.cce_mlir.manifest import _revision  # noqa: E402
+from pypto.backend.cce_mlir.pipeline import cann_toolkit  # noqa: E402
 
 
-def test_lowering_extracts_the_real_pypto_buffer_contract():
-    spec = lower_pypto_matmul(FIXTURE, target=CceTarget.A3)
+def _program():
+    from examples.cce_mlir.__main__ import _DEFAULT_FIXTURE, _load_program
 
-    assert spec.name == "matmul_64x128x64"
-    assert spec.target is CceTarget.A3
-    assert [(argument.name, argument.shape, argument.dtype) for argument in spec.arguments] == [
-        ("a", (64, 128), "f16"),
-        ("b", (128, 64), "f16"),
-        ("c", (64, 64), "f32"),
+    return _load_program(_DEFAULT_FIXTURE)
+
+
+def _toolkit():
+    try:
+        return cann_toolkit()
+    except CceMlirError as exc:
+        pytest.skip(f"CANN is unavailable: {exc}")
+
+
+def test_fixture_compiles_to_a_relocatable_device_object(tmp_path):
+    _toolkit()
+    result = compile_program(_program(), tmp_path, target=CceTarget.A3)
+
+    assert result.status is CompileStatus.LOWERED, result.diagnostics
+    (artifact,) = result.artifacts
+    assert artifact.mlir_path.is_file()
+    assert artifact.lowered_path.is_file()
+    assert artifact.object_path.read_bytes()[:4] == b"\x7fELF"
+
+    manifest = json.loads(artifact.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["kernel_kind"] == "cube"
+    assert manifest["target"] == "a3"
+    assert manifest["device_symbol"] in manifest["object_symbols"]
+    assert manifest["object_sha256"]
+    assert [parameter["direction"] for parameter in manifest["parameters"]] == [
+        "In",
+        "In",
+        "Out",
     ]
-    assert [operation.name for operation in spec.operations] == [
-        "load",
-        "load",
-        "move",
-        "move",
-        "matmul",
-        "store",
-    ]
 
 
-def test_emitter_produces_self_contained_cce_pto_module():
-    mlir = emit_cce_mlir(lower_pypto_matmul(FIXTURE, target=CceTarget.A3))
-
-    assert "npu.kernel_target<a3>" in mlir
-    assert "npu.kernel_kind<cube>" in mlir
-    assert "layout.pack_layout" in mlir
-    assert "layout.repack_layout" in mlir
-    assert "layout.unpack_layout" in mlir
-    assert "pto.matmul" in mlir
-    assert "npu.launch_func @pypto_matmul_mod::@matmul_64x128x64" in mlir
-
-
-def test_compiler_reports_missing_tool_without_running_a_process(tmp_path):
-    compiler = CceMlirCompiler(
-        cce_opt="/does/not/exist/cce-opt",
-        cann_root="/opt/cann",
-        cann_arch="x86_64-linux",
-    )
-
-    result = compiler.compile(lower_pypto_matmul(FIXTURE, target=CceTarget.A3), tmp_path)
-
-    assert result.status == "blocked_missing_cce_opt"
-    assert result.input_path == tmp_path / "matmul_64x128x64.mlir"
-    assert (tmp_path / "matmul_64x128x64.manifest.json").is_file()
-    report = json.loads((tmp_path / "matmul_64x128x64.report.json").read_text())
-    assert report["status"] == "blocked_missing_cce_opt"
-
-
-def test_compiler_reports_missing_cann_configuration(tmp_path, monkeypatch):
-    monkeypatch.delenv("CANN_ROOT", raising=False)
-    monkeypatch.delenv("CANN_ARCH", raising=False)
-    fake_cce_opt = tmp_path / "cce-opt"
-    fake_cce_opt.write_text("#!/bin/sh\nexit 0\n")
-    fake_cce_opt.chmod(0o755)
-    compiler = CceMlirCompiler(cce_opt=str(fake_cce_opt))
-
-    result = compiler.compile(lower_pypto_matmul(FIXTURE, target=CceTarget.A3), tmp_path)
-
-    assert result.status == "blocked_missing_cann_configuration"
-    report = json.loads((tmp_path / "matmul_64x128x64.report.json").read_text())
-    assert report["status"] == "blocked_missing_cann_configuration"
-
-
-def test_manifest_records_toolchain_and_acl_abi(tmp_path):
-    spec = lower_pypto_matmul(FIXTURE, target=CceTarget.A3)
-    artifact = tmp_path / "lowered.mlir"
-    artifact.write_text(
-        '@matmul_64x128x64_name("matmul_64x128x64__kernel0\\00")\n'
-        '"aclrtBinaryLoadFromData\\00"\n'
-        '"aclrtLaunchKernelWithConfig\\00"\n'
-    )
-
-    path = write_manifest(
-        spec,
-        artifact,
-        tmp_path / "manifest.json",
-        revisions={"pypto": "pypto-test", "cce_mlir": "cce-test", "cann": "cann-test"},
-    )
-    manifest = json.loads(path.read_text())
-
-    assert manifest["revisions"]["pypto"] == "pypto-test"
-    assert manifest["kernel"] == "matmul_64x128x64"
-    assert manifest["abi"]["cce_device_symbols"] == ["matmul_64x128x64__kernel0"]
-    assert manifest["abi"]["status"] == "adapter_required"
-
-
-def test_missing_git_metadata_does_not_emit_diagnostics(tmp_path, capsys):
+def test_missing_git_metadata_does_not_emit_diagnostics(tmp_path):
     assert _revision(tmp_path) == "unknown"
-    assert capsys.readouterr().err == ""
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

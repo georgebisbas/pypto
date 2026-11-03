@@ -74,7 +74,10 @@ def _binary_artifacts(work_dir: Path | str) -> list[Path]:
         if not root.is_dir():
             continue
         for extension in ("*.so", "*.o"):
-            candidates.extend(root.rglob(extension))
+            # ``.cce.o`` files are cce-mlir link *inputs* referenced by
+            # kernel_config's ``link_objects``, not compiler outputs. Deleting
+            # them as stale binaries removes the object the adapter links.
+            candidates.extend(path for path in root.rglob(extension) if not path.name.endswith(".cce.o"))
 
     return candidates
 

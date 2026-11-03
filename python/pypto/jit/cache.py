@@ -141,6 +141,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
     dep_layouts: tuple[tuple[str, str, str], ...] = (),
     runtime: RuntimeKind = RuntimeKind.TENSORMAP_AND_RINGBUFFER,
     enable_buffer_ir: bool = True,
+    kernel_compiler: str = "ptoas",
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -207,6 +208,9 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         enable_buffer_ir: Whole-kernel Buffer IR selection from the active
             ``PassContext``. It changes storage legalization and separates
             artifacts from explicit Off mode under every memory planner.
+        kernel_compiler: Device-kernel compiler route (``"ptoas"`` or
+            ``"cce_mlir"``). The two routes produce different artifacts for the
+            same IR, so a cached PTOAS build must never satisfy a cce-mlir call.
 
     Returns:
         Hashable CacheKey tuple.
@@ -242,6 +246,7 @@ def make_cache_key(  # noqa: PLR0913 — args are the key's components, one per 
         ("dep_layouts", dep_layouts),
         ("runtime", runtime_kind_to_name(runtime)),
         ("enable_buffer_ir", enable_buffer_ir),
+        ("kernel_compiler", kernel_compiler),
         ("buffer_ir_version", 7 if enable_buffer_ir else 0),
     )
     return CacheKey(
