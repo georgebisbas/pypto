@@ -16,6 +16,10 @@ FROM ${CCE_MLIR_IMAGE} AS cce_build
 ARG CCE_MLIR_REPO
 ARG CCE_MLIR_REF
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssh-client \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN --mount=type=ssh,id=cce_mlir_ssh,required=true \
  --mount=type=secret,id=cce_mlir_known_hosts,target=/tmp/cce-mlir-known-hosts,required=true \
  set -eu; \
