@@ -76,7 +76,9 @@ def _memory_space(value: object) -> str:
 def _shape(value: object) -> tuple[int, ...]:
     shape = getattr(value, "shape", None)
     dimensions = tuple(getattr(dimension, "value", None) for dimension in (shape or ()))
-    if len(dimensions) != 2 or any(not isinstance(dimension, int) or dimension <= 0 for dimension in dimensions):
+    if len(dimensions) != 2 or any(
+        not isinstance(dimension, int) or dimension <= 0 for dimension in dimensions
+    ):
         raise CceMlirError("the experimental cube bridge requires static rank-2 shapes")
     if any(dimension % 16 for dimension in dimensions):
         raise CceMlirError(f"cube dimensions must be multiples of 16: {dimensions}")
@@ -99,7 +101,8 @@ def lower_pypto_matmul(path: str | Path, *, target: CceTarget) -> KernelSpec:
     functions = [
         function
         for function in program.functions.values()
-        if function.ir_stage == pypto_ir.FunctionIRStage.Buffer and pypto_ir.is_incore_type(function.func_type)
+        if function.ir_stage == pypto_ir.FunctionIRStage.Buffer
+        and pypto_ir.is_incore_type(function.func_type)
     ]
     if len(functions) != 1:
         raise CceMlirError(f"expected one lowered Buffer InCore function, found {len(functions)}")
@@ -111,7 +114,14 @@ def lower_pypto_matmul(path: str | Path, *, target: CceTarget) -> KernelSpec:
         if name is None:
             raise CceMlirError(f"unexpected PyPTO parameter: {parameter.name_hint}")
         parameters[name] = parameter
-        arguments.append(Argument(name, _shape(parameter.type), _dtype(getattr(parameter.type, "dtype", None)), direction="output" if name == "c" else "input"))
+        arguments.append(
+            Argument(
+                name,
+                _shape(parameter.type),
+                _dtype(getattr(parameter.type, "dtype", None)),
+                direction="output" if name == "c" else "input",
+            )
+        )
     expected = ((64, 128, "f16"), (128, 64, "f16"), (64, 64, "f32"))
     if tuple((argument.shape[0], argument.shape[1], argument.dtype) for argument in arguments) != expected:
         raise CceMlirError(f"unexpected PyPTO operand contract: {arguments}")
@@ -175,7 +185,7 @@ def emit_cce_mlir(spec: KernelSpec) -> str:
     return _CUBE_MODULE
 
 
-_CUBE_MODULE = r'''module {
+_CUBE_MODULE = r"""module {
   npu.module @pypto_matmul_mod attributes {target = #npu.kernel_target<a3>} {
     npu.func private @matmul_64x128x64 (%arg0: tensor<64x128xf16, #npu.memory_space<gm>>, %arg1: tensor<128x64xf16, #npu.memory_space<gm>>, %arg2: tensor<64x64xf32, #npu.memory_space<gm>>) kernel attributes {kind = #npu.kernel_kind<cube>} -> tensor<64x64xf32, #npu.memory_space<gm>> {
       %a_gm = layout.pack_layout %arg0 : tensor<64x128xf16, #npu.memory_space<gm>> -> tensor<64x128xf16, {npu.layout = #npu.layout<inner_dims_pos = [0, 1], inner_tile_sizes = [16, 16], outer_dims_perm = [1, 0]>, npu.memory_space = #npu.memory_space<gm>}>
@@ -231,4 +241,4 @@ _CUBE_MODULE = r'''module {
     return %result : i32
   }
 }
-'''
+"""

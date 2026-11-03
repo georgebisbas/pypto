@@ -38,15 +38,19 @@ def build_manifest(
     status: str | None = None,
 ) -> dict[str, Any]:
     artifact_path = Path(artifact) if artifact else None
-    abi = audit(artifact_path) if artifact_path and artifact_path.is_file() else {
-        "artifact": str(artifact_path) if artifact_path else None,
-        "cce_device_symbols": [],
-        "cce_acl_launcher_apis": [],
-        "pypto_required_entry": "kernel_entry(__gm__ int64_t*)",
-        "pypto_entry_present": False,
-        "compatible_with_pypto_external_source": False,
-        "status": "not_lowered",
-    }
+    abi = (
+        audit(artifact_path)
+        if artifact_path and artifact_path.is_file()
+        else {
+            "artifact": str(artifact_path) if artifact_path else None,
+            "cce_device_symbols": [],
+            "cce_acl_launcher_apis": [],
+            "pypto_required_entry": "kernel_entry(__gm__ int64_t*)",
+            "pypto_entry_present": False,
+            "compatible_with_pypto_external_source": False,
+            "status": "not_lowered",
+        }
+    )
     return {
         "kernel": spec.name,
         "target": spec.target.value,
