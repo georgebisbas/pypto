@@ -156,6 +156,9 @@ KNOWN_ISSUES.md
 # Local scratch space (per-developer, not shared)
 .scratch/
 
+# Experimental cce-mlir compiler outputs
+artifacts/cce_mlir/
+
 # Documentation build
 docs/_build/
 site/

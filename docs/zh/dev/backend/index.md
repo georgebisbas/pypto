@@ -9,6 +9,7 @@ pass 从不对 `BackendType` 做分支判断。所有与架构相关的内容 �
 | 页面 | 内容 |
 | ---- | ---- |
 | [BackendHandler：有原则的后端分派](00-backend_handler.md) | 该虚接口、pass 如何查询它，以及新增后端需要做什么 |
+| [实验性的 PyPTO 到 cce-mlir 桥接](cce-mlir-experimental.md) | 独立的 A3 cube 降低和可复现 Docker 工作流 |
 
 ## 已注册算子清单
 

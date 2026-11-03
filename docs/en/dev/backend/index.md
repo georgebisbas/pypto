@@ -10,6 +10,7 @@ means adding a handler, not editing passes.
 | Page | What it covers |
 | ---- | -------------- |
 | [BackendHandler: principled backend dispatch](00-backend_handler.md) | The virtual interface, how passes query it, and what adding a new backend requires |
+| [Experimental PyPTO to cce-mlir bridge](cce-mlir-experimental.md) | A standalone A3 cube lowering and reproducible Docker workflow |
 
 ## Registered operator inventory
 

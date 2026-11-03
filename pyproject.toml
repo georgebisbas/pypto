@@ -129,6 +129,11 @@ fixable = ["ALL"]
 # Embeds a verbatim pass dump as a fixture; tile annotations carry their MemRef
 # inline and cannot be wrapped without changing what is under test.
 "tests/ut/tools/test_memory_map.py" = ["E501"]
+# The bridge embeds cce-mlir's verbatim textual IR; line breaks inside those
+# operations would change the representation and make it harder to compare
+# with the validated prototype.
+"examples/cce_mlir/lowering.py" = ["E501", "PLC0415"]
+"examples/cce_mlir/__main__.py" = ["PLC0415"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100

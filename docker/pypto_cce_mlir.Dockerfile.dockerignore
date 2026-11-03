@@ -1,0 +1,10 @@
+**/.git
+**/.claude
+**/build
+**/build_output
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/artifacts
+runtime/build
+docs/_build
