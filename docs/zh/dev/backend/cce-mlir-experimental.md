@@ -48,10 +48,17 @@ cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0
 
 ```bash
 docker build \
+  --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
+  --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
   -t pypto-cce-mlir:910b \
   .
 ```
+
+上面的命令适用于 ARM64 Ascend 主机。cce-mlir 项目分别发布
+`cpu-latest`、`npu-x86_64-latest` 和 `npu-aarch64-latest` builder 镜像；
+builder 镜像和 `CANN_ARCH` 必须与主机架构匹配。为兼容普通 x86 Docker 主机，
+Dockerfile 默认使用 `cpu-latest` 和 `x86_64-linux`。
 
 为了审计构建过程，应使用不可变的 `@sha256:<digest>` 覆盖两个镜像引用，并在构建
 日志中记录 cce-mlir commit。Dockerfile 保留可读 tag 作为默认值，是因为不同 registry

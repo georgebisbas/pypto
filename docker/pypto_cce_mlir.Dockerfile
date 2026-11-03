@@ -9,6 +9,7 @@ ARG CANN_IMAGE=quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 ARG CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:cpu-latest
 ARG CCE_MLIR_REPO=https://gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir.git
 ARG CCE_MLIR_REF=983beae64d7cfec3903782d34621150a68a1df87
+ARG CANN_ARCH=x86_64-linux
 
 FROM ${CCE_MLIR_IMAGE} AS cce_build
 ARG CCE_MLIR_REPO
@@ -28,11 +29,12 @@ RUN git clone "$CCE_MLIR_REPO" /opt/cce-mlir \
 
 FROM ${CANN_IMAGE} AS runtime
 ARG CCE_MLIR_REF
+ARG CANN_ARCH
 
 ENV CCE_MLIR_COMMIT=${CCE_MLIR_REF} \
     CANN_VERSION=9.0.0-910b \
     CANN_ROOT=/usr/local/Ascend/cann-9.0.0 \
-    CANN_ARCH=x86_64-linux \
+    CANN_ARCH=${CANN_ARCH} \
     PATH=/opt/cce-mlir/build/bin:/usr/local/llvm/bin:${PATH} \
     LD_LIBRARY_PATH=/usr/local/llvm/lib:/opt/cce-mlir/build/lib:${LD_LIBRARY_PATH} \
     PYTHONPATH=/opt/cce-mlir/python:/opt/cce-mlir/build/python_packages:/opt/cce-mlir/build/install/platlib
@@ -56,7 +58,7 @@ RUN python3 -m pip install --no-cache-dir --no-build-isolation -e /opt/pypto \
  && python3 -m examples.cce_mlir compile \
       --cce-opt /opt/cce-mlir/build/bin/cce-opt \
       --cann-root /usr/local/Ascend/cann-9.0.0 \
-      --cann-arch x86_64-linux \
+      --cann-arch ${CANN_ARCH} \
       --output-dir /opt/pypto/docker-check
 
 ENTRYPOINT ["python3", "-m", "examples.cce_mlir"]

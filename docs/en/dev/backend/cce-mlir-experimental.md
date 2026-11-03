@@ -52,10 +52,18 @@ Build from the PyPTO repository root:
 
 ```bash
 docker build \
+  --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
+  --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
   -t pypto-cce-mlir:910b \
   .
 ```
+
+The command above is for an ARM64 Ascend host. The cce-mlir project publishes
+separate `cpu-latest`, `npu-x86_64-latest`, and `npu-aarch64-latest` builder
+images; the builder image and `CANN_ARCH` must match the host architecture.
+The Dockerfile defaults to `cpu-latest` and `x86_64-linux` for compatibility
+with ordinary x86 Docker hosts.
 
 For an auditable build, override both image references with immutable
 `@sha256:<digest>` references and record the selected cce-mlir commit in the
