@@ -40,13 +40,20 @@ FROM ${CANN_IMAGE} AS runtime
 ARG CCE_MLIR_REF
 ARG CANN_ARCH
 
+# cce-mlir's Python bindings (_ccePasses, _cceDialects, _mlir, ...) are compiled
+# by the CMake build and installed only into the build/install trees. The source
+# tree under /opt/cce-mlir/python is a partial package whose _mlir_libs contains
+# no extension modules, so listing it on PYTHONPATH makes it shadow the built
+# package and `import cce_mlir.cpu_runner` fails with
+# "ImportError: cannot import name '_ccePasses'". Keep only the install trees,
+# install/platlib first.
 ENV CCE_MLIR_COMMIT=${CCE_MLIR_REF} \
     CANN_VERSION=9.0.0-910b \
     CANN_ROOT=/usr/local/Ascend/cann-9.0.0 \
     CANN_ARCH=${CANN_ARCH} \
     PATH=/opt/cce-mlir/build/bin:/usr/local/llvm/bin:${PATH} \
     LD_LIBRARY_PATH=/usr/local/llvm/lib:/opt/cce-mlir/build/lib:${LD_LIBRARY_PATH} \
-    PYTHONPATH=/opt/cce-mlir/python:/opt/cce-mlir/build/python_packages:/opt/cce-mlir/build/install/platlib
+    PYTHONPATH=/opt/cce-mlir/build/install/platlib:/opt/cce-mlir/build/python_packages
 
 COPY --from=cce_build /usr/local/llvm /usr/local/llvm
 COPY --from=cce_build /opt/cce-mlir/build /opt/cce-mlir/build
@@ -65,6 +72,7 @@ WORKDIR /opt/pypto
 COPY . /opt/pypto
 
 RUN python3 -m pip install --no-cache-dir --no-build-isolation -e /opt/pypto \
+ && python3 -c "import cce_mlir.cpu_runner, cce_mlir.ir" \
  && python3 -m examples.cce_mlir compile \
       --cce-opt /opt/cce-mlir/build/bin/cce-opt \
       --cann-root /usr/local/Ascend/cann-9.0.0 \
