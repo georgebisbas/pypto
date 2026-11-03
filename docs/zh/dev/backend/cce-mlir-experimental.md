@@ -47,7 +47,10 @@ cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0
 在 PyPTO 仓库根目录构建：
 
 ```bash
+export CCE_MLIR_GITLAB_TOKEN='<具有 read_repository 权限的 GitLab token>'
+
 docker build \
+  --secret id=cce_mlir_git_token,env=CCE_MLIR_GITLAB_TOKEN \
   --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
   --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
@@ -59,6 +62,9 @@ docker build \
 `cpu-latest`、`npu-x86_64-latest` 和 `npu-aarch64-latest` builder 镜像；
 builder 镜像和 `CANN_ARCH` 必须与主机架构匹配。为兼容普通 x86 Docker 主机，
 Dockerfile 默认使用 `cpu-latest` 和 `x86_64-linux`。
+registry 认证（`docker login`）和仓库认证（`CCE_MLIR_GITLAB_TOKEN`）是两个独立步骤：
+前者允许拉取私有 builder 镜像，后者允许在构建过程中 checkout 私有 cce-mlir 源码。
+该 token 只在 clone 步骤挂载，不会保存到镜像中。
 
 为了审计构建过程，应使用不可变的 `@sha256:<digest>` 覆盖两个镜像引用，并在构建
 日志中记录 cce-mlir commit。Dockerfile 保留可读 tag 作为默认值，是因为不同 registry

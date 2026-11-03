@@ -51,7 +51,10 @@ stage is the Ascend CANN 9.0.0 A3/A2-A3 image.
 Build from the PyPTO repository root:
 
 ```bash
+export CCE_MLIR_GITLAB_TOKEN='<GitLab token with read_repository>'
+
 docker build \
+  --secret id=cce_mlir_git_token,env=CCE_MLIR_GITLAB_TOKEN \
   --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
   --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
@@ -63,7 +66,11 @@ The command above is for an ARM64 Ascend host. The cce-mlir project publishes
 separate `cpu-latest`, `npu-x86_64-latest`, and `npu-aarch64-latest` builder
 images; the builder image and `CANN_ARCH` must match the host architecture.
 The Dockerfile defaults to `cpu-latest` and `x86_64-linux` for compatibility
-with ordinary x86 Docker hosts.
+with ordinary x86 Docker hosts. Registry authentication (`docker login`) and
+repository authentication (`CCE_MLIR_GITLAB_TOKEN`) are separate: the former
+allows the private builder image pull, while the latter allows the in-build
+checkout of the private cce-mlir source. The token is mounted only for the
+clone step and is not persisted in the image.
 
 For an auditable build, override both image references with immutable
 `@sha256:<digest>` references and record the selected cce-mlir commit in the

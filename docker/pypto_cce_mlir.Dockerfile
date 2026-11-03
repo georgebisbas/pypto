@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Reproducible PyPTO -> cce-mlir experimental image.
 #
 # The PyPTO source is the Docker build context. cce-mlir is fetched at an
@@ -15,7 +16,9 @@ FROM ${CCE_MLIR_IMAGE} AS cce_build
 ARG CCE_MLIR_REPO
 ARG CCE_MLIR_REF
 
-RUN git clone "$CCE_MLIR_REPO" /opt/cce-mlir \
+RUN --mount=type=secret,id=cce_mlir_git_token,required=true \
+ git -c http.extraheader="PRIVATE-TOKEN: $(cat /run/secrets/cce_mlir_git_token)" \
+      clone "$CCE_MLIR_REPO" /opt/cce-mlir \
  && git -C /opt/cce-mlir checkout --detach "$CCE_MLIR_REF" \
  && python3 -m pip install -e /opt/cce-mlir --no-build-isolation \
       --config-settings=build-dir=/opt/cce-mlir/build \
