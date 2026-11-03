@@ -17,9 +17,9 @@ ARG CCE_MLIR_REPO
 ARG CCE_MLIR_REF
 
 RUN --mount=type=ssh,id=cce_mlir_ssh,required=true \
+ --mount=type=secret,id=cce_mlir_known_hosts,target=/tmp/cce-mlir-known-hosts,required=true \
  set -eu; \
- mkdir -p -m 0700 /root/.ssh; \
- ssh-keyscan -H ssh.gitlab.huaweirc.ch >> /root/.ssh/known_hosts; \
+ export GIT_SSH_COMMAND="ssh -o UserKnownHostsFile=/tmp/cce-mlir-known-hosts -o StrictHostKeyChecking=yes"; \
  git clone "$CCE_MLIR_REPO" /opt/cce-mlir \
  && git -C /opt/cce-mlir checkout --detach "$CCE_MLIR_REF" \
  && python3 -m pip install -e /opt/cce-mlir --no-build-isolation \

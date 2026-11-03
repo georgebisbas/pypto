@@ -54,7 +54,8 @@ Build from the PyPTO repository root:
 git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
 
 docker build \
-  --ssh cce_mlir_ssh=default \
+  --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
+  --secret id=cce_mlir_known_hosts,src="$HOME/.ssh/known_hosts" \
   --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
   --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
@@ -68,7 +69,10 @@ images; the builder image and `CANN_ARCH` must match the host architecture.
 The Dockerfile defaults to `cpu-latest` and `x86_64-linux` for compatibility
 with ordinary x86 Docker hosts. Registry authentication (`docker login`) and
 repository authentication (the forwarded SSH agent) are separate. The SSH
-agent is available only during the clone step and is not copied into the image.
+agent and the host's verified `known_hosts` file are available only during the
+clone step and are not copied into the image. The `known_hosts` file must
+contain the `ssh.gitlab.huaweirc.ch` host key; running the `git ls-remote`
+command above once establishes it interactively.
 
 For an auditable build, override both image references with immutable
 `@sha256:<digest>` references and record the selected cce-mlir commit in the

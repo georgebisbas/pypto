@@ -50,7 +50,8 @@ cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0
 git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
 
 docker build \
-  --ssh cce_mlir_ssh=default \
+  --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
+  --secret id=cce_mlir_known_hosts,src="$HOME/.ssh/known_hosts" \
   --build-arg CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:npu-aarch64-latest \
   --build-arg CANN_ARCH=aarch64-linux \
   -f docker/pypto_cce_mlir.Dockerfile \
@@ -63,7 +64,9 @@ docker build \
 builder 镜像和 `CANN_ARCH` 必须与主机架构匹配。为兼容普通 x86 Docker 主机，
 Dockerfile 默认使用 `cpu-latest` 和 `x86_64-linux`。
 registry 认证（`docker login`）和仓库认证（转发的 SSH agent）是两个独立步骤。
-SSH agent 只在 clone 步骤可用，不会复制到镜像中。
+SSH agent 和主机上已验证的 `known_hosts` 文件只在 clone 步骤可用，不会复制到镜像中。
+`known_hosts` 必须包含 `ssh.gitlab.huaweirc.ch` 的主机密钥；先运行上面的
+`git ls-remote` 命令一次即可交互式建立该记录。
 
 为了审计构建过程，应使用不可变的 `@sha256:<digest>` 覆盖两个镜像引用，并在构建
 日志中记录 cce-mlir commit。Dockerfile 保留可读 tag 作为默认值，是因为不同 registry
