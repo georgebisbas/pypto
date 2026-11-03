@@ -47,7 +47,7 @@ cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0
 在 PyPTO 仓库根目录构建：
 
 ```bash
-git ls-remote git@gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
 
 docker build \
   --ssh cce_mlir_ssh=default \

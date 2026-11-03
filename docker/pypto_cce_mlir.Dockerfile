@@ -8,7 +8,7 @@
 
 ARG CANN_IMAGE=quay.io/ascend/cann:9.0.0-910b-ubuntu22.04-py3.12
 ARG CCE_MLIR_IMAGE=registry.gitlab.huaweirc.ch/zrc-von-neumann-lab/skyline-software/cce-mlir/ci/cce-mlir-dev:cpu-latest
-ARG CCE_MLIR_REPO=git@gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git
+ARG CCE_MLIR_REPO=git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git
 ARG CCE_MLIR_REF=983beae64d7cfec3903782d34621150a68a1df87
 ARG CANN_ARCH=x86_64-linux
 
@@ -19,7 +19,7 @@ ARG CCE_MLIR_REF
 RUN --mount=type=ssh,id=cce_mlir_ssh,required=true \
  set -eu; \
  mkdir -p -m 0700 /root/.ssh; \
- ssh-keyscan -H gitlab.huaweirc.ch >> /root/.ssh/known_hosts; \
+ ssh-keyscan -H ssh.gitlab.huaweirc.ch >> /root/.ssh/known_hosts; \
  git clone "$CCE_MLIR_REPO" /opt/cce-mlir \
  && git -C /opt/cce-mlir checkout --detach "$CCE_MLIR_REF" \
  && python3 -m pip install -e /opt/cce-mlir --no-build-isolation \

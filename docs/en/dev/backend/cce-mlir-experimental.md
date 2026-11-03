@@ -51,7 +51,7 @@ stage is the Ascend CANN 9.0.0 A3/A2-A3 image.
 Build from the PyPTO repository root:
 
 ```bash
-git ls-remote git@gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
 
 docker build \
   --ssh cce_mlir_ssh=default \
