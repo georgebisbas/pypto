@@ -18,10 +18,13 @@ object is linked under ``kernel_entry`` by ``KernelCompiler.compile_incore``.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Mapping
 from typing import Any
 
 from pypto.pypto_core import codegen as _codegen_core
 from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core import log_debug as _log_debug
 from pypto.pypto_core import passes as _passes
 
 from ..kernel_config import generate_kernel_config
@@ -32,7 +35,30 @@ from .emit import emit_module
 from .manifest import build_manifest
 from .pipeline import cann_toolkit, compile_device_function
 
-__all__ = ["CceMlirBackend", "generate"]
+__all__ = ["CceMlirBackend", "generate", "log_written_artifacts"]
+
+
+def log_written_artifacts(output_dir: str | os.PathLike[str], files: Mapping[str, object]) -> None:
+    """At DEBUG, name the resolved artifact root and each cce-mlir device object.
+
+    PyPTO writes every compile to a fresh directory; scripts that discard the
+    returned ``CompiledProgram`` otherwise have no way to find the ``.cce.o``
+    that was linked. ``realpath`` matches ``CompiledProgram.output_dir`` when
+    the artifact path contains symlinks.
+
+    Args:
+        output_dir: Directory the artifact files were written to.
+        files: The generated relative-path map (only keys are inspected).
+    """
+    # The runtime route writes ``<name>.cce.o``; the standalone driver writes
+    # ``<name>.o``. Both are the linked device object.
+    objects = sorted(path for path in files if path.endswith((".cce.o", ".o")))
+    if not objects:
+        return
+    root = os.path.realpath(output_dir)
+    rendered = ", ".join(os.path.realpath(os.path.join(root, path)) for path in objects)
+    _log_debug(f"cce-mlir artifacts written to {root} (device objects: {rendered})")
+
 
 _NAME = "cce_mlir"
 

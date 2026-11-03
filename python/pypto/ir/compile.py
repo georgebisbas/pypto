@@ -520,6 +520,12 @@ def compile(  # noqa: PLR0913
             raise
         _write_files(files, output_dir)
         _ensure_orchestration_headers(output_dir)
+        if kernel_compiler == "cce_mlir":
+            # Name the linked device object at DEBUG; other routes have no
+            # .cce.o, so this is scoped to the route that produces one.
+            from pypto.backend.cce_mlir.backend import log_written_artifacts  # noqa: PLC0415
+
+            log_written_artifacts(output_dir, files)
     finally:
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)

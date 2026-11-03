@@ -89,6 +89,16 @@ cce_mlir/<name>.lowered.mlir          经 cce-mlir pipeline 后的 module
 cce_mlir/<name>.manifest.json         合约、版本、object 摘要
 ```
 
+在 `DEBUG` 级别，成功编译后还会打印解析后的产物根目录和链接的 device object，
+便于丢弃返回值的调用方定位文件：
+
+```text
+2026-11-03 15:20:11.123 D | cce-mlir artifacts written to /abs/out (device objects: /abs/out/kernels/aic/<name>.cce.o)
+```
+
+设置 `PYPTO_LOG_LEVEL=debug` 或调用 `set_log_level(LogLevel.DEBUG)`；默认 INFO
+行为不变。
+
 ## 产物
 
 | 文件 | 含义 |

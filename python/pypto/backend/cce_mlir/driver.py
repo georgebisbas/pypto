@@ -24,6 +24,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .backend import log_written_artifacts
 from .elf import ElfError, symbol_names
 from .errors import CceMlirError
 from .kernel_ir import CceKernel
@@ -150,6 +151,10 @@ def compile_program(
         artifacts.append(KernelArtifact(kernel, mlir_path, lowered_path, object_path, manifest_path))
 
     _write_report(report_path, CompileStatus.LOWERED, "")
+    log_written_artifacts(
+        destination,
+        {str(artifact.object_path.relative_to(destination)): None for artifact in artifacts},
+    )
     return CompileResult(CompileStatus.LOWERED, tuple(artifacts))
 
 

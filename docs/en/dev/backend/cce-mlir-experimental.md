@@ -93,6 +93,17 @@ cce_mlir/<name>.lowered.mlir          module after cce-mlir's pipeline
 cce_mlir/<name>.manifest.json         contract, revisions, object digest
 ```
 
+At `DEBUG`, a successful compile names the resolved artifact root and the
+linked device objects, so a caller that discarded the returned program can find
+them:
+
+```text
+2026-11-03 15:20:11.123 D | cce-mlir artifacts written to /abs/out (device objects: /abs/out/kernels/aic/<name>.cce.o)
+```
+
+Set `PYPTO_LOG_LEVEL=debug` or call `set_log_level(LogLevel.DEBUG)`; the INFO
+default is unchanged.
+
 ## Artifacts
 
 | File | Meaning |
