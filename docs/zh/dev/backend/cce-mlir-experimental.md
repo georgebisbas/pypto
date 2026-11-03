@@ -104,6 +104,13 @@ cce_mlir/<name>.manifest.json         合约、版本、object 摘要
 在 PyPTO 仓库根目录（ARM64 Ascend 主机）构建：
 
 ```bash
+# 一次性准备：登录私有 registry 并验证 SSH 访问。
+docker login registry.gitlab.huaweirc.ch
+git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+test -S "$SSH_AUTH_SOCK"
+ssh-add -l
+mkdir -p artifacts
+
 docker build \
   --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
   --secret id=cce_mlir_known_hosts,src="$HOME/.ssh/known_hosts" \

@@ -108,6 +108,13 @@ cce_mlir/<name>.manifest.json         contract, revisions, object digest
 Build from the PyPTO repository root (ARM64 Ascend host):
 
 ```bash
+# One-time prerequisites: log in to the private registry and verify SSH access.
+docker login registry.gitlab.huaweirc.ch
+git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+test -S "$SSH_AUTH_SOCK"
+ssh-add -l
+mkdir -p artifacts
+
 docker build \
   --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
   --secret id=cce_mlir_known_hosts,src="$HOME/.ssh/known_hosts" \
