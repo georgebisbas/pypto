@@ -47,7 +47,12 @@ cce-mlir 开发镜像提供的 LLVM 层构建。最终 stage 是 Ascend CANN 9.0
 在 PyPTO 仓库根目录构建：
 
 ```bash
+# 一次性准备：登录私有 registry 并验证 SSH 访问。
+docker login registry.gitlab.huaweirc.ch
 git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+test -S "$SSH_AUTH_SOCK"
+ssh-add -l
+mkdir -p artifacts
 
 docker build \
   --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
@@ -76,6 +81,7 @@ SSH agent 和主机上已验证的 `known_hosts` 文件只在 clone 步骤可用
 
 ```bash
 docker run --rm \
+  -v "$PWD/artifacts:/opt/pypto/artifacts" \
   pypto-cce-mlir:910b \
   compile --output-dir /opt/pypto/artifacts/cce_mlir
 ```
@@ -86,9 +92,14 @@ docker run --rm \
 docker run --rm --runtime=ascend \
   --device=/dev/davinci0 \
   -e ASCEND_VISIBLE_DEVICES=0 \
+  -v "$PWD/artifacts:/opt/pypto/artifacts" \
   pypto-cce-mlir:910b \
   run --device 0 --output-dir /opt/pypto/artifacts/cce_mlir
 ```
+
+如果 Docker 版本不接受 `--ssh cce_mlir_ssh=default`，请使用上面的显式 socket
+形式：`--ssh cce_mlir_ssh="$SSH_AUTH_SOCK"`。volume mount 会将编译报告和
+lowered MLIR 持久化到主机的 `artifacts/cce_mlir` 目录。
 
 `run` 是 cce-mlir `npu_runner` smoke test，并使用 NumPy FP32 matmul 校验输出。
 只有设备调用成功后才会打印 `NPU smoke test passed`；仅编译成功并不能证明 NPU 已执行。

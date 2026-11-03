@@ -51,7 +51,12 @@ stage is the Ascend CANN 9.0.0 A3/A2-A3 image.
 Build from the PyPTO repository root:
 
 ```bash
+# One-time prerequisites: log in to the private registry and verify SSH access.
+docker login registry.gitlab.huaweirc.ch
 git ls-remote git@ssh.gitlab.huaweirc.ch:zrc-von-neumann-lab/skyline-software/cce-mlir.git HEAD
+test -S "$SSH_AUTH_SOCK"
+ssh-add -l
+mkdir -p artifacts
 
 docker build \
   --ssh cce_mlir_ssh="$SSH_AUTH_SOCK" \
@@ -83,6 +88,7 @@ Compile inside the image:
 
 ```bash
 docker run --rm \
+  -v "$PWD/artifacts:/opt/pypto/artifacts" \
   pypto-cce-mlir:910b \
   compile --output-dir /opt/pypto/artifacts/cce_mlir
 ```
@@ -94,9 +100,15 @@ container runtime and device access:
 docker run --rm --runtime=ascend \
   --device=/dev/davinci0 \
   -e ASCEND_VISIBLE_DEVICES=0 \
+  -v "$PWD/artifacts:/opt/pypto/artifacts" \
   pypto-cce-mlir:910b \
   run --device 0 --output-dir /opt/pypto/artifacts/cce_mlir
 ```
+
+On Docker versions that do not accept `--ssh cce_mlir_ssh=default`, use the
+explicit socket form shown above: `--ssh cce_mlir_ssh="$SSH_AUTH_SOCK"`.
+The volume mount preserves compile reports and lowered MLIR under
+`artifacts/cce_mlir` on the host.
 
 The `run` command is a cce-mlir `npu_runner` smoke test. It checks the output
 against NumPy FP32 matmul and prints `NPU smoke test passed` only after the
