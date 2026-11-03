@@ -118,6 +118,12 @@ void OrchestrationStmtCodegen::TaskDispatchPlan::Emit(OrchestrationStmtCodegen& 
     cg.EmitPredicateHint(task_var, call);
     cg.EmitManualDeps(call, task_var);
   }
+  // RFC #2521 §13.3: report the requested/admitted width for the managed
+  // collective this task dispatches. A rejected runtime width never reaches
+  // here because its guards put this block in the guard chain's final else.
+  for (const auto& line : dfx_lines) {
+    cg.EmitIndentedLine(line);
+  }
   cg.EmitTaskSubmitAndBind(submit_expr, capture_outputs);
 }
 
@@ -971,8 +977,23 @@ OrchestrationStmtCodegen::TaskDispatchPlan OrchestrationStmtCodegen::BuildDirect
   // Operand shape first, then launch width: a non-contiguous operand is a
   // property of the call the caller wrote, while the width depends on values
   // only known at run time, so the more basic fault reports first.
-  for (auto& line : BuildRuntimeWidthGuardLines(call, callee_func)) {
-    plan.guard_lines.push_back(std::move(line));
+  auto width_guards = BuildRuntimeWidthGuardLines(call, callee_func);
+  auto dfx_lines = BuildLaunchWidthDfxLines(call, callee_func);
+  if (!width_guards.empty()) {
+    // The DFX line is the guard chain's final ``else``: a dispatch the guards
+    // reject must not report a width it never submitted.
+    if (!dfx_lines.empty()) {
+      INTERNAL_CHECK_SPAN(width_guards.back() == "}", call->span_)
+          << "Internal error: the runtime-width guard chain must end with a closing brace";
+      width_guards.back() = "} else {";
+      for (auto& line : dfx_lines) width_guards.push_back("  " + std::move(line));
+      width_guards.emplace_back("}");
+    }
+    for (auto& line : width_guards) plan.guard_lines.push_back(std::move(line));
+  } else {
+    // A literal width is validated at compile time, so nothing can reject this
+    // dispatch here and the DFX line is unconditional.
+    plan.dfx_lines = std::move(dfx_lines);
   }
   return plan;
 }
@@ -1123,6 +1144,79 @@ std::vector<std::string> OrchestrationStmtCodegen::BuildRuntimeWidthGuardLines(
     lines.insert(lines.begin(), "// " + name + " computes its launch width at run time (RFC #2521 O2)");
     lines.emplace_back("}");
   }
+  return lines;
+}
+
+/// RFC #2521 §13.3 launch-width DFX for a managed collective.
+///
+/// Emitted for every call ``LowerL2TensorCollectives`` lowered: the attr
+/// ``kAttrRequestedCoreNum`` is the lowering's marker. The line mirrors the
+/// HOST entry's ``LOG_TIMING`` field-for-field, so a parser can read either
+/// rail:
+///
+///   all_to_all_v: requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d lanes_per_peer=%d
+///
+/// ``launched_core_num`` is the *unclamped* admitted width. On the runtime path
+/// ``kAttrCoreNum`` carries ``max(B, 1)`` only so ``LegalizeSpmdLaunches``
+/// cannot wrap the guards; reporting that value would hide the one number this
+/// line exists to expose. On the single-block path no launch spec is attached
+/// at all, so ``B`` is literally 1.
+///
+/// ``active_lanes`` is ``min(B, S)`` and is computed here rather than read from
+/// the kernel: admission is all-or-error, so the width the launch spec asks for
+/// is the width the kernel runs. This is the same argument the HOST entry makes.
+std::vector<std::string> OrchestrationStmtCodegen::BuildLaunchWidthDfxLines(const CallPtr& call,
+                                                                            const FunctionPtr& callee_func) {
+  std::vector<std::string> lines;
+  auto requested = call->GetAttr<ExprPtr>(kAttrRequestedCoreNum, nullptr);
+  if (!requested) return lines;
+
+  auto signal_type = call->args_.size() > 2 ? As<DistributedTensorType>(call->args_[2]->GetType()) : nullptr;
+  INTERNAL_CHECK_SPAN(signal_type && signal_type->shape_.size() == 2, call->span_)
+      << "Internal error: a managed collective lowered for DFX must keep its [NR, S] signal operand";
+  auto signal_nranks = As<ConstInt>(signal_type->shape_[0]);
+  auto signal_stride = As<ConstInt>(signal_type->shape_[1]);
+  INTERNAL_CHECK_SPAN(signal_nranks && signal_stride, call->span_)
+      << "Internal error: the managed collective's signal must have a static [NR, S] shape";
+
+  // Prefer the unclamped runtime width, then the literal launch width, then the
+  // one-block default used when no launch spec was attached.
+  ExprPtr launched = call->GetAttr<ExprPtr>(kAttrRuntimeBlocks, nullptr);
+  if (!launched) launched = call->GetAttr<ExprPtr>(kAttrCoreNum, nullptr);
+  const std::string launched_expr = launched ? GenerateExprString(launched) : "1";
+
+  // P is the runtime rank count when the width was computed from it; otherwise
+  // the signal's static NR (the literal path never reads the communicator).
+  auto rank_count = call->GetAttr<ExprPtr>(kAttrRuntimeRankCount, nullptr);
+  const std::string nranks_expr =
+      rank_count ? GenerateExprString(rank_count) : std::to_string(signal_nranks->value_);
+
+  const std::string kernel = callee_func ? callee_func->name_ : "";
+  const std::string label =
+      kernel.find("indexed_all_to_all_v") != std::string::npos ? "indexed_all_to_all_v" : "all_to_all_v";
+
+  lines.push_back("// RFC #2521 §13.3: requested L, admitted B and active lanes for this dispatch.");
+  lines.push_back("if (current_runtime()->ops->log_timing != nullptr) {");
+  lines.push_back("  const int64_t a2av_dfx_launched = " + launched_expr + ";");
+  lines.push_back("  const int64_t a2av_dfx_nranks = " + nranks_expr + ";");
+  lines.push_back("  const int64_t a2av_dfx_stride = " + std::to_string(signal_stride->value_) + ";");
+  // Take the min in 64-bit, like the HOST entry: S is only bounded from below,
+  // so narrowing it first could report a wrong lane count.
+  lines.push_back(
+      "  const int64_t a2av_dfx_active = a2av_dfx_launched < a2av_dfx_stride ? a2av_dfx_launched : "
+      "a2av_dfx_stride;");
+  lines.push_back(
+      "  const int64_t a2av_dfx_lanes_per_peer = a2av_dfx_launched >= a2av_dfx_nranks ? "
+      "a2av_dfx_launched / a2av_dfx_nranks : 0;");
+  lines.push_back("  LOG_TIMING(\"" + label +
+                  ": requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d "
+                  "lanes_per_peer=%d\",");
+  lines.push_back("             static_cast<int32_t>(" + GenerateExprString(requested) +
+                  "), static_cast<int32_t>(a2av_dfx_launched),");
+  lines.push_back(
+      "             static_cast<int32_t>(a2av_dfx_active), static_cast<int32_t>(a2av_dfx_nranks),");
+  lines.push_back("             static_cast<int32_t>(a2av_dfx_lanes_per_peer));");
+  lines.push_back("}");
   return lines;
 }
 

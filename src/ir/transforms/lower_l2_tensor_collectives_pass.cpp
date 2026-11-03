@@ -649,8 +649,16 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       // One block needs no gang launch; leave the call exactly as it was. Only
       // a statically folded width can take this path -- a runtime width may be
       // 1 at run time, but the launch spec still has to carry the expression.
-      return std::make_shared<Call>(kernel_callee, std::move(kernel_args), call->args_[1]->GetType(),
-                                    call->span_);
+      //
+      // The requested width still rides along as an attr: RFC #2521 §13.3
+      // reports L=1 alongside the other widths, and codegen needs L even though
+      // this path attaches no launch spec. The attr changes no launch behaviour.
+      std::vector<std::pair<std::string, std::any>> dfx_attrs;
+      dfx_attrs.emplace_back(kAttrRequestedCoreNum, ExprPtr(std::make_shared<ConstInt>(
+                                                        requested_blocks, core_num_dtype, call->span_)));
+      return std::make_shared<Call>(kernel_callee, std::move(kernel_args),
+                                    std::vector<std::pair<std::string, std::any>>{}, std::move(dfx_attrs),
+                                    call->args_[1]->GetType(), call->span_);
     }
     // The launch spec rides the call's attrs, which are not kernel parameters, so
     // the five-operand ABI above is untouched. `require_sync_start` is not
@@ -658,7 +666,12 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
     // together, and the runtime rejects an over-capacity sync-start launch
     // rather than part-starting it.
     std::vector<std::pair<std::string, std::any>> launch_attrs;
+    // The requested width is DFX input, not launch input (RFC #2521 §13.3):
+    // the launch spec below carries the admitted B, which can be smaller than
+    // L. Attach L on both paths so orchestration codegen can report both.
     if (core_num_const) {
+      launch_attrs.emplace_back(kAttrRequestedCoreNum, ExprPtr(std::make_shared<ConstInt>(
+                                                           requested_blocks, core_num_dtype, call->span_)));
       launch_attrs.emplace_back(
           kAttrCoreNum, ExprPtr(std::make_shared<ConstInt>(launched_blocks, core_num_dtype, call->span_)));
     } else {
@@ -667,6 +680,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       // the positivity clamp and the rank count it came from; both ride the
       // call as Expr-valued attrs, which SSA renaming already walks by type.
       auto width = EmitRuntimeLaunchWidth(call, indexed, core_num_expr, core_num_dtype);
+      launch_attrs.emplace_back(kAttrRequestedCoreNum, width.requested);
       launch_attrs.emplace_back(kAttrCoreNum, width.clamped);
       launch_attrs.emplace_back(kAttrRuntimeBlocks, width.raw);
       if (width.rank_count) {
@@ -835,6 +849,7 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   /// the signal's static NR against. ``rank_count`` is null for the indexed
   /// variant, which launches exactly L and never reads P.
   struct RuntimeWidth {
+    ExprPtr requested;
     ExprPtr clamped;
     ExprPtr raw;
     ExprPtr rank_count;
@@ -843,7 +858,11 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
   [[nodiscard]] RuntimeWidth EmitRuntimeLaunchWidth(const CallPtr& call, bool indexed,
                                                     const ExprPtr& core_num, DataType dtype) {
     const Span& span = call->span_;
-    ExprPtr width = core_num;
+    // Bind L once: the width arithmetic, the dispatch guards and the DFX line
+    // all read it. A caller-supplied expression (for example a tensor read)
+    // must not be re-evaluated at each of those sites.
+    auto requested = BindPrefix("a2av_requested_", core_num, span);
+    ExprPtr width = requested;
     ExprPtr rank_count;
     if (!indexed) {
       auto& registry = OpRegistry::GetInstance();
@@ -860,12 +879,12 @@ class LowerL2TensorCollectivesMutator : public IRMutator {
       // deducer-enforced positive, so P=0 can never satisfy ``P == NR``.
       auto divisor =
           BindPrefix("a2av_divisor_", MakeMax(p, std::make_shared<ConstInt>(1, dtype, span), span), span);
-      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(core_num, divisor, span), span);
+      auto rem = BindPrefix("a2av_remainder_", MakeFloorMod(requested, divisor, span), span);
       auto at_least_p =
-          BindPrefix("a2av_atleast_", MakeCast(MakeGe(core_num, divisor, span), dtype, span), span);
-      width = BindPrefix("a2av_blocks_", MakeSub(core_num, MakeMul(rem, at_least_p, span), span), span);
+          BindPrefix("a2av_atleast_", MakeCast(MakeGe(requested, divisor, span), dtype, span), span);
+      width = BindPrefix("a2av_blocks_", MakeSub(requested, MakeMul(rem, at_least_p, span), span), span);
     }
-    return {MakeMax(width, std::make_shared<ConstInt>(1, dtype, span), span), width, rank_count};
+    return {requested, MakeMax(width, std::make_shared<ConstInt>(1, dtype, span), span), width, rank_count};
   }
 
   /// Bind ``value`` to a fresh local and record the binding in the prefix.

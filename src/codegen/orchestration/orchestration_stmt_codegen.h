@@ -345,6 +345,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     /// ``kAttrRequireContiguousOperands``, so other dispatches are unchanged.
     std::vector<std::string> guard_lines;
 
+    /// Launch-width DFX lines (RFC #2521 §13.3) emitted immediately before the
+    /// submit. Only the literal-width path populates this; the runtime-width
+    /// path folds the same lines into the final ``else`` of ``guard_lines``, so
+    /// a rejected dispatch reports no width it never submitted.
+    std::vector<std::string> dfx_lines;
+
     /// Emit the full task-dispatch sequence using the supplied codegen's emit surface.
     /// Consumes ``*this`` (rvalue-reference) — the plan is moved-from after emission.
     void Emit(OrchestrationStmtCodegen& cg) &&;
@@ -391,6 +397,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   std::vector<std::string> BuildContiguityGuardLines(const ir::CallPtr& call,
                                                      const ir::FunctionPtr& callee_func);
+  /// RFC #2521 §13.3 launch-width DFX for a managed collective: requested ``L``,
+  /// admitted ``B``, active lanes ``min(B, S)``, rank count ``P`` and
+  /// ``lanes_per_peer``. Empty unless ``LowerL2TensorCollectives`` attached
+  /// ``kAttrRequestedCoreNum``, so ordinary dispatches are unchanged.
+  std::vector<std::string> BuildLaunchWidthDfxLines(const ir::CallPtr& call,
+                                                    const ir::FunctionPtr& callee_func);
   std::vector<std::string> BuildRuntimeWidthGuardLines(const ir::CallPtr& call,
                                                        const ir::FunctionPtr& callee_func);
   void CheckWrapperNeedsNoContiguityGuard(const ir::FunctionPtr& kernel_func, const ir::CallPtr& call);

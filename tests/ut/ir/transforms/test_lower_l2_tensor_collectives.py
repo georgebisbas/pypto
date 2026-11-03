@@ -1217,5 +1217,35 @@ def test_indexed_strided_index_is_rejected():
         passes.lower_l2_tensor_collectives()(StridedIndex)
 
 
+def test_requested_width_is_attached_alongside_the_folded_one():
+    """The call keeps ``L`` next to ``B`` so DFX can tell them apart.
+
+    ``core_num`` carries the admitted ``B``, so ``L=10, P=8`` would otherwise be
+    indistinguishable from ``L=8``. RFC #2521 §13.3 exists precisely to keep a
+    request from being reported as if it had been honoured.
+    """
+    call = _kernel_call(passes.lower_l2_tensor_collectives()(_build_exchange(8, 8, 10)))
+    requested = call.attrs["requested_core_num"]
+    assert isinstance(requested, ir.ConstInt), type(requested).__name__
+    assert requested.value == 10
+    assert call.attrs["core_num"].value == 8
+
+
+def test_single_block_request_still_carries_the_requested_width():
+    """``B == 1`` attaches no launch spec, but the width is still reportable."""
+    call = _kernel_call(passes.lower_l2_tensor_collectives()(_build_exchange(NR, 1, 1)))
+    assert "core_num" not in call.attrs
+    requested = call.attrs["requested_core_num"]
+    assert isinstance(requested, ir.ConstInt), type(requested).__name__
+    assert requested.value == 1
+
+
+def test_dynamic_core_num_carries_the_requested_width():
+    """The runtime form reports the operand as written, not the computed ``B``."""
+    call = _kernel_call(passes.lower_l2_tensor_collectives()(_build_dynamic_request()))
+    assert "requested_core_num" in call.attrs, call.attrs
+    assert not isinstance(call.attrs["requested_core_num"], ir.ConstInt)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -157,6 +157,14 @@ B = L - (L % D) * (L >= D)
 同一个二进制可服务于任意运行期 `L`。HOST 通路在其生成的 entry 中计算同一个 `B`；所有实现都对照
 RFC #2521 的算例表固定。
 
+**DFX。** 每个被降低的托管 collective 都会把 §13.3 的三个量上报到设备日志，格式与 HOST 通路 entry
+完全一致：`requested_core_num=L launched_core_num=B active_lanes=min(B, S) nranks=P
+lanes_per_peer=(B >= P ? B / P : 0)`，日志级别为 `LOG_TIMING`。pass 把 `L` 保留为调用上的
+`requested_core_num` 属性，因为启动规格携带的是 `B`，否则请求值将无法恢复——`B == 1` 且不附加
+启动规格的路径也是如此。`launched_core_num` 是未钳位的 `B`（运行期路径上取 `runtime_blocks`），
+绝不是 `max(B, 1)`。运行期 `L` 时，该行是 dispatch 守卫链的最后一个 `else`，因此被拒绝的请求不会
+上报任何宽度。
+
 ## 约束与诊断
 
 | 条件 | 诊断 |

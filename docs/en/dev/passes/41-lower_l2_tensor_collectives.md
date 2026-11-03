@@ -175,6 +175,15 @@ In both cases the launch spec rides the call's attrs, which are not kernel param
 ABI above is unchanged and one binary serves any runtime `L`. The HOST rail computes the same `B` in its
 generated entry; all sites are pinned to RFC #2521's worked-example table.
 
+**DFX.** Every lowered managed collective reports the three §13.3 quantities to the device log, in the
+same shape as the HOST rail's entry: `requested_core_num=L launched_core_num=B
+active_lanes=min(B, S) nranks=P lanes_per_peer=(B >= P ? B / P : 0)`, at the `LOG_TIMING` tier. The
+pass keeps `L` on the call as the `requested_core_num` attr, because the launch spec carries `B` and the
+request would otherwise be unrecoverable — including on the `B == 1` path, which attaches no launch
+spec. `launched_core_num` is the unclamped `B` (`runtime_blocks` on the runtime path), never
+`max(B, 1)`. For a runtime `L` the line is the final `else` of the dispatch guard chain, so a rejected
+request reports no width.
+
 ## Constraints and diagnostics
 
 | Condition | Diagnostic |

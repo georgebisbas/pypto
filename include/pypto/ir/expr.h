@@ -964,6 +964,23 @@ inline constexpr const char* kAttrRuntimeBlocks = "runtime_blocks";
 inline constexpr const char* kAttrRuntimeRankCount = "runtime_rank_count";
 
 /**
+ * @brief The block limit ``L`` the caller requested from a managed L2 collective.
+ *
+ * Value type: ``ExprPtr``. Written by ``LowerL2TensorCollectives`` on every
+ * managed collective it lowers, including the single-block path (folded
+ * ``B == 1``), where no launch spec is attached. RFC #2521 §13.3 requires the
+ * requested and admitted widths to be reported separately: the launch spec
+ * carries the admitted ``B``, which can be smaller than ``L`` (``L=10`` on
+ * ``P=8`` launches ``8``), so after lowering the requested value is otherwise
+ * unrecoverable.
+ *
+ * Read by orchestration codegen to emit the launch-width DFX line next to the
+ * dispatch. SSA / substitution passes MUST rewrite Vars inside it, like
+ * ``kAttrCoreNum``.
+ */
+inline constexpr const char* kAttrRequestedCoreNum = "requested_core_num";
+
+/**
  * @brief Reserved attr key for a selective device-timing tag on ``pl.submit``.
  *
  * Value type: ``int`` in ``0..15``. Written by the DSL parser and read by
@@ -994,7 +1011,7 @@ inline constexpr const char* kAttrTaskTimingSlot = "task_timing_slot";
  */
 [[nodiscard]] inline bool IsExprValuedCallAttr(const std::string& key) {
   return key == kAttrDevice || key == kAttrCoreNum || key == kAttrRuntimeBlocks ||
-         key == kAttrRuntimeRankCount;
+         key == kAttrRuntimeRankCount || key == kAttrRequestedCoreNum;
 }
 
 /**

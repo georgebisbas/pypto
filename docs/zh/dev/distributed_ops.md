@@ -460,6 +460,9 @@ InCore 路径是一个 `pld.tile.put`，其传输形状为运行时计数，通�
 §13.3 列出的三个量上报给 DFX——每次调用一行 `LOG_TIMING`，携带 `requested_core_num=L
 launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K`（`B < NR` 的 stride 模式下为 `0`）以及 rank 数，位于默认日志阈值——
 因此启动宽度可直接从设备日志读出，而无需从数据通路上推断。
+托管 CHIP/L2 通路由 orchestration 代码生成发出同一行日志，那里也是该通路的 `L -> B` 位置；
+发射规则见
+[`LowerL2TensorCollectives`](passes/41-lower_l2_tensor_collectives.md)。
 
 HOST/CHIP 共用的 builtin 在每个 AIV 上使用两个 32 KiB UB 暂存缓冲区
 （共 64 KiB，与载荷 dtype 无关）。大传输通过 TPUT 双缓冲（ping-pong）

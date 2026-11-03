@@ -604,6 +604,51 @@ def test_indexed_rail_checks_all_six_operands_before_the_submit(tmp_path):
     )
 
 
+def test_literal_core_num_reports_requested_and_admitted_widths(tmp_path):
+    """RFC #2521 §13.3: ``L`` and ``B`` are reported separately, HOST-line shape.
+
+    ``L=9`` over ``P=2`` folds to ``B=8``; a line that said 9 would be exactly
+    the failure the RFC's DFX item exists to prevent.
+    """
+    chip = _compile(_build_chip_rail_program(core_num=9, signal_stride=8), tmp_path, "chip_dfx_literal")
+    source = _chip_orchestration_sources(chip.output_dir)
+    assert (
+        "all_to_all_v: requested_core_num=%d launched_core_num=%d active_lanes=%d nranks=%d lanes_per_peer=%d"
+    ) in source, source
+    assert "const int64_t a2av_dfx_launched = 8;" in source, source
+    assert "const int64_t a2av_dfx_nranks = 2;" in source, source
+    assert "const int64_t a2av_dfx_stride = 8;" in source, source
+    assert "static_cast<int32_t>(9)" in source, source
+
+
+def test_runtime_core_num_reports_the_unclamped_admitted_width(tmp_path):
+    """The DFX line reads the raw ``B``, never the ``max(B, 1)`` launch clamp.
+
+    It is the guard chain's final ``else``, so a rejected request reports no
+    width at all.
+    """
+    chip = _compile(_build_runtime_core_num_program(signal_stride=8), tmp_path, "chip_dfx_runtime")
+    source = _chip_orchestration_sources(chip.output_dir)
+    marker = source.index("// RFC #2521 §13.3")
+    # The guard block ends before the task's parameters are declared, so this
+    # slice contains the guards' final else -- not the launch spec, which does
+    # carry the clamp.
+    dfx = source[marker : source.index("CoreTaskArgs", marker)]
+    assert "a2av_dfx_launched = a2av_blocks_" in dfx, dfx
+    assert "std::max" not in dfx, dfx
+    assert dfx.count("LOG_TIMING") == 1, dfx
+    assert source[:marker].rstrip().endswith("} else {"), source[:marker][-300:]
+
+
+def test_single_block_request_reports_the_width_without_a_launch_spec(tmp_path):
+    """``L=1`` has no gang launch but is still one of §13.3's cases."""
+    chip = _compile(_build_chip_rail_program(core_num=1), tmp_path, "chip_dfx_single")
+    source = _chip_orchestration_sources(chip.output_dir)
+    assert "const int64_t a2av_dfx_launched = 1;" in source, source
+    assert "static_cast<int32_t>(1)" in source, source
+    assert ".launch_spec." not in source, source
+
+
 def test_ordinary_chip_tasks_get_no_contiguity_check(tmp_path):
     """Only the builtin kernel opts in; an ordinary InCore task is emitted as before.
 

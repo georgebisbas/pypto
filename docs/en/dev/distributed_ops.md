@@ -542,6 +542,10 @@ launched_core_num=B active_lanes=min(B, stride) lanes_per_peer=K` (`0` in the
 `B < NR` stride regime) plus the rank count, at the default log threshold — so
 the launch width is observable from
 the device log alone instead of being inferred from the data path.
+The managed CHIP/L2 rail publishes the same line from orchestration codegen,
+which is that rail's `L -> B` site; see
+[`LowerL2TensorCollectives`](passes/41-lower_l2_tensor_collectives.md) for the
+emission rule.
 
 The shared HOST/CHIP builtin uses two 32-KiB UB staging buffers per AIV
 (64 KiB total, independent of payload dtype). Large transfers use TPUT

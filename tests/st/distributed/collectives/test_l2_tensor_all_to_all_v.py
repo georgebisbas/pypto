@@ -60,7 +60,9 @@ Run on hardware via ``task-submit``::
         -v --platform a2a3 --device $TASK_DEVICE'
 """
 
+import os
 import sys
+from pathlib import Path
 
 import pypto.language as pl
 import pypto.language.distributed as pld
@@ -83,25 +85,66 @@ def _admitted_blocks(n_ranks: int, core_num: int) -> int:
     return core_num if core_num < n_ranks else (core_num // n_ranks) * n_ranks
 
 
+def _snapshot_logs() -> tuple[Path | None, dict[Path, int]]:
+    """Snapshot the exported device-log dir (``ASCEND_PROCESS_LOG_PATH``), if any.
+
+    Mirrors the HOST multicore ST: each file's size is recorded, not just its
+    path, so a log file an earlier case created still contributes only the lines
+    this case appended.
+    """
+    root = os.environ.get("ASCEND_PROCESS_LOG_PATH")
+    if not root or not Path(root).is_dir():
+        return None, {}
+    base = Path(root)
+    return base, {path: path.stat().st_size for path in base.rglob("*.log")}
+
+
+def _new_log_lines(root: Path | None, before: dict[Path, int]) -> list[str]:
+    """Every line written into the device-log dir since ``before`` was taken."""
+    if root is None:
+        return []
+    lines: list[str] = []
+    for path in sorted(root.rglob("*.log")):
+        with path.open("rb") as stream:
+            stream.seek(before.get(path, 0))
+            lines.extend(stream.read().decode(errors="ignore").splitlines())
+    return lines
+
+
 # Requested block limits ``L``. With P=2 these admit B = 1, 2, 4; with P=4, B = 1, 2, 4 — covering
 # the single-block rail, B < P (multi-peer-per-core) and B = P / B > P (peer x length lanes).
 _CORE_NUMS = (1, 2, 4)
 
 
 def _build_l2_all_to_all_v_program(
-    n_ranks: int, max_recv: int, core_num: int = 1, *, payload_dtype: DataType = pl.FP32
+    n_ranks: int,
+    max_recv: int,
+    core_num: int = 1,
+    *,
+    payload_dtype: DataType = pl.FP32,
+    runtime_core_num: bool = False,
+    signal_stride: int | None = None,
 ):
     """Build an N-rank CHIP-pipeline variable-size all-to-all program.
 
     Signal/counts shapes are per-rank-count, so the program is built by a
     factory — the same pattern the HOST and InCore all_to_all_v STs use.
+
+    ``runtime_core_num`` makes the requested limit ``L`` a ``Scalar[INDEX]``
+    parameter instead of a literal, which is the RFC #2521 O2 form this file's
+    DFX case exercises. A runtime ``L`` needs an explicit ``signal_stride``:
+    the signal shape stays static (``S = B`` is legal only for a literal), so
+    the caller passes the largest stride the cases will use.
     """
     nr = n_ranks
     mr = max_recv
     total = nr * mr
     # The signal is [NR, S] with one lane per admitted block, so S = B (the
     # smallest legal stride: the pass rejects S < B).
-    stride = _admitted_blocks(nr, core_num)
+    stride = signal_stride if signal_stride is not None else _admitted_blocks(nr, core_num)
+    assert not runtime_core_num or signal_stride is not None, (
+        "a runtime core_num needs an explicit static signal_stride"
+    )
 
     @pl.jit.incore
     def stage_step(
@@ -163,6 +206,64 @@ def _build_l2_all_to_all_v_program(
                 chunk = pl.load(data, [flat_row, 0], [1, SIZE])
                 out = pl.store(chunk, [flat_row, 0], out)
         return out, recv_out
+
+    if runtime_core_num:
+
+        @pl.jit
+        def chip_pipeline_runtime(
+            inp: pl.Tensor[[total, SIZE], payload_dtype],
+            counts_row: pl.Tensor[[nr, 1], pl.INT32],
+            out: pl.Out[pl.Tensor[[total, SIZE], payload_dtype]],
+            recv_out: pl.Out[pl.Tensor[[nr, 1], pl.INT32]],
+            stage: pl.InOut[pld.DistributedTensor[[total, SIZE], payload_dtype]],
+            data: pl.InOut[pld.DistributedTensor[[total, SIZE], payload_dtype]],
+            signal: pl.InOut[pld.DistributedTensor[[nr, stride], pl.INT32]],
+            counts: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            recv: pl.InOut[pld.DistributedTensor[[nr, 1], pl.INT32]],
+            core_num: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[total, SIZE], payload_dtype], pl.Tensor[[nr, 1], pl.INT32]]:
+            """One per-rank pipeline whose requested limit ``L`` arrives at run time."""
+            stage, counts = stage_step(inp, counts_row, stage, counts)
+            data = pld.tensor.all_to_all_v(stage, data, signal, counts, recv, core_num=core_num)
+            return consume_step(data, recv, out, recv_out)
+
+        @pl.jit.host
+        def host_orch_runtime(
+            inputs: pl.Tensor[[nr, total, SIZE], payload_dtype],
+            send_counts: pl.Tensor[[nr, nr, 1], pl.INT32],
+            outputs: pl.Out[pl.Tensor[[nr, total, SIZE], payload_dtype]],
+            recv_outputs: pl.Out[pl.Tensor[[nr, nr, 1], pl.INT32]],
+            core_num: pl.Scalar[pl.INDEX],
+        ) -> tuple[pl.Tensor[[nr, total, SIZE], payload_dtype], pl.Tensor[[nr, nr, 1], pl.INT32]]:
+            """Allocate the five windows once, dispatch one pipeline per rank."""
+            stage_buf = pld.alloc_window_buffer(total * SIZE * payload_dtype.get_byte())
+            data_buf = pld.alloc_window_buffer(total * SIZE * payload_dtype.get_byte())
+            signal_buf = pld.alloc_window_buffer(nr * stride * pl.INT32.get_byte())
+            counts_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+            recv_buf = pld.alloc_window_buffer(nr * pl.INT32.get_byte())
+
+            for r in pl.range(pld.world_size()):
+                stage = pld.window(stage_buf, [total, SIZE], dtype=payload_dtype)
+                data = pld.window(data_buf, [total, SIZE], dtype=payload_dtype)
+                sig = pld.window(signal_buf, [nr, stride], dtype=pl.INT32)
+                counts = pld.window(counts_buf, [nr, 1], dtype=pl.INT32)
+                recv = pld.window(recv_buf, [nr, 1], dtype=pl.INT32)
+                chip_pipeline_runtime(
+                    inputs[r],
+                    send_counts[r],
+                    outputs[r],
+                    recv_outputs[r],
+                    stage,
+                    data,
+                    sig,
+                    counts,
+                    recv,
+                    core_num,
+                    device=r,
+                )
+            return outputs, recv_outputs
+
+        return host_orch_runtime
 
     @pl.jit
     def chip_pipeline(
@@ -314,6 +415,76 @@ class TestL2TensorAllToAllV:
                         f"P={nr} rank={rank} src={src} row={k}: "
                         f"max diff = {(got_row - expected_row).abs().max().item()}"
                     )
+
+    @pytest.mark.parametrize(
+        ("n_ranks", "core_num", "signal_stride"),
+        [
+            pytest.param(8, 10, 8, id="p8-l10-b8"),
+            pytest.param(8, 4, 4, id="p8-l4-b4"),
+            pytest.param(8, 1, 1, id="p8-l1-b1"),
+        ],
+    )
+    def test_l2_reports_the_requested_admitted_and_active_widths(
+        self, test_config, device_ids, n_ranks, core_num, signal_stride
+    ):
+        """RFC #2521 §13.3: the managed L2 dispatch publishes ``L``, ``B`` and active lanes.
+
+        The HOST rail reports the same fields from its entry. This rail has no
+        entry template, so orchestration codegen emits the line. Asserted from
+        the device log, which also covers the runtime's log-sink wiring.
+        ``active_lanes`` is ``min(B, S)``; ``lanes_per_peer`` is zero in the
+        ``B < P`` regime.
+        """
+        if len(device_ids) < n_ranks:
+            pytest.skip(f"L2 all_to_all_v P={n_ranks} needs {n_ranks} devices, got {device_ids}")
+
+        nr, mr = n_ranks, MAX_RECV
+        total = nr * mr
+        admitted = _admitted_blocks(nr, core_num)
+        active = min(admitted, signal_stride)
+        lanes_per_peer = admitted // nr if admitted >= nr else 0
+
+        inputs, send_counts = _golden_inputs(nr, mr)
+        outputs = torch.zeros((nr, total, SIZE), dtype=torch.float32)
+        recv_outputs = torch.zeros((nr, nr, 1), dtype=torch.int32)
+
+        log_root, before = _snapshot_logs()
+        if log_root is None:
+            pytest.skip("no ASCEND_PROCESS_LOG_PATH exported: the L2 DFX line cannot be read")
+
+        program = _build_l2_all_to_all_v_program(nr, mr, runtime_core_num=True, signal_stride=signal_stride)
+        compiled = program.compile(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            core_num,
+            config=RunConfig(
+                platform=test_config.platform,
+                distributed_config=DistributedConfig(
+                    device_ids=device_ids[:nr],
+                    num_sub_workers=0,
+                ),
+            ),
+        )
+
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            core_num,
+            config=RunConfig(platform=test_config.platform),
+        )
+        lines = _new_log_lines(log_root, before)
+        expected = (
+            f"requested_core_num={core_num} launched_core_num={admitted} active_lanes={active} "
+            f"nranks={nr} lanes_per_peer={lanes_per_peer}"
+        )
+        assert any(expected in line for line in lines), (
+            f"P={nr} L={core_num} B={admitted} stride={signal_stride}: no L2 DFX line carrying "
+            f"'{expected}' among {len(lines)} new log line(s)"
+        )
 
 
 def _effective_rows(count: int, max_recv: int) -> int:
