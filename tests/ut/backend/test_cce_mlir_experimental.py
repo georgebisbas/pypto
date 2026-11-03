@@ -3,7 +3,7 @@ from pathlib import Path
 
 from examples.cce_mlir.compiler import CceMlirCompiler
 from examples.cce_mlir.lowering import CceTarget, emit_cce_mlir, lower_pypto_matmul
-from examples.cce_mlir.manifest import write_manifest
+from examples.cce_mlir.manifest import _revision, write_manifest
 
 FIXTURE = Path(__file__).parents[3] / "examples" / "cce_mlir" / "fixtures" / "pypto_matmul.py"
 
@@ -92,3 +92,8 @@ def test_manifest_records_toolchain_and_acl_abi(tmp_path):
     assert manifest["kernel"] == "matmul_64x128x64"
     assert manifest["abi"]["cce_device_symbols"] == ["matmul_64x128x64__kernel0"]
     assert manifest["abi"]["status"] == "adapter_required"
+
+
+def test_missing_git_metadata_does_not_emit_diagnostics(tmp_path, capsys):
+    assert _revision(tmp_path) == "unknown"
+    assert capsys.readouterr().err == ""

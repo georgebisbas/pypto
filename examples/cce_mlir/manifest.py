@@ -15,13 +15,17 @@ from .lowering import KernelSpec
 
 def _revision(root: Path) -> str:
     try:
-        return subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        return subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
 
 
 def default_revisions() -> dict[str, str]:
-    package_root = Path(__file__).resolve().parents[3]
+    package_root = Path(__file__).resolve().parents[2]
     return {
         "pypto": _revision(package_root),
         "cce_mlir": os.environ.get("CCE_MLIR_COMMIT", "unknown"),
