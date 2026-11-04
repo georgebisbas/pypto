@@ -54,18 +54,27 @@ PyPTO @pl.jit kernel
 - Cube：`buffer.matmul`、`buffer.matmul_acc`，`Left × Right → Acc`，FP16/BF16
   输入、FP32 累加器。
 - Vector：UB tile 上的 `buffer.add/mul/sub/div/maximum/minimum` 与
-  `buffer.abs/exp/sqrt/neg/relu/log/recip`。
+  `buffer.abs/exp/sqrt/neg/relu/log/recip`，以及单 tile 加标量的变体
+  `buffer.adds/subs/muls/divs/maximums/minimums` 与 `buffer.lrelu`。
 - 搬运：`buffer.load`（GM → L1/UB）、`buffer.store`（L0C/UB → GM）、
-  `buffer.copy`（L1 → L0A/L0B、UB → UB）。
-- 静态二维形状、整窗搬运、A3、单 block。
+  `buffer.copy`（L1 → L0A/L0B、UB → UB），包括**带窗口**的搬运：非零 offset，
+  且 extent 填满片上 buffer。窗口 offset 可以是外层循环归纳变量的仿射表达式
+  （`k * 128`），分块 K 归约正是靠它复用同一块 tile。窗口以 GM tensor 的
+  `tensor.extract_slice` 表示，cce-mlir 会把它折叠进搬运本身
+  （`cce.copy_gm_to_l1_nd2nz`），不会物化额外拷贝。部分写回先写窗口，再用
+  `tensor.insert_slice` 拼接回父 tensor；bufferize 后成为 fixpipe 直接写入的
+  strided subview。
+- 静态二维形状、A3、单 block。
 - 静态边界的 `pl.range` 循环，循环体操作固定操作数。PyPTO 的 Buffer IR 将循环
   状态保存在 buffer 中，因此循环体内写入的每个 tensor 都作为 `scf.for` 的
-  iter-arg 传递，循环后的值取循环结果。
+  iter-arg 传递，循环后的值取循环结果。软件流水循环（`pl.pipeline`）在 PyPTO
+  planner 下由 `LowerPipelineLoops` 复制循环体，因此桥接层无需额外 lowering。
 
-带类型诊断拒绝：窗口或部分搬运、动态 valid shape、标量 kernel 参数、标量
-elementwise 变体、非常量循环边界、`pl.yield` 携带的循环值、`while`/`if`、循环内
-动态 tile offset、Bias/A5 scale 空间、cube/vector 混合 kernel、SPMD block 查询、
-`buffer.extract/subview/reshape/set_validshape`，以及任何未注册 emitter 的算子。
+带类型诊断拒绝：动态搬运 extent、动态 valid shape、标量 kernel 参数、非常量循环
+边界、`pl.yield` 携带的循环值、`while`/`if`、Bias/A5 scale 空间、cube/vector
+混合 kernel、SPMD block 查询、`buffer.full`（该 cce-mlir 构建对 rank-2 的
+`pto.expands` lowering 有误）、`buffer.extract/subview/reshape/set_validshape`，
+以及任何未注册 emitter 的算子。
 
 ## 优化 Pass
 
@@ -95,16 +104,53 @@ elementwise 变体、非常量循环边界、`pl.yield` 携带的循环值、`wh
 
 ## 性能
 
-两条路线在 `tests/st/runtime/cce_mlir/test_cce_mlir_performance.py` 中比较：每个
-编译产物在 `ChipWorker` 上注册一次，使用 device tensor 反复派发，并从 chip
-swimlane level 1 读取 AICore 任务时间。这样避开了 `CompiledProgram` 每次派发都会
-重新组装产物、从而主导测量的开销。
+两条路线在 `tests/st/runtime/cce_mlir/test_cce_mlir_performance.py` 中比较，测量
+对象是 `tests/st/runtime/cce_mlir/corpus.py` 中的 kernel 语料，
+`tests/st/runtime/cce_mlir/bench_matrix.py` 定义路线与测量。每次测量编译同一个
+`@pl.jit` kernel，在 `ChipWorker` 上注册一次，使用 device tensor 反复派发，并从
+chip swimlane level 1 读取 AICore 任务时间。这样既避开了 `CompiledProgram`
+每次派发重新组装产物的开销，也测量编译后的 kernel 本身而非 host 延迟。
 
-相同 kernel 下两条路线相差约 10% 以内，且方向随负载变化：单个 128³ MMAD 时
-cce-mlir 约慢 9%，65 次串行累加时约快 7%。两者生成相同的硬件 intrinsic
-（GM→L1、L1→L0A/L0B、MMAD、L0C→GM）；每个任务的固定启动与 DMA 成本有数微秒，
-因此只有 MMAD 链足够长时 codegen 差异才显现。测试使用 2 倍 parity 上限，而不是
-固定目标数值。
+| 路线 | 编译器 | 内存 planner |
+| --- | --- | --- |
+| `ptoas/PYPTO` | PTOAS | PyPTO 预烘焙 offset（`ptoas --pto-level=level3`） |
+| `ptoas/PTOAS` | PTOAS | PTOAS `PlanMemory`（`--pto-level=level2`） |
+| `cce_mlir/PYPTO` | cce-mlir | 桥接层唯一能消费的 planner |
+
+`best_per_route` 把 PTOAS 的两种 planner 收敛为该编译器更快的结果，即每个编译器
+的“最快基线”；测试要求两者保持在 2 倍以内。语料覆盖单 tile MMAD、累加循环、
+分块 K 归约、同一归约的 `pl.pipeline(stage=2)` 版本、vector add、标量
+elementwise 链，以及 cube 后接 vector 的双 kernel 程序。
+
+Ascend 910B2 实测（AICore 任务时间，微秒，单次运行）：
+
+| Kernel | PTOAS 最优 | cce-mlir |
+| --- | ---: | ---: |
+| 单个 128³ MMAD | 5.60 | 5.56 |
+| 65 次累加 MMAD | 26.08 | 23.94 |
+| 分块 K 归约（K=512） | 13.22 | 13.04 |
+| 分块 K 归约，`stage=2` | 12.42 | 13.86 |
+| vector add（128²） | 7.68 | 7.40 |
+| vector `x * 1.5 + 1.0` | 5.60 | 6.18 |
+| cube MMAD 后接 vector scale | 8.72 | 9.52 |
+
+该主机逐 kernel 的运行间波动有数个百分点，因此小于约 10% 的差距属于噪声，优劣
+方向可能在两次运行间翻转；分块 K 归约一行在连续两次运行中就发生了翻转。两个
+编译器生成相同的硬件 intrinsic（GM→L1 ND2NZ、L1→L0A/L0B、MAD、L0C→GM
+fixpipe）；每个任务的固定启动与 DMA 成本有数微秒，因此只有计算链足够长时
+codegen 差异才显现。测试使用 2 倍 parity 上限，而不是固定目标数值，并输出机器
+可读报告（`PYPTO_CCE_MLIR_BENCH_JSON`）。
+
+在硬件上通过队列运行：
+
+```bash
+docker exec <queue-container> task-submit --device auto --device-num 1 \
+  --max-time 3600 --timeout 0 \
+  --run 'cd /opt/pypto && PTOAS_ROOT=/opt/pypto/.venv \
+    PYPTO_CCE_MLIR_BENCH_JSON=/tmp/bench.json \
+    .venv/bin/python -m pytest tests/st/runtime/cce_mlir/test_cce_mlir_performance.py -v \
+    --platform a2a3 --device $TASK_DEVICE'
+```
 
 ## 选择该路线
 
@@ -234,6 +280,12 @@ device function 模式来替代这一重写。
 
 - 仅 A3；PyPTO 的 Buffer IR 选择门是 `a2a3`。
 - 每个 kernel 一个 block；不支持 SPMD block 查询。
+- 只有二维静态形状能进入 Buffer IR，因此 rank-3 batch kernel 不会进入该路线。
+- `buffer.full` 被 cce-mlir 缺陷阻塞：对 rank-2 目标，`pto.expands` 会错误地
+  lower 成只带一个 index 的 `tensor.extract`。
+- `pl.pipeline` 在两条路线下都使用 PyPTO planner 比较。PTOAS planner 的 slot
+  形式（`MemRef.slot_count_ > 1`、`iv % F` 索引）被 Buffer IR 选择 pass 排除，
+  因此该路线无法消费。
 - `npu-lower-pto-to-llvm-pipeline` 需要独立 host driver 才能保留 device module，
   因此 device object 路径目前也会发射它。
 - cce-mlir 由 Docker 镜像提供；缺失时跳过 MLIR 与 pipeline 测试，有类型前端仍可运行。

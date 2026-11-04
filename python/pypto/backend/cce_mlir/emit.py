@@ -25,11 +25,14 @@ from .kernel_ir import (
     CceElementType,
     CceEncoding,
     CceFor,
+    CceIntTuple,
     CceKernel,
     CceKernelKind,
     CceMemorySpace,
+    CceScalar,
     CceTarget,
     CceTensor,
+    IndexValue,
 )
 from .registry import EMITTERS
 
@@ -79,6 +82,10 @@ class MlirBuilder:
     def __init__(self, cir: Any) -> None:
         self._cir = cir
         self._values: dict[int, Any] = {}
+        # Enclosing loop induction variables, by PyPTO name, for address
+        # normalization. A nested loop may shadow an outer name, so callers
+        # restore the previous binding when the body is done.
+        self._loop_indices: dict[str, Any] = {}
 
     # -- types ------------------------------------------------------------
 
@@ -146,21 +153,34 @@ class MlirBuilder:
 
         return pto.empty_like(self.tensor_type(tensor))
 
-    def coerce(self, source: CceTensor, target: CceTensor) -> Any:
+    def coerce(
+        self,
+        source: CceTensor,
+        target: CceTensor,
+        *,
+        value: Any | None = None,
+        shape: tuple[int, ...] | None = None,
+    ) -> Any:
         """Align a value's encoding with the target's encoding.
 
         Emits ``layout.pack_layout``, ``layout.repack_layout`` or
         ``layout.unpack_layout`` only when the encodings differ. The
         intermediate keeps the *source* memory space: a layout change is not a
         memory-space move, and the following transfer op performs the move.
+
+        ``value`` overrides the source's bound value when the operation has
+        already rewritten it (a windowed slice of the source), while the type
+        and encoding still come from ``source``. ``shape`` overrides the
+        result shape for a windowed transfer into or out of a larger tensor.
         """
         from cce_mlir.dialects import layout
 
-        value = self.value(source)
+        value = self.value(source) if value is None else value
         if source.encoding == target.encoding:
             return value
+        effective_shape = target.shape if shape is None else shape
         intermediate_type = self.type_for(
-            shape=target.shape,
+            shape=effective_shape,
             element=target.element,
             space=source.space,
             encoding=target.encoding,
@@ -170,6 +190,127 @@ class MlirBuilder:
         if target.encoding.is_dense:
             return layout.UnpackLayoutOp(intermediate_type, value).result
         return layout.RepackLayoutOp(intermediate_type, value).result
+
+    # -- address and window construction ------------------------------------
+
+    def bind_loop_index(self, name: str, value: Any) -> Any | None:
+        """Bind an enclosing loop's induction variable; return the previous value."""
+        previous = self._loop_indices.get(name)
+        self._loop_indices[name] = value
+        return previous
+
+    def restore_loop_index(self, name: str, previous: Any | None) -> None:
+        """Undo :meth:`bind_loop_index` for one name."""
+        if previous is None:
+            self._loop_indices.pop(name, None)
+        else:
+            self._loop_indices[name] = previous
+
+    def index_value(self, value: IndexValue) -> Any:
+        """Materialize an ``index`` scalar for a constant or affine expression."""
+        from cce_mlir.dialects import arith
+
+        index = self._cir.IndexType.get()
+        if isinstance(value, int):
+            return arith.constant(index, value)
+        if value.is_constant:
+            return arith.constant(index, value.constant)
+        result = arith.constant(index, value.constant)
+        for name, multiplier in value.terms:
+            induction = self._loop_indices.get(name)
+            if induction is None:
+                raise CceMlirError(
+                    "unbound-loop-variable",
+                    f"offset expression references {name!r}, which is not an "
+                    "enclosing loop variable at the point of use",
+                )
+            term = induction
+            if multiplier != 1:
+                term = arith.muli(induction, arith.constant(index, multiplier))
+            result = arith.addi(result, term)
+        return result
+
+    def scalar_value(self, scalar: CceScalar) -> Any:
+        """Materialize a compile-time scalar with its own element type."""
+        from cce_mlir.dialects import arith
+
+        return arith.constant(_element_type(self._cir, scalar.element), scalar.value)
+
+    def _slice_arguments(self, offsets: CceIntTuple, sizes: tuple[int, ...]) -> tuple[list[Any], list[int]]:
+        """Split a window into dynamic offset operands and static offsets."""
+        dynamic_size = self._cir.ShapedType.get_dynamic_size()
+        dynamic_offsets: list[Any] = []
+        static_offsets: list[int] = []
+        for offset in offsets.values:
+            if isinstance(offset, int):
+                static_offsets.append(offset)
+                continue
+            if offset.is_constant:
+                static_offsets.append(offset.constant)
+                continue
+            dynamic_offsets.append(self.index_value(offset))
+            static_offsets.append(dynamic_size)
+        return dynamic_offsets, static_offsets
+
+    def window(
+        self,
+        tensor: CceTensor,
+        offsets: CceIntTuple,
+        sizes: tuple[int, ...],
+    ) -> Any:
+        """Slice ``tensor``'s current value to ``sizes`` at ``offsets``.
+
+        ``tensor.extract_slice`` carries the window; cce-mlir's PTO front end
+        folds the slice into the transfer that consumes it, so no copy is
+        materialized.
+        """
+        from cce_mlir.dialects import tensor as tensor_dialect
+
+        dynamic_offsets, static_offsets = self._slice_arguments(offsets, sizes)
+        result_type = self.type_for(
+            shape=sizes,
+            element=tensor.element,
+            space=tensor.space,
+            encoding=tensor.encoding,
+        )
+        return tensor_dialect.extract_slice(
+            result_type,
+            self.value(tensor),
+            dynamic_offsets,
+            [],
+            [],
+            static_offsets,
+            list(sizes),
+            [1] * len(sizes),
+        )
+
+    def insert_window(
+        self,
+        tensor: CceTensor,
+        window_value: Any,
+        offsets: CceIntTuple,
+        sizes: tuple[int, ...],
+    ) -> Any:
+        """Write ``window_value`` back into ``tensor``'s value at ``offsets``.
+
+        A store produces a new window value; the parent GM tensor is an SSA
+        value, so it must be rebuilt with ``tensor.insert_slice`` before later
+        uses observe the write. Bufferization folds both slice ops into a
+        strided subview of the GM allocation.
+        """
+        from cce_mlir.dialects import tensor as tensor_dialect
+
+        dynamic_offsets, static_offsets = self._slice_arguments(offsets, sizes)
+        return tensor_dialect.insert_slice(
+            window_value,
+            self.value(tensor),
+            dynamic_offsets,
+            [],
+            [],
+            static_offsets,
+            list(sizes),
+            [1] * len(sizes),
+        )
 
 
 def emit_module(
@@ -277,12 +418,18 @@ def _emit_statements(statements: Any, builder: MlirBuilder, cir: Any) -> None:
             )
             with cir.InsertionPoint(loop.body):
                 # Block arguments are the induction variable followed by the
-                # iter-args, one per carried tensor.
-                arguments = list(loop.body.arguments)[1:]
-                for tensor, argument in zip(carried, arguments, strict=True):
-                    builder.bind(tensor, argument)
-                _emit_statements(statement.body, builder, cir)
-                scf.YieldOp([builder.value(tensor) for tensor in carried])
+                # iter-args, one per carried tensor. Offsets inside the body may
+                # be affine in the induction variable, so bind it for the body.
+                body_arguments = list(loop.body.arguments)
+                induction = body_arguments[0]
+                previous_index = builder.bind_loop_index(statement.loop_var, induction)
+                try:
+                    for tensor, argument in zip(carried, body_arguments[1:], strict=True):
+                        builder.bind(tensor, argument)
+                    _emit_statements(statement.body, builder, cir)
+                    scf.YieldOp([builder.value(tensor) for tensor in carried])
+                finally:
+                    builder.restore_loop_index(statement.loop_var, previous_index)
             for tensor, result in zip(carried, loop.results, strict=True):
                 builder.bind(tensor, result)
             continue

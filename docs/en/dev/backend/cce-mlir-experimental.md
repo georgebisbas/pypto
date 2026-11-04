@@ -56,21 +56,33 @@ No fixture shape, byte count, layout or symbol is written literally.
 - Cube: `buffer.matmul` and `buffer.matmul_acc` with `Left × Right → Acc`,
   FP16/BF16 operands and an FP32 accumulator.
 - Vector: `buffer.add/mul/sub/div/maximum/minimum` and
-  `buffer.abs/exp/sqrt/neg/relu/log/recip` over UB tiles.
+  `buffer.abs/exp/sqrt/neg/relu/log/recip` over UB tiles, plus the
+  one-tile-plus-scalar variants
+  `buffer.adds/subs/muls/divs/maximums/minimums` and `buffer.lrelu`.
 - Transfers: `buffer.load` (GM → L1/UB), `buffer.store` (L0C/UB → GM),
-  `buffer.copy` (L1 → L0A/L0B, UB → UB).
-- Static rank-2 shapes, full-window transfers, A3, one block.
+  `buffer.copy` (L1 → L0A/L0B, UB → UB), including **windowed** transfers: a
+  non-zero offset with extents that fill the on-chip buffer. A window offset
+  may be affine in an enclosing loop induction variable (`k * 128`), which is
+  how a tiled K reduction reuses one tile. The window is expressed as
+  `tensor.extract_slice` of the GM tensor, and cce-mlir folds it into the
+  transfer itself (`cce.copy_gm_to_l1_nd2nz`) rather than materializing a copy.
+  A partial store writes the window and splices it back with
+  `tensor.insert_slice`, which bufferizes to a strided subview that the
+  fixpipe writes directly.
+- Static rank-2 shapes, A3, one block.
 - Static-bound `pl.range` loops whose body operates on fixed operands.
   PyPTO's Buffer IR keeps loop state in buffers, so each tensor written in the
   body is threaded as an `scf.for` iter-arg and the post-loop value is the
-  loop's result.
+  loop's result. Software-pipelined loops (`pl.pipeline`) arrive with the body
+  replicated by `LowerPipelineLoops` under the PyPTO planner, so they need no
+  extra lowering in the bridge.
 
-Refused with a typed diagnostic: windowed or partial transfers, dynamic valid
-shapes, scalar kernel parameters, scalar elementwise variants, non-constant
-loop bounds, loop-carried `pl.yield` values, `while`/`if`, dynamic tile offsets
-inside loops, Bias/A5 scale spaces, mixed cube/vector kernels, SPMD block
-queries, `buffer.extract/subview/reshape/set_validshape`, and any operator
-without an emitter registration.
+Refused with a typed diagnostic: dynamic transfer extents, dynamic valid
+shapes, scalar kernel parameters, non-constant loop bounds, loop-carried
+`pl.yield` values, `while`/`if`, Bias/A5 scale spaces, mixed cube/vector
+kernels, SPMD block queries, `buffer.full` (the cce-mlir build mis-lowers
+`pto.expands` for rank-2), `buffer.extract/subview/reshape/set_validshape`, and
+any operator without an emitter registration.
 
 ## Optimization passes
 
@@ -102,18 +114,59 @@ Not used, and why:
 ## Performance
 
 The two routes are compared in
-`tests/st/runtime/cce_mlir/test_cce_mlir_performance.py`, which registers each
-compiled program once on a `ChipWorker`, dispatches over device tensors, and
-reads the AICore task from chip-swimlane level 1. This avoids the per-call
-artifact assembly that otherwise dominates `CompiledProgram` dispatch.
+`tests/st/runtime/cce_mlir/test_cce_mlir_performance.py`, which measures the
+kernel corpus in `tests/st/runtime/cce_mlir/corpus.py` through every route in
+`tests/st/runtime/cce_mlir/bench_matrix.py`. Each measurement compiles the same
+`@pl.jit` kernel, registers it once on a `ChipWorker`, dispatches over device
+tensors, and reads the AICore task time from chip-swimlane level 1. This
+avoids the per-call artifact assembly that otherwise dominates
+`CompiledProgram` dispatch, and it measures the compiled kernel rather than
+host latency.
 
-For the same kernels the routes are within roughly 10% of each other, and the
-sign depends on the workload: cce-mlir was ~9% slower for a single 128³ MMAD
-and ~7% faster for a 65-MMAD serial accumulation. Both compile to the same
-hardware intrinsics (GM→L1, L1→L0A/L0B, MMAD, L0C→GM); the fixed per-task
-start-up and DMA cost is several microseconds, so codegen differences only
-become visible once the MMAD chain is long. The test enforces a 2× parity bound
-rather than a target number.
+| Route | Compiler | Memory planner |
+| --- | --- | --- |
+| `ptoas/PYPTO` | PTOAS | PyPTO-baked offsets (`ptoas --pto-level=level3`) |
+| `ptoas/PTOAS` | PTOAS | PTOAS `PlanMemory` (`--pto-level=level2`) |
+| `cce_mlir/PYPTO` | cce-mlir | the only planner the bridge consumes |
+
+`best_per_route` collapses the two PTOAS planners to the compiler's faster
+result; that is the "fastest baseline" for each compiler, and the test asserts
+the two stay inside a 2× bound. The corpus covers single-tile MMAD, an
+accumulation loop, a tiled K reduction, the same reduction under
+`pl.pipeline(stage=2)`, a vector add, a scalar elementwise chain, and a
+two-kernel cube-then-vector program.
+
+Measured on an Ascend 910B2 (AICore task time, microseconds, one run):
+
+| Kernel | PTOAS best | cce-mlir |
+| --- | ---: | ---: |
+| single 128³ MMAD | 5.60 | 5.56 |
+| 65 accumulating MMADs | 26.08 | 23.94 |
+| tiled K reduction (K=512) | 13.22 | 13.04 |
+| tiled K reduction, `stage=2` | 12.42 | 13.86 |
+| vector add (128²) | 7.68 | 7.40 |
+| vector `x * 1.5 + 1.0` | 5.60 | 6.18 |
+| cube MMAD then vector scale | 8.72 | 9.52 |
+
+Run-to-run spread on this host is several percent per kernel, so a gap smaller
+than roughly 10% is noise and the winner can flip between runs; the tiled
+K-reduction row did exactly that across two consecutive runs. Both compilers
+compile to the same hardware intrinsics (GM→L1 ND2NZ, L1→L0A/L0B, MAD, L0C→GM
+fixpipe); the fixed per-task start-up and DMA cost is several microseconds, so
+codegen differences only become visible once the compute chain is long. The
+test enforces a 2× parity bound rather than a target number, and writes a
+machine-readable report (`PYPTO_CCE_MLIR_BENCH_JSON`).
+
+Run it through the queue on hardware:
+
+```bash
+docker exec <queue-container> task-submit --device auto --device-num 1 \
+  --max-time 3600 --timeout 0 \
+  --run 'cd /opt/pypto && PTOAS_ROOT=/opt/pypto/.venv \
+    PYPTO_CCE_MLIR_BENCH_JSON=/tmp/bench.json \
+    .venv/bin/python -m pytest tests/st/runtime/cce_mlir/test_cce_mlir_performance.py -v \
+    --platform a2a3 --device $TASK_DEVICE'
+```
 
 ## Selecting the route
 
@@ -252,6 +305,13 @@ vector add through `CompiledProgram` on an Ascend 910B2 and passes.
 
 - A3 only; PyPTO's Buffer-IR selection gate is `a2a3`.
 - One block per kernel; no SPMD block queries.
+- Only rank-2, statically shaped tensors reach Buffer IR, so rank-3 batch
+  kernels never enter this route.
+- `buffer.full` is blocked by a cce-mlir bug: `pto.expands` mis-lowers to
+  `tensor.extract` with one index for rank-2 destinations.
+- `pl.pipeline` is compared under the PyPTO planner on both routes. The PTOAS
+  planner's slot form (`MemRef.slot_count_ > 1`, `iv % F` indexing) is excluded
+  by the Buffer-IR selection pass, so this route cannot consume it.
 - `npu-lower-pto-to-llvm-pipeline` needs the standalone host driver to retain
   the device module, so the device-object path currently emits it too.
 - cce-mlir is provided by the Docker image; without it the MLIR and pipeline

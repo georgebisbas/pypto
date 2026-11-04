@@ -16,7 +16,7 @@ from pypto.backend.cce_mlir import (
     CceTarget,
     lower_program,
 )
-from pypto.backend.cce_mlir.kernel_ir import CceFor, CceLayout, CceMemorySpace
+from pypto.backend.cce_mlir.kernel_ir import CceFor, CceIndex, CceLayout, CceMemorySpace, CceScalar
 from pypto.pypto_core.ir import ParamDirection
 
 from . import kernels
@@ -121,19 +121,55 @@ def test_shapes_and_dtypes_reach_the_typed_ir():
     assert lowered.parameters[2].element.mlir == "f32"
 
 
-def test_scalar_elementwise_variant_is_refused_with_a_reason():
-    with pytest.raises(CceMlirError) as error:
-        _lower(kernels.vector_add_scalar)
+def test_scalar_elementwise_variant_lowers():
+    (lowered,) = _lower(kernels.vector_add_scalar)
 
-    assert error.value.reason == "unsupported-op"
-    assert error.value.op_name == "buffer.adds"
+    (add,) = [op for op in lowered.ops if op.op_name == "buffer.adds"]
+    scalars = [operand for operand in add.operands if isinstance(operand, CceScalar)]
+    assert len(scalars) == 1
+    assert scalars[0].value == 1.0
 
 
-def test_partial_window_transfer_is_refused():
-    with pytest.raises(CceMlirError) as error:
-        _lower(kernels.vector_add_window)
+def test_windowed_load_from_a_larger_tensor_lowers():
+    # A [128, 128] tile read from a [256, 256] tensor is a partial window: the
+    # transfer extents equal the tile, not the GM tensor.
+    (lowered,) = _lower(kernels.vector_add_window)
 
-    assert error.value.reason in {"shape-mismatch", "unsupported-window"}
+    loads = [op for op in lowered.ops if op.op_name == "buffer.load"]
+    assert loads
+    assert all(load.extents.values == (128, 128) for load in loads)
+    assert all(load.offsets.values == (0, 0) for load in loads)
+
+
+def test_constant_window_offsets_are_recorded():
+    (lowered,) = _lower(kernels.vector_add_offset_window)
+
+    (load,) = [op for op in lowered.ops if op.op_name == "buffer.load"]
+    assert load.offsets.values == (64, 128)
+    assert load.extents.values == (128, 128)
+
+
+def test_windowed_store_is_recorded():
+    (lowered,) = _lower(kernels.vector_store_window)
+
+    (store,) = [op for op in lowered.ops if op.op_name == "buffer.store"]
+    assert store.offsets.values == (64, 128)
+    assert store.extents.values == (128, 128)
+
+
+def test_loop_variable_offset_becomes_an_affine_index():
+    (lowered,) = _lower(kernels.matmul_kloop_windowed)
+
+    dynamic = [
+        op
+        for op in lowered.ops
+        if op.op_name == "buffer.load"
+        and op.offsets is not None
+        and any(isinstance(value, CceIndex) for value in op.offsets.values)
+    ]
+    assert dynamic, "the loop body must carry a symbolic window offset"
+    indexes = [value for op in dynamic for value in op.offsets.values if isinstance(value, CceIndex)]
+    assert any(index.terms and index.constant == 0 for index in indexes)
 
 
 def test_unknown_target_arch_is_refused(monkeypatch):

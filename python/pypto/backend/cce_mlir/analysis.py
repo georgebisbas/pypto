@@ -31,17 +31,23 @@ import pypto.ir as _pypto_ir
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import (
+    Add,
     AssignStmt,
     BufferAccess,
     BufferType,
+    Cast,
     ConstFloat,
     ConstInt,
     EvalStmt,
     FunctionType,
     MakeTuple,
+    Mul,
+    Neg,
     ParamDirection,
     ReturnStmt,
+    ScalarType,
     SeqStmts,
+    Sub,
     TensorType,
     Var,
 )
@@ -50,6 +56,7 @@ from .errors import CceMlirError
 from .kernel_ir import (
     CceElementType,
     CceFor,
+    CceIndex,
     CceIntTuple,
     CceKernel,
     CceKernelKind,
@@ -89,10 +96,42 @@ _SUPPORTED_OPS = frozenset(
         "buffer.relu",
         "buffer.log",
         "buffer.recip",
+        "buffer.adds",
+        "buffer.subs",
+        "buffer.muls",
+        "buffer.divs",
+        "buffer.maximums",
+        "buffer.minimums",
+        "buffer.lrelu",
     }
 )
 
 _CUBE_SPACES = frozenset({CceMemorySpace.L1, CceMemorySpace.L0A, CceMemorySpace.L0B, CceMemorySpace.L0C})
+
+# Argument positions of the transfer window, from the registrations in
+# ``src/ir/op/buffer_ops/``:
+#   buffer.load(tensor, offsets, extents, dst)
+#   buffer.store(src, offsets, extents, tensor)
+# The tuple arguments are recorded on ``CceOp`` explicitly; positions come from
+# the op signature, which is a stable contract, while every other role is
+# derived from the registered buffer effects.
+_TRANSFER_WINDOW_ARGUMENTS: dict[str, tuple[int, int]] = {
+    "buffer.load": (1, 2),
+    "buffer.store": (1, 2),
+}
+
+# Elementwise variants with one tile source and one compile-time scalar.
+_SCALAR_ELEMENTWISE = frozenset(
+    {
+        "buffer.adds",
+        "buffer.subs",
+        "buffer.muls",
+        "buffer.divs",
+        "buffer.maximums",
+        "buffer.minimums",
+        "buffer.lrelu",
+    }
+)
 
 
 def resolve_target() -> CceTarget:
@@ -214,22 +253,101 @@ def _static_extents(shape: Iterable[object], *, where: str) -> tuple[int, ...]:
     return tuple(extents)
 
 
-def _int_tuple(expr: object, *, where: str) -> tuple[int, ...]:
-    """Read a ``MakeTuple`` of integer constants."""
-    if not isinstance(expr, MakeTuple):
-        raise CceMlirError(
-            "malformed-operand",
-            f"{where} expects a tuple of integer constants",
+def _normalized_index(constant: int, terms: dict[str, int]) -> CceIndex:
+    """Build a :class:`CceIndex` with merged, sorted, non-zero terms."""
+    kept = tuple(sorted((name, multiplier) for name, multiplier in terms.items() if multiplier != 0))
+    return CceIndex(constant=constant, terms=kept)
+
+
+def _affine_index(
+    expr: object,
+    bindings: dict[str, CceIndex],
+    *,
+    where: str,
+) -> CceIndex | None:
+    """Normalize an integer expression to ``constant + sum(coeff * var)``.
+
+    ``bindings`` maps an in-scope name (a loop induction variable, or a scalar
+    temporary whose definition was itself affine) to its normalized form. Any
+    expression outside this affine subset returns ``None`` so the caller can
+    decide whether that is a typed refusal or merely an unused scalar.
+    """
+    if isinstance(expr, ConstInt):
+        return _normalized_index(expr.value, {})
+    if isinstance(expr, Var):
+        bound = bindings.get(expr.name_hint)
+        if bound is not None:
+            return bound
+        return None
+    if isinstance(expr, Add):
+        left = _affine_index(expr.left, bindings, where=where)
+        right = _affine_index(expr.right, bindings, where=where)
+        if left is None or right is None:
+            return None
+        terms = dict(left.terms)
+        for name, multiplier in right.terms:
+            terms[name] = terms.get(name, 0) + multiplier
+        return _normalized_index(left.constant + right.constant, terms)
+    if isinstance(expr, Sub):
+        left = _affine_index(expr.left, bindings, where=where)
+        right = _affine_index(expr.right, bindings, where=where)
+        if left is None or right is None:
+            return None
+        terms = dict(left.terms)
+        for name, multiplier in right.terms:
+            terms[name] = terms.get(name, 0) - multiplier
+        return _normalized_index(left.constant - right.constant, terms)
+    if isinstance(expr, Neg):
+        operand = _affine_index(expr.operand, bindings, where=where)
+        if operand is None:
+            return None
+        return _normalized_index(-operand.constant, {name: -value for name, value in operand.terms})
+    if isinstance(expr, Mul):
+        left_const = expr.left if isinstance(expr.left, ConstInt) else None
+        right_const = expr.right if isinstance(expr.right, ConstInt) else None
+        scaled = expr.right if left_const is not None else expr.left
+        factor = left_const.value if left_const is not None else (right_const.value if right_const else None)
+        if factor is None:
+            return None
+        operand = _affine_index(scaled, bindings, where=where)
+        if operand is None:
+            return None
+        return _normalized_index(
+            operand.constant * factor, {name: value * factor for name, value in operand.terms}
         )
-    values: list[int] = []
-    for element in expr.elements:
-        if not isinstance(element, ConstInt):
-            raise CceMlirError(
-                "malformed-operand",
-                f"{where} expects integer constants, got {type(element).__name__}",
-            )
-        values.append(element.value)
-    return tuple(values)
+    if isinstance(expr, Cast) and isinstance(expr.type, ScalarType) and expr.type.dtype.is_int():
+        # An integer cast is index-preserving (Buffer IR inserts it for INDEX
+        # arithmetic); a float cast is not an address and is refused below.
+        return _affine_index(expr.operand, bindings, where=where)
+    return None
+
+
+def _require_index(expr: object, bindings: dict[str, CceIndex], *, where: str) -> CceIndex:
+    """Normalize an index expression, refusing anything non-affine."""
+    value = _affine_index(expr, bindings, where=where)
+    if value is None:
+        raise CceMlirError(
+            "unsupported-window-offset",
+            f"{where} is not an affine offset over the enclosing loop variables",
+        )
+    return value
+
+
+def _cast_constant(expr: Cast) -> CceScalar:
+    """Read a cast of a compile-time constant as a typed scalar.
+
+    Buffer IR inserts a cast so an elementwise scalar matches the tile dtype
+    (``pl.mul(fp32_tile, 1)`` becomes a cast of an integer constant). The value
+    is unchanged by the cast, so the destination dtype is the whole answer.
+    """
+    inner = expr.operand
+    assert isinstance(inner, (ConstInt, ConstFloat))
+    return CceScalar(value=inner.value, element=CceElementType.from_data_type(expr.type.dtype))
+
+
+def _is_float_cast_of_a_constant(expr: Cast) -> bool:
+    """Whether ``expr`` is a cast of an integer/float constant to a scalar dtype."""
+    return isinstance(expr.operand, (ConstInt, ConstFloat)) and isinstance(expr.type, ScalarType)
 
 
 def _direction_name(direction: ParamDirection) -> str:
@@ -250,6 +368,11 @@ class _KernelLowering:
         self._stored_parameters: dict[str, int] = {}
         self._written: set[str] = set()
         self._return_names: tuple[str, ...] = ()
+        # Names whose value is a normalized affine index: the enclosing loop
+        # induction variables, plus scalar temporaries defined by an affine
+        # expression (`k0 = k * 128`). Anything else is not an addressable
+        # offset and is refused where it is used as one.
+        self._index_bindings: dict[str, CceIndex] = {}
 
     # -- construction -----------------------------------------------------
 
@@ -367,6 +490,13 @@ class _KernelLowering:
                 f"buffer handle {stmt.var.name_hint!r} is not defined by buffer.alloc",
                 span=getattr(stmt, "span", None),
             )
+        # An affine scalar temporary can be used later as a transfer offset;
+        # bind it so the offset normalizer sees the expression behind the name.
+        # A non-affine scalar is left unbound and refused only if it is used as
+        # an address, so unrelated scalars do not fail the kernel.
+        bound = _affine_index(value, self._index_bindings, where=f"scalar {stmt.var.name_hint!r}")
+        if bound is not None:
+            self._index_bindings[stmt.var.name_hint] = bound
 
     def visit_eval(self, stmt: object) -> None:
         """Handle ``<call>`` evaluated for its effects."""
@@ -416,12 +546,19 @@ class _KernelLowering:
             )
         body: list[CceStatement] = []
         parent = self._body
+        loop_name = stmt.loop_var.name_hint
+        previous = self._index_bindings.get(loop_name)
+        self._index_bindings[loop_name] = _normalized_index(0, {loop_name: 1})
         self._body = body
         try:
             _StatementWalker(self).visit_stmt(stmt.body)
         finally:
             self._body = parent
-        self._body.append(CceFor(stmt.loop_var.name_hint, start, stop, step, tuple(body)))
+            if previous is None:
+                self._index_bindings.pop(loop_name, None)
+            else:
+                self._index_bindings[loop_name] = previous
+        self._body.append(CceFor(loop_name, start, stop, step, tuple(body)))
 
     # -- allocation -------------------------------------------------------
 
@@ -503,7 +640,8 @@ class _KernelLowering:
         operands = self._convert_operands(call)
         effects = self._arg_effects(op_name, len(call.args), call)
         self._validate_operand_effects(op_name, operands, effects, call)
-        self._validate_op(op_name, operands, effects, call)
+        offsets, extents = self._window_operands(op_name, operands)
+        self._validate_op(op_name, operands, effects, call, offsets=offsets, extents=extents)
         write_index = self._write_index(op_name, operands, effects, call)
         self._written.add(operands[write_index].name)  # type: ignore[union-attr]
         self._body.append(
@@ -517,9 +655,25 @@ class _KernelLowering:
                     if isinstance(operands[index], CceTensor)
                     and effect in (BufferAccess.Read, BufferAccess.ReadWrite)
                 ),
+                offsets=offsets,
+                extents=extents,
                 span=getattr(call, "span", None),
             )
         )
+
+    def _window_operands(
+        self,
+        op_name: str,
+        operands: tuple[CceTensor | CceScalar | CceIntTuple, ...],
+    ) -> tuple[CceIntTuple | None, CceIntTuple | None]:
+        """Record the transfer window from the op's declared argument positions."""
+        if op_name in _TRANSFER_WINDOW_ARGUMENTS:
+            offsets_index, extents_index = _TRANSFER_WINDOW_ARGUMENTS[op_name]
+            offsets = operands[offsets_index]
+            extents = operands[extents_index]
+            assert isinstance(offsets, CceIntTuple) and isinstance(extents, CceIntTuple)
+            return offsets, extents
+        return None, None
 
     def _registered_stage(self, op_name: str, call: _ir_core.Call) -> _ir_core.OpIRStage:
         try:
@@ -538,7 +692,16 @@ class _KernelLowering:
             if isinstance(argument, Var) and argument.name_hint in self._tensors:
                 operands.append(self._tensors[argument.name_hint])
             elif isinstance(argument, MakeTuple):
-                operands.append(CceIntTuple(_int_tuple(argument, where=f"{call.op.name} argument {index}")))
+                # Offsets and extents are tuples of integers or affine index
+                # expressions; ``_validate_transfer`` separates the two.
+                operands.append(
+                    CceIntTuple(
+                        tuple(
+                            self._tuple_element(element, where=f"{call.op.name} argument {index}")
+                            for element in argument.elements
+                        )
+                    )
+                )
             elif isinstance(argument, ConstInt):
                 operands.append(
                     CceScalar(
@@ -553,6 +716,20 @@ class _KernelLowering:
                         element=CceElementType.from_data_type(argument.dtype),
                     )
                 )
+            elif isinstance(argument, Cast) and _is_float_cast_of_a_constant(argument):
+                operands.append(_cast_constant(argument))
+            elif isinstance(argument, (Var, Add, Sub, Mul, Neg, Cast)):
+                operands.append(
+                    CceIntTuple(
+                        (
+                            _require_index(
+                                argument,
+                                self._index_bindings,
+                                where=f"{call.op.name} argument {index}",
+                            ),
+                        )
+                    )
+                )
             else:
                 raise CceMlirError(
                     "unsupported-operand",
@@ -562,6 +739,12 @@ class _KernelLowering:
                     span=getattr(call, "span", None),
                 )
         return tuple(operands)
+
+    def _tuple_element(self, element: object, *, where: str) -> int | CceIndex:
+        """One tuple element: a constant, or an affine index expression."""
+        if isinstance(element, ConstInt):
+            return element.value
+        return _require_index(element, self._index_bindings, where=where)
 
     def _arg_effects(self, op_name: str, arity: int, call: _ir_core.Call) -> tuple[BufferAccess, ...]:
         try:
@@ -654,16 +837,22 @@ class _KernelLowering:
         operands: tuple[CceTensor | CceScalar | CceIntTuple, ...],
         effects: tuple[BufferAccess, ...],
         call: _ir_core.Call,
+        *,
+        offsets: CceIntTuple | None = None,
+        extents: CceIntTuple | None = None,
     ) -> None:
         span = getattr(call, "span", None)
         if op_name in ("buffer.load", "buffer.store"):
-            self._validate_transfer(op_name, operands, effects, call)
+            self._validate_transfer(op_name, operands, effects, call, offsets=offsets, extents=extents)
             return
         if op_name == "buffer.copy":
             self._validate_copy(op_name, operands, effects, call)
             return
         if op_name in ("buffer.matmul", "buffer.matmul_acc"):
             self._validate_matmul(op_name, operands, effects, call)
+            return
+        if op_name in _SCALAR_ELEMENTWISE:
+            self._validate_scalar_elementwise(op_name, operands, effects, call)
             return
         # Elementwise family: reads in UB, exactly one UB write, one shape.
         write = self._write_tensor(op_name, operands, effects, call)
@@ -690,80 +879,157 @@ class _KernelLowering:
                 span=span,
             )
 
-    def _validate_transfer(
+    def _validate_scalar_elementwise(
         self,
         op_name: str,
         operands: tuple[CceTensor | CceScalar | CceIntTuple, ...],
         effects: tuple[BufferAccess, ...],
         call: _ir_core.Call,
     ) -> None:
+        """Validate a one-tile-plus-scalar vector op."""
         span = getattr(call, "span", None)
-        tensors = [operand for operand in operands if isinstance(operand, CceTensor)]
-        tuples = [operand for operand in operands if isinstance(operand, CceIntTuple)]
-        if len(tensors) != 2 or len(tuples) != 2:
+        write = self._write_tensor(op_name, operands, effects, call)
+        reads = self._read_tensors(op_name, operands, effects, call)
+        scalars = [operand for operand in operands if isinstance(operand, CceScalar)]
+        if len(scalars) != 1:
             raise CceMlirError(
                 "malformed-op",
-                f"{op_name} expects two tensor and two integer-tuple operands, got "
-                f"{len(tensors)} tensor(s) and {len(tuples)} tuple(s)",
+                f"{op_name} expects exactly one scalar operand, got {len(scalars)}",
+                op_name=op_name,
+                span=span,
+            )
+        if write.space is not CceMemorySpace.UB or any(
+            tensor.space is not CceMemorySpace.UB for tensor in reads
+        ):
+            raise CceMlirError(
+                "unsupported-memory-space",
+                f"{op_name} is emitted on the vector engine and requires UB "
+                f"operands; got write={write.space.value} "
+                f"reads={[tensor.space.value for tensor in reads]}",
+                op_name=op_name,
+                span=span,
+            )
+        self._require_same_shape(op_name, (write, *reads), call)
+        if any(tensor.element != write.element for tensor in reads) or (scalars[0].element != write.element):
+            raise CceMlirError(
+                "dtype-mismatch",
+                f"{op_name} operands must share the tile element type; got "
+                f"{write.element.mlir}, {[tensor.element.mlir for tensor in reads]} and "
+                f"scalar {scalars[0].element.mlir}",
+                op_name=op_name,
+                span=span,
+            )
+
+    def _validate_transfer(
+        self,
+        op_name: str,
+        operands: tuple[CceTensor | CceScalar | CceIntTuple, ...],
+        effects: tuple[BufferAccess, ...],
+        call: _ir_core.Call,
+        *,
+        offsets: CceIntTuple | None = None,
+        extents: CceIntTuple | None = None,
+    ) -> None:
+        span = getattr(call, "span", None)
+        tensors = [operand for operand in operands if isinstance(operand, CceTensor)]
+        if len(tensors) != 2 or offsets is None or extents is None:
+            raise CceMlirError(
+                "malformed-op",
+                f"{op_name} expects two tensor operands and an offsets/extents window, got "
+                f"{len(tensors)} tensor(s)",
                 op_name=op_name,
                 span=span,
             )
         write = self._write_tensor(op_name, operands, effects, call)
         read = next(tensor for tensor in tensors if tensor is not write)
-        offsets = min(tuples, key=lambda item: sum(value != 0 for value in item.values))
-        extents = next(item for item in tuples if item is not offsets)
-        if any(value != 0 for value in offsets.values):
-            raise CceMlirError(
-                "unsupported-window",
-                f"{op_name} uses non-zero offsets {offsets.values}; windowed "
-                "transfers are not supported in this milestone",
-                op_name=op_name,
-                span=span,
-            )
-        if len(extents.values) != len(write.shape) or extents.values != write.shape:
-            raise CceMlirError(
-                "unsupported-window",
-                f"{op_name} moves extents {extents.values} but the destination "
-                f"buffer is {write.shape}; partial transfers are not supported",
-                op_name=op_name,
-                span=span,
-            )
-        if read.shape != write.shape:
-            raise CceMlirError(
-                "shape-mismatch",
-                f"{op_name} transfers {read.shape} into {write.shape}; shapes must match",
-                op_name=op_name,
-                span=span,
-            )
+        buffer_tensor = write if op_name == "buffer.load" else read
+        gm_tensor = read if op_name == "buffer.load" else write
+        self._validate_transfer_spaces(op_name, write, read, call)
+        if op_name == "buffer.store":
+            self._stored_parameters[write.name] = self._stored_parameters.get(write.name, 0) + 1
+        self._validate_window(op_name, offsets, extents, buffer_tensor, gm_tensor, call)
         if read.element != write.element:
             raise CceMlirError(
                 "dtype-mismatch",
                 f"{op_name} transfers {read.element.mlir} into {write.element.mlir}; dtypes must match",
                 op_name=op_name,
+                span=getattr(call, "span", None),
+            )
+
+    def _validate_transfer_spaces(
+        self,
+        op_name: str,
+        write: CceTensor,
+        read: CceTensor,
+        call: _ir_core.Call,
+    ) -> None:
+        """Check the transfer direction: GM on exactly one side, on-chip on the other."""
+        span = getattr(call, "span", None)
+        if op_name == "buffer.load":
+            ok = read.space is CceMemorySpace.GM and write.space is not CceMemorySpace.GM
+            message = f"buffer.load must move GM to an on-chip tier; got {read.space.value} -> "
+        else:
+            ok = write.space is CceMemorySpace.GM and read.space is not CceMemorySpace.GM
+            message = f"buffer.store must move an on-chip tier to GM; got {read.space.value} -> "
+        if not ok:
+            raise CceMlirError(
+                "unsupported-memory-space",
+                f"{message}{write.space.value}",
+                op_name=op_name,
                 span=span,
             )
-        if op_name == "buffer.load":
-            if read.space is not CceMemorySpace.GM or write.space is CceMemorySpace.GM:
+
+    def _validate_window(
+        self,
+        op_name: str,
+        offsets: CceIntTuple,
+        extents: CceIntTuple,
+        buffer_tensor: CceTensor,
+        gm_tensor: CceTensor,
+        call: _ir_core.Call,
+    ) -> None:
+        """Check the transfer window against the buffer and GM tensor extents."""
+        span = getattr(call, "span", None)
+        rank = len(gm_tensor.shape)
+        if len(offsets.values) != rank or len(extents.values) != rank:
+            raise CceMlirError(
+                "unsupported-window",
+                f"{op_name} window rank {len(offsets.values)}/{len(extents.values)} does not "
+                f"match the GM tensor rank {rank}",
+                op_name=op_name,
+                span=span,
+            )
+        for axis, extent in enumerate(extents.values):
+            if not isinstance(extent, int) or extent <= 0:
                 raise CceMlirError(
-                    "unsupported-memory-space",
-                    f"buffer.load must move GM to an on-chip tier; got "
-                    f"{read.space.value} -> {write.space.value}",
+                    "unsupported-window",
+                    f"{op_name} extent {extent!r} on axis {axis} must be a positive integer; "
+                    "the cce-mlir route does not support dynamic transfer extents",
                     op_name=op_name,
                     span=span,
                 )
-        else:
-            if write.space is not CceMemorySpace.GM or read.space is CceMemorySpace.GM:
+        if tuple(extents.values) != buffer_tensor.shape:
+            raise CceMlirError(
+                "unsupported-window",
+                f"{op_name} moves extents {tuple(extents.values)} but the buffer is "
+                f"{buffer_tensor.shape}; the window must fill the buffer's valid extent",
+                op_name=op_name,
+                span=span,
+            )
+        for axis, (offset, extent) in enumerate(zip(offsets.values, extents.values, strict=True)):
+            static = offset.constant if isinstance(offset, CceIndex) and offset.is_constant else offset
+            if isinstance(static, CceIndex):
+                # A loop-variable offset is a runtime precondition per the
+                # Buffer contract; only the static case is checkable here.
+                continue
+            if static < 0 or static + extent > gm_tensor.shape[axis]:
                 raise CceMlirError(
-                    "unsupported-memory-space",
-                    f"buffer.store must move an on-chip tier to GM; got "
-                    f"{read.space.value} -> {write.space.value}",
+                    "unsupported-window",
+                    f"{op_name} window [{static}, {static + extent}) on axis {axis} "
+                    f"exceeds the GM tensor extent {gm_tensor.shape[axis]}",
                     op_name=op_name,
                     span=span,
                 )
-            if write.name in self._stored_parameters:
-                self._stored_parameters[write.name] += 1
-            else:
-                self._stored_parameters[write.name] = 1
 
     def _validate_copy(
         self,

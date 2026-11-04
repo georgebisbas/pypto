@@ -93,5 +93,51 @@ def test_emitted_module_verifies_and_reparses():
         reparsed.operation.verify()
 
 
+def test_scalar_elementwise_builds_with_a_typed_scalar():
+    _, text = _emit(kernels.vector_scalar_chain)
+
+    assert "pto.muls" in text
+    assert "pto.adds" in text
+    assert "arith.constant 1.500000e+00 : f32" in text
+
+
+def test_full_window_transfers_emit_no_slice():
+    # A tile that fills its GM tensor needs no window: the emitted MLIR for the
+    # existing simple kernels must stay slice-free.
+    _, text = _emit(kernels.cube_matmul)
+
+    assert "tensor.extract_slice" not in text
+    assert "tensor.insert_slice" not in text
+
+
+def test_offset_window_emits_an_extract_slice():
+    _, text = _emit(kernels.vector_add_offset_window)
+
+    assert "tensor.extract_slice" in text
+    assert "tensor.insert_slice" not in text
+
+
+def test_windowed_store_emits_an_insert_slice():
+    _, text = _emit(kernels.vector_store_window)
+
+    assert "tensor.extract_slice" in text
+    assert "tensor.insert_slice" in text
+
+
+def test_loop_variable_offset_slices_with_the_induction_variable():
+    _, text = _emit(kernels.matmul_kloop_windowed)
+
+    assert "scf.for" in text
+    assert "tensor.extract_slice" in text
+    # The slice offset is computed from the loop induction variable, not a
+    # constant: arithmetic feeds the slice, and the pretty form prints the
+    # dynamic operand (a `%`-prefixed value) inside the offset list.
+    assert "arith.muli" in text
+    assert any(
+        "tensor.extract_slice" in line and "%" in line.split("tensor.extract_slice", 1)[1]
+        for line in text.splitlines()
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

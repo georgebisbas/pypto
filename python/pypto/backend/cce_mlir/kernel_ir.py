@@ -32,6 +32,7 @@ __all__ = [
     "CceElementType",
     "CceEncoding",
     "CceFor",
+    "CceIndex",
     "CceKernel",
     "CceKernelKind",
     "CceLayout",
@@ -40,6 +41,7 @@ __all__ = [
     "CceScalar",
     "CceTarget",
     "CceTensor",
+    "IndexValue",
 ]
 
 # MLIR spelling and C spelling of every data type the route accepts. The table
@@ -189,10 +191,36 @@ class CceScalar:
 
 
 @dataclass(frozen=True)
+class CceIndex:
+    """An affine index: a constant plus integer multiples of loop variables.
+
+    Buffer IR expresses transfer offsets and view offsets as arbitrary integer
+    expressions. The bridge only needs the affine subset the hardware can
+    address directly: ``constant + sum(multiplier * loop_var)``. Anything
+    outside this form is refused during lowering instead of being silently
+    linearized.
+
+    ``terms`` is sorted by variable name so two equal expressions compare equal
+    regardless of how they were written.
+    """
+
+    constant: int = 0
+    terms: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def is_constant(self) -> bool:
+        """Whether the expression has no loop-variable term."""
+        return not self.terms
+
+
+IndexValue = int | CceIndex
+
+
+@dataclass(frozen=True)
 class CceIntTuple:
     """A ``(Int, Int, ...)`` operand such as offsets or valid extents."""
 
-    values: tuple[int, ...]
+    values: tuple[IndexValue, ...]
 
 
 @dataclass(frozen=True)
@@ -204,6 +232,12 @@ class CceOp:
 
     ``result`` is set only for ``buffer.alloc``; every other buffer op mutates
     the operand at ``write_index``.
+
+    ``offsets`` and ``extents`` carry the transfer window for
+    ``buffer.load``/``buffer.store`` (and the static window for
+    ``buffer.extract``). They are recorded explicitly rather than recovered
+    from ``operands`` because the offsets may be affine loop expressions, which
+    a value search cannot distinguish from a constant tuple.
     """
 
     op_name: str
@@ -211,6 +245,8 @@ class CceOp:
     write_index: int | None = None
     read_indices: tuple[int, ...] = ()
     result: CceTensor | None = None
+    offsets: CceIntTuple | None = None
+    extents: CceIntTuple | None = None
     span: object | None = None
 
     @property
