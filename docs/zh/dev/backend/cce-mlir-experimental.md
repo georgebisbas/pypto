@@ -122,17 +122,17 @@ chip swimlane level 1 读取 AICore 任务时间。这样既避开了 `CompiledP
 分块 K 归约、同一归约的 `pl.pipeline(stage=2)` 版本、vector add、标量
 elementwise 链，以及 cube 后接 vector 的双 kernel 程序。
 
-Ascend 910B2 实测（AICore 任务时间，微秒，单次运行）：
+Ascend 910B2、PTOAS v0.72 与所固定 cce-mlir 版本实测（AICore 任务时间，微秒，单次运行）：
 
 | Kernel | PTOAS 最优 | cce-mlir |
 | --- | ---: | ---: |
-| 单个 128³ MMAD | 5.60 | 5.56 |
-| 65 次累加 MMAD | 26.08 | 23.94 |
-| 分块 K 归约（K=512） | 13.22 | 13.04 |
-| 分块 K 归约，`stage=2` | 12.42 | 13.86 |
-| vector add（128²） | 7.68 | 7.40 |
-| vector `x * 1.5 + 1.0` | 5.60 | 6.18 |
-| cube MMAD 后接 vector scale | 8.72 | 9.52 |
+| 单个 128³ MMAD | 6.12 | 6.40 |
+| 65 次累加 MMAD | 26.22 | 24.00 |
+| 分块 K 归约（K=512） | 12.78 | 13.88 |
+| 分块 K 归约，`stage=2` | 13.08 | 14.14 |
+| vector add（128²） | 7.48 | 7.92 |
+| vector `x * 1.5 + 1.0` | 5.92 | 5.98 |
+| cube MMAD 后接 vector scale | 9.36 | 8.98 |
 
 该主机逐 kernel 的运行间波动有数个百分点，因此小于约 10% 的差距属于噪声，优劣
 方向可能在两次运行间翻转；分块 K 归约一行在连续两次运行中就发生了翻转。两个

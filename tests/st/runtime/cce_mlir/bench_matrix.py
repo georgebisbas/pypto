@@ -49,7 +49,7 @@ __all__ = [
     "Measurement",
     "Route",
     "aicore_task_us",
-    "best_per_route",
+    "best_by_case",
     "measure",
     "render_table",
     "run_matrix",
@@ -228,20 +228,21 @@ def run_matrix(
     return results
 
 
-def best_per_route(measurements: list[Measurement]) -> dict[str, float]:
-    """The fastest AICore task time each compiler produced, across planners.
+def best_by_case(measurements: list[Measurement]) -> dict[str, dict[str, float]]:
+    """The fastest AICore task time per kernel, per compiler.
 
-    The PTOAS compiler's two planners are collapsed to one entry
-    (``ptoas``) so the comparison is compiler-to-compiler; the per-planner rows
-    remain in the report for anyone who wants to see which planner won.
+    Grouped by case first: a minimum taken across different kernels would
+    compare unrelated work. The PTOAS compiler's two planners are collapsed to
+    one entry (``ptoas``); the per-planner rows stay in the report.
     """
-    best: dict[str, float] = {}
+    best: dict[str, dict[str, float]] = {}
     for measurement in measurements:
         if not measurement.ok or measurement.task_us is None:
             continue
         compiler = measurement.route.split("/", 1)[0]
-        if compiler not in best or measurement.task_us < best[compiler]:
-            best[compiler] = measurement.task_us
+        per_case = best.setdefault(measurement.case, {})
+        if compiler not in per_case or measurement.task_us < per_case[compiler]:
+            per_case[compiler] = measurement.task_us
     return best
 
 
@@ -269,6 +270,6 @@ def write_report(measurements: list[Measurement], path: Path) -> None:
     payload = {
         "schema": 1,
         "measurements": [m.__dict__ for m in measurements],
-        "best_per_compiler_task_us": best_per_route(measurements),
+        "best_per_case_task_us": best_by_case(measurements),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

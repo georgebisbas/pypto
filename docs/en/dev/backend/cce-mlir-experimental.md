@@ -136,17 +136,17 @@ accumulation loop, a tiled K reduction, the same reduction under
 `pl.pipeline(stage=2)`, a vector add, a scalar elementwise chain, and a
 two-kernel cube-then-vector program.
 
-Measured on an Ascend 910B2 (AICore task time, microseconds, one run):
+Measured on an Ascend 910B2 with PTOAS v0.72 and the pinned cce-mlir revision (AICore task time, microseconds, one run):
 
 | Kernel | PTOAS best | cce-mlir |
 | --- | ---: | ---: |
-| single 128³ MMAD | 5.60 | 5.56 |
-| 65 accumulating MMADs | 26.08 | 23.94 |
-| tiled K reduction (K=512) | 13.22 | 13.04 |
-| tiled K reduction, `stage=2` | 12.42 | 13.86 |
-| vector add (128²) | 7.68 | 7.40 |
-| vector `x * 1.5 + 1.0` | 5.60 | 6.18 |
-| cube MMAD then vector scale | 8.72 | 9.52 |
+| single 128³ MMAD | 6.12 | 6.40 |
+| 65 accumulating MMADs | 26.22 | 24.00 |
+| tiled K reduction (K=512) | 12.78 | 13.88 |
+| tiled K reduction, `stage=2` | 13.08 | 14.14 |
+| vector add (128²) | 7.48 | 7.92 |
+| vector `x * 1.5 + 1.0` | 5.92 | 5.98 |
+| cube MMAD then vector scale | 9.36 | 8.98 |
 
 Run-to-run spread on this host is several percent per kernel, so a gap smaller
 than roughly 10% is noise and the winner can flip between runs; the tiled

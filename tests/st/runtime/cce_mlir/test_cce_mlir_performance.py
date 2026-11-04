@@ -20,9 +20,9 @@ Each route registers once on a ``ChipWorker``, dispatches over device tensors,
 and reports the AICore task time from chip-swimlane level 1 as the primary
 metric. The assertions are parity bounds, not targets: they catch a route that
 becomes categorically slower without pinning either implementation to the
-numbers this host happened to produce. ``best_per_route`` collapses the two
-PTOAS planners to the compiler's faster result, which is the "fastest baseline"
-for that compiler.
+numbers this host happened to produce. ``best_by_case`` collapses the two
+PTOAS planners to the compiler's faster result per kernel, which is the
+"fastest baseline" for that compiler on that kernel.
 
 Run through the queue on hardware::
 
@@ -152,7 +152,7 @@ def matrix(tmp_path_factory):
     report = Path(os.environ.get("PYPTO_CCE_MLIR_BENCH_JSON", root / "bench_report.json"))
     bench_matrix.write_report(measurements, report)
     print("\n" + bench_matrix.render_table(measurements))
-    print(f"\nfastest baseline (AICore task us): {bench_matrix.best_per_route(measurements)}")
+    print(f"\nfastest baseline (AICore task us): {bench_matrix.best_by_case(measurements)}")
     return measurements
 
 
@@ -185,25 +185,12 @@ def test_case_across_routes(case, matrix):
 
 def test_fastest_baseline_per_compiler(matrix):
     """Both compilers must produce a usable fastest baseline for every case."""
-    best = bench_matrix.best_per_route(matrix)
-    missing = {"ptoas", "cce_mlir"} - set(best)
-    assert not missing, f"no successful measurement for {sorted(missing)}"
+    best = bench_matrix.best_by_case(matrix)
 
     for case in CASES:
-        per_compiler = {
-            compiler: min(
-                result.task_us
-                for result in matrix
-                if result.ok and result.case == case.name and result.route.split("/", 1)[0] == compiler
-            )
-            for compiler in ("ptoas", "cce_mlir")
-            if any(
-                result.ok and result.case == case.name and result.route.split("/", 1)[0] == compiler
-                for result in matrix
-            )
-        }
-        if len(per_compiler) < 2:
-            continue
+        per_compiler = best.get(case.name, {})
+        missing = {"ptoas", "cce_mlir"} - set(per_compiler)
+        assert not missing, f"{case.name}: no successful measurement for {sorted(missing)}"
         ratio = max(per_compiler.values()) / min(per_compiler.values())
         assert ratio < _TASK_PARITY, f"{case.name} compiler task ratio {ratio:.2f}"
 
