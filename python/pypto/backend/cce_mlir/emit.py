@@ -24,6 +24,7 @@ from .errors import CceMlirError
 from .kernel_ir import (
     CceElementType,
     CceEncoding,
+    CceFor,
     CceKernel,
     CceKernelKind,
     CceMemorySpace,
@@ -227,21 +228,73 @@ def emit_module(
                     arguments = list(function.body.blocks[0].arguments)
                     for tensor, value in zip(kernel.parameters, arguments, strict=True):
                         builder.bind(tensor, value)
-                    for op in kernel.ops:
-                        emitter = EMITTERS.get(op.op_name)
-                        if emitter is None:
-                            raise CceMlirError(
-                                "unsupported-op",
-                                f"no cce-mlir emitter is registered for {op.op_name!r}",
-                                op_name=op.op_name,
-                                span=op.span,
-                            )
-                        emitter(op, builder)
+                    _emit_statements(kernel.body, builder, cir)
                     npu.ReturnOp([builder.value(tensor) for tensor in kernel.returns])
             if with_host:
                 _emit_host_driver(cir, kernel, builder, module, host_device)
         module.operation.verify()
         return module
+
+
+def _written_tensors(statements: Any) -> list[CceTensor]:
+    """Tensors written anywhere in a statement block, in first-write order."""
+    written: dict[int, CceTensor] = {}
+
+    def visit(block: Any) -> None:
+        for statement in block:
+            if isinstance(statement, CceFor):
+                visit(statement.body)
+                continue
+            tensor = statement.write_tensor
+            if tensor is not None:
+                written.setdefault(tensor.value_id, tensor)
+
+    visit(statements)
+    return list(written.values())
+
+
+def _emit_statements(statements: Any, builder: MlirBuilder, cir: Any) -> None:
+    """Emit a statement block, lowering loops to ``scf.for``.
+
+    PyPTO's Buffer IR keeps loop state in buffers, so every tensor written in a
+    loop body is threaded as an ``scf.for`` iter-arg: its pre-loop value enters,
+    the block argument is bound for the body, and the loop result is bound after
+    it. Without this the post-loop store would reference a value defined inside
+    the loop region and fail dominance.
+    """
+    from cce_mlir.dialects import arith, scf
+
+    for statement in statements:
+        if isinstance(statement, CceFor):
+            carried = _written_tensors(statement.body)
+            initial = [builder.value(tensor) for tensor in carried]
+            index = cir.IndexType.get()
+            loop = scf.ForOp(
+                arith.constant(index, statement.start),
+                arith.constant(index, statement.stop),
+                arith.constant(index, statement.step),
+                initial,
+            )
+            with cir.InsertionPoint(loop.body):
+                # Block arguments are the induction variable followed by the
+                # iter-args, one per carried tensor.
+                arguments = list(loop.body.arguments)[1:]
+                for tensor, argument in zip(carried, arguments, strict=True):
+                    builder.bind(tensor, argument)
+                _emit_statements(statement.body, builder, cir)
+                scf.YieldOp([builder.value(tensor) for tensor in carried])
+            for tensor, result in zip(carried, loop.results, strict=True):
+                builder.bind(tensor, result)
+            continue
+        emitter = EMITTERS.get(statement.op_name)
+        if emitter is None:
+            raise CceMlirError(
+                "unsupported-op",
+                f"no cce-mlir emitter is registered for {statement.op_name!r}",
+                op_name=statement.op_name,
+                span=statement.span,
+            )
+        emitter(statement, builder)
 
 
 def _npu_memory_space(tensor: CceTensor) -> Any:

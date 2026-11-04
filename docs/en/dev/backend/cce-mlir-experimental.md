@@ -60,12 +60,33 @@ No fixture shape, byte count, layout or symbol is written literally.
 - Transfers: `buffer.load` (GM → L1/UB), `buffer.store` (L0C/UB → GM),
   `buffer.copy` (L1 → L0A/L0B, UB → UB).
 - Static rank-2 shapes, full-window transfers, A3, one block.
+- Static-bound `pl.range` loops whose body operates on fixed operands.
+  PyPTO's Buffer IR keeps loop state in buffers, so each tensor written in the
+  body is threaded as an `scf.for` iter-arg and the post-loop value is the
+  loop's result.
 
 Refused with a typed diagnostic: windowed or partial transfers, dynamic valid
-shapes, scalar kernel parameters, scalar elementwise variants, control flow,
-Bias/A5 scale spaces, mixed cube/vector kernels, SPMD block queries,
-`buffer.extract/subview/reshape/set_validshape`, and any operator without an
-emitter registration.
+shapes, scalar kernel parameters, scalar elementwise variants, non-constant
+loop bounds, loop-carried `pl.yield` values, `while`/`if`, dynamic tile offsets
+inside loops, Bias/A5 scale spaces, mixed cube/vector kernels, SPMD block
+queries, `buffer.extract/subview/reshape/set_validshape`, and any operator
+without an emitter registration.
+
+## Performance
+
+The two routes are compared in
+`tests/st/runtime/cce_mlir/test_cce_mlir_performance.py`, which registers each
+compiled program once on a `ChipWorker`, dispatches over device tensors, and
+reads the AICore task from chip-swimlane level 1. This avoids the per-call
+artifact assembly that otherwise dominates `CompiledProgram` dispatch.
+
+For the same kernels the routes are within roughly 10% of each other, and the
+sign depends on the workload: cce-mlir was ~9% slower for a single 128³ MMAD
+and ~7% faster for a 65-MMAD serial accumulation. Both compile to the same
+hardware intrinsics (GM→L1, L1→L0A/L0B, MMAD, L0C→GM); the fixed per-task
+start-up and DMA cost is several microseconds, so codegen differences only
+become visible once the MMAD chain is long. The test enforces a 2× parity bound
+rather than a target number.
 
 ## Selecting the route
 

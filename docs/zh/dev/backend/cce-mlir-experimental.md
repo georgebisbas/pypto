@@ -58,10 +58,27 @@ PyPTO @pl.jit kernel
 - 搬运：`buffer.load`（GM → L1/UB）、`buffer.store`（L0C/UB → GM）、
   `buffer.copy`（L1 → L0A/L0B、UB → UB）。
 - 静态二维形状、整窗搬运、A3、单 block。
+- 静态边界的 `pl.range` 循环，循环体操作固定操作数。PyPTO 的 Buffer IR 将循环
+  状态保存在 buffer 中，因此循环体内写入的每个 tensor 都作为 `scf.for` 的
+  iter-arg 传递，循环后的值取循环结果。
 
 带类型诊断拒绝：窗口或部分搬运、动态 valid shape、标量 kernel 参数、标量
-elementwise 变体、控制流、Bias/A5 scale 空间、cube/vector 混合 kernel、SPMD block
-查询、`buffer.extract/subview/reshape/set_validshape`，以及任何未注册 emitter 的算子。
+elementwise 变体、非常量循环边界、`pl.yield` 携带的循环值、`while`/`if`、循环内
+动态 tile offset、Bias/A5 scale 空间、cube/vector 混合 kernel、SPMD block 查询、
+`buffer.extract/subview/reshape/set_validshape`，以及任何未注册 emitter 的算子。
+
+## 性能
+
+两条路线在 `tests/st/runtime/cce_mlir/test_cce_mlir_performance.py` 中比较：每个
+编译产物在 `ChipWorker` 上注册一次，使用 device tensor 反复派发，并从 chip
+swimlane level 1 读取 AICore 任务时间。这样避开了 `CompiledProgram` 每次派发都会
+重新组装产物、从而主导测量的开销。
+
+相同 kernel 下两条路线相差约 10% 以内，且方向随负载变化：单个 128³ MMAD 时
+cce-mlir 约慢 9%，65 次串行累加时约快 7%。两者生成相同的硬件 intrinsic
+（GM→L1、L1→L0A/L0B、MMAD、L0C→GM）；每个任务的固定启动与 DMA 成本有数微秒，
+因此只有 MMAD 链足够长时 codegen 差异才显现。测试使用 2 倍 parity 上限，而不是
+固定目标数值。
 
 ## 选择该路线
 

@@ -31,6 +31,7 @@ from .errors import CceMlirError
 __all__ = [
     "CceElementType",
     "CceEncoding",
+    "CceFor",
     "CceKernel",
     "CceKernelKind",
     "CceLayout",
@@ -233,6 +234,25 @@ class CceOp:
 
 
 @dataclass(frozen=True)
+class CceFor:
+    """One structured loop over a straight-line body.
+
+    PyPTO's Buffer IR keeps loop state in buffers, not SSA iter-args, so the
+    milestone body has no yielded values. Loop bounds are static; a body op that
+    uses the induction variable as a dynamic offset is refused during lowering.
+    """
+
+    loop_var: str
+    start: int
+    stop: int
+    step: int
+    body: tuple[CceStatement, ...]
+
+
+CceStatement = CceOp | CceFor
+
+
+@dataclass(frozen=True)
 class CceKernel:
     """One lowered InCore kernel."""
 
@@ -244,5 +264,20 @@ class CceKernel:
     kind: CceKernelKind
     parameters: tuple[CceTensor, ...]
     values: tuple[CceTensor, ...]
-    ops: tuple[CceOp, ...]
+    body: tuple[CceStatement, ...]
     returns: tuple[CceTensor, ...]
+
+    @property
+    def ops(self) -> tuple[CceOp, ...]:
+        """All operations, flattening loop bodies in program order."""
+
+        def flatten(statements: tuple[CceStatement, ...]) -> list[CceOp]:
+            result: list[CceOp] = []
+            for statement in statements:
+                if isinstance(statement, CceFor):
+                    result.extend(flatten(statement.body))
+                else:
+                    result.append(statement)
+            return result
+
+        return tuple(flatten(self.body))

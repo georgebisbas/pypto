@@ -63,6 +63,14 @@ def test_changing_shapes_changes_the_emitted_types():
     assert big != small
 
 
+def test_static_loop_builds_an_scf_for():
+    _, text = _emit(kernels.loop_matmul)
+
+    assert "scf.for" in text
+    assert "pto.matmul_acc" in text
+    assert "scf.yield" in text
+
+
 def test_vector_add_builds_a_vector_kernel_in_ub():
     _, text = _emit(kernels.vector_add)
 

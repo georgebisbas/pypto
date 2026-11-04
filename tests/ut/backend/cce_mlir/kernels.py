@@ -49,6 +49,24 @@ def cube_matmul_32x64x32(
 
 
 @pl.jit
+def loop_matmul(
+    a: pl.Tensor[[128, 128], pl.FP16],
+    b: pl.Tensor[[128, 128], pl.FP16],
+    out: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
+):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        a_mat = pl.load(a, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+        b_mat = pl.load(b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+        a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+        b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+        acc = pl.matmul(a_left, b_right, out_dtype=pl.FP32)
+        for _ in pl.range(2):
+            acc = pl.matmul_acc(acc, a_left, b_right)
+        pl.store(acc, [0, 0], out)
+    return out
+
+
+@pl.jit
 def vector_add(
     lhs: pl.Tensor[[128, 128], pl.FP32],
     rhs: pl.Tensor[[128, 128], pl.FP32],

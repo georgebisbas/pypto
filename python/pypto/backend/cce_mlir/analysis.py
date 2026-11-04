@@ -49,12 +49,14 @@ from pypto.pypto_core.ir import (
 from .errors import CceMlirError
 from .kernel_ir import (
     CceElementType,
+    CceFor,
     CceIntTuple,
     CceKernel,
     CceKernelKind,
     CceMemorySpace,
     CceOp,
     CceScalar,
+    CceStatement,
     CceTarget,
     CceTensor,
 )
@@ -244,7 +246,7 @@ class _KernelLowering:
         self._tensors: dict[str, CceTensor] = {}
         self._parameters: list[CceTensor] = []
         self._values: list[CceTensor] = []
-        self._ops: list[CceOp] = []
+        self._body: list[CceStatement] = []
         self._stored_parameters: dict[str, int] = {}
         self._written: set[str] = set()
         self._return_names: tuple[str, ...] = ()
@@ -267,7 +269,7 @@ class _KernelLowering:
             kind=kind,
             parameters=tuple(self._parameters),
             values=tuple(self._values),
-            ops=tuple(self._ops),
+            body=tuple(self._body),
             returns=tuple(
                 self._tensors[name]
                 for name, direction in self._param_directions()
@@ -391,6 +393,36 @@ class _KernelLowering:
             names.append(value.name_hint)
         self._return_names = tuple(names)
 
+    def visit_for(self, stmt: object) -> None:
+        """Lower a static-bound loop whose body is a straight-line block."""
+        bounds: list[int] = []
+        for name in ("start", "stop", "step"):
+            expression = getattr(stmt, name)
+            if not isinstance(expression, ConstInt):
+                raise CceMlirError(
+                    "unsupported-loop",
+                    f"loop {stmt.loop_var.name_hint!r} has a non-constant {name}; "
+                    "the cce-mlir route needs static loop bounds",
+                    span=getattr(stmt, "span", None),
+                )
+            bounds.append(expression.value)
+        start, stop, step = bounds
+        if step <= 0:
+            raise CceMlirError(
+                "unsupported-loop",
+                f"loop {stmt.loop_var.name_hint!r} has step {step}; the cce-mlir "
+                "route needs a positive static step",
+                span=getattr(stmt, "span", None),
+            )
+        body: list[CceStatement] = []
+        parent = self._body
+        self._body = body
+        try:
+            _StatementWalker(self).visit_stmt(stmt.body)
+        finally:
+            self._body = parent
+        self._body.append(CceFor(stmt.loop_var.name_hint, start, stop, step, tuple(body)))
+
     # -- allocation -------------------------------------------------------
 
     def _bind_allocation(self, stmt: object, call: _ir_core.Call) -> None:
@@ -439,7 +471,7 @@ class _KernelLowering:
                 buffer_type.compact,
             ),
         )
-        self._ops.append(
+        self._body.append(
             CceOp(
                 op_name="buffer.alloc",
                 operands=(),
@@ -474,7 +506,7 @@ class _KernelLowering:
         self._validate_op(op_name, operands, effects, call)
         write_index = self._write_index(op_name, operands, effects, call)
         self._written.add(operands[write_index].name)  # type: ignore[union-attr]
-        self._ops.append(
+        self._body.append(
             CceOp(
                 op_name=op_name,
                 operands=operands,
@@ -901,14 +933,22 @@ class _KernelLowering:
 
 
 class _StatementWalker(_pypto_ir.IRVisitor):
-    """Dispatch statements to the lowering, refusing control flow."""
+    """Dispatch statements to the lowering; only static-bound loops are allowed."""
 
     def __init__(self, lowering: _KernelLowering) -> None:
         super().__init__()
         self._lowering = lowering
 
     def visit_stmt(self, stmt: object) -> None:
-        if isinstance(stmt, (SeqStmts, AssignStmt, EvalStmt, ReturnStmt)):
+        allowed = (
+            SeqStmts,
+            AssignStmt,
+            EvalStmt,
+            ReturnStmt,
+            _ir_core.ForStmt,
+            _ir_core.YieldStmt,
+        )
+        if isinstance(stmt, allowed):
             super().visit_stmt(stmt)
             return
         self._refuse(stmt)
@@ -926,20 +966,26 @@ class _StatementWalker(_pypto_ir.IRVisitor):
     def visit_return_stmt(self, op: object) -> None:
         self._lowering.visit_return(op)
 
+    def visit_for_stmt(self, op: object) -> None:
+        self._lowering.visit_for(op)
+
+    def visit_yield_stmt(self, op: object) -> None:
+        # Buffer IR carries loop state in buffers, so a loop yields nothing.
+        if op.value:
+            self._refuse(op)
+
     def _refuse(self, op: object) -> None:
         raise CceMlirError(
             "unsupported-control-flow",
             f"{type(op).__name__} is not supported by the cce-mlir route in this "
-            "milestone; kernels must be straight-line blocks",
+            "milestone; only static-bound loops with straight-line bodies are",
             span=getattr(op, "span", None),
         )
 
-    visit_for_stmt = _refuse
     visit_while_stmt = _refuse
     visit_if_stmt = _refuse
     visit_break_stmt = _refuse
     visit_continue_stmt = _refuse
-    visit_yield_stmt = _refuse
     visit_in_core_scope_stmt = _refuse
     visit_cluster_scope_stmt = _refuse
     visit_graph_scope_stmt = _refuse

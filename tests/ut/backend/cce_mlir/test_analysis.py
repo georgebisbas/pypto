@@ -16,7 +16,7 @@ from pypto.backend.cce_mlir import (
     CceTarget,
     lower_program,
 )
-from pypto.backend.cce_mlir.kernel_ir import CceLayout, CceMemorySpace
+from pypto.backend.cce_mlir.kernel_ir import CceFor, CceLayout, CceMemorySpace
 from pypto.pypto_core.ir import ParamDirection
 
 from . import kernels
@@ -96,6 +96,18 @@ def test_vector_add_lowers_to_the_ub_path():
         "buffer.store",
     ]
     assert lowered.parameters[2].direction is ParamDirection.Out
+
+
+def test_static_loop_becomes_a_structured_statement():
+    (lowered,) = _lower(kernels.loop_matmul)
+
+    loops = [statement for statement in lowered.body if isinstance(statement, CceFor)]
+    assert len(loops) == 1
+    loop = loops[0]
+    assert (loop.start, loop.stop, loop.step) == (0, 2, 1)
+    assert [op.op_name for op in loop.body] == ["buffer.matmul_acc"]
+    # ``ops`` flattens loop bodies in program order for reporting.
+    assert [op.op_name for op in lowered.ops].count("buffer.matmul_acc") == 1
 
 
 def test_shapes_and_dtypes_reach_the_typed_ir():

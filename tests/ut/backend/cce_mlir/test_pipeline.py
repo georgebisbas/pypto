@@ -45,7 +45,7 @@ def test_built_module_compiles_to_a_device_object(kernel):
     assert lowered.device_symbol in symbol_names(data)
 
 
-@pytest.mark.parametrize("kernel", [kernels.cube_matmul, kernels.vector_add])
+@pytest.mark.parametrize("kernel", [kernels.cube_matmul, kernels.vector_add, kernels.loop_matmul])
 def test_standalone_function_defines_the_bare_symbol(kernel):
     toolkit = _toolkit()
     (lowered,) = lower_program(kernel.lower(), target=CceTarget.A3)
