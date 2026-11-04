@@ -96,6 +96,7 @@ def lower_to_llvm(module: Any, *, toolkit: CceToolkit | None = None) -> str:
     effective = toolkit or cann_toolkit()
     with module.context:
         pass_manager = PassManager("builtin.module")
+        pass_manager.add("pto-propagate-layout")
         pass_manager.add("npu-lower-pto-to-llvm-pipeline{" + effective.pipeline_options() + "}")
         pass_manager.run(module.operation)
     return str(module)
@@ -252,6 +253,10 @@ def compile_device_function(
     effective = toolkit or cann_toolkit()
     with module.context:
         pass_manager = PassManager("builtin.module")
+        # Fold/cancel relayout chains before they are materialized into CCE
+        # memory operations. Today's kernels have no cancelling pair, so this is
+        # a no-op; it is where vector chains of pack/pointwise/unpack win.
+        pass_manager.add("pto-propagate-layout")
         pass_manager.add("npu-lower-pto-to-cce-pipeline")
         pass_manager.run(module.operation)
         pass_manager = PassManager("builtin.module")
@@ -278,6 +283,7 @@ def compile_device_function(
                 "-x",
                 "ir",
                 "-c",
+                "-O3",
                 "--cce-aicore-only",
                 "--target=hiipu64-hisilicon-cce",
                 f"--cce-aicore-arch={_DEVICE_ARCH[kernel.target.value]}",

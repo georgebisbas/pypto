@@ -67,6 +67,32 @@ elementwise 变体、非常量循环边界、`pl.yield` 携带的循环值、`wh
 动态 tile offset、Bias/A5 scale 空间、cube/vector 混合 kernel、SPMD block 查询、
 `buffer.extract/subview/reshape/set_validshape`，以及任何未注册 emitter 的算子。
 
+## 优化 Pass
+
+该路线运行 cce-mlir 的规范 pipeline，已包含分配与同步工作：
+
+| 运行 | 作用 |
+| --- | --- |
+| `pto-split-by-kind`、`pto-lower-cross-core` | cube/vector 拆分与跨核交接 |
+| `pto-propagate-layout` | 折叠/抵消 relayout 链（当前 kernel 为 no-op） |
+| `lower-pto-to-cce` | PTO 降至 CCE tensor SSA |
+| `cce-insert-sync-dataflow` | 从 tensor dataflow 推导 pipeline barrier |
+| `cce-verify-flag-pairs`、`cce-allocate-flags` | 校验并分配 event id |
+| `cce-materialize-rank`、`npu-bufferize`、`cce-bufferize`、`npu-void-kernel-abi` | layout rank 与 bufferization |
+| `cce-assign-ub-buffers`、`cce-resolve-onchip-carries`、`cce-allocate-buffer-offsets`、`cce-lower-to-hivm` | UB 放置、循环携带 buffer、字节偏移 |
+| `hivm-lower-to-llvm` + LLVM tail | 设备 LLVM |
+| `bisheng -O3` | 设备 object 优化 |
+
+未使用及原因：
+
+| Pass | 原因 |
+| --- | --- |
+| `pto-tile-cube-gemm` | 针对整矩阵 `linalg`→PTO 进行分块；桥接器发射显式 tile 链。仅当路线接受超过 L0 的形状时才需要 |
+| `npu-swizzle-grid` | CUTLASS 风格 SPMD grid 重排；路线当前为单 block |
+| `npu-lower-device-builtins` | 供读取 `core_id`/`block_dim` 的 SPMD kernel 使用 |
+| `convert-linalg-to-pto`、`outline-linalg-to-npu` | linalg 前端；本桥接从 Buffer IR 开始 |
+| `npu-embed-kernel-binary`、`convert-npu-kernel-to-func` | 备用构建/宿主仿真路径 |
+
 ## 性能
 
 两条路线在 `tests/st/runtime/cce_mlir/test_cce_mlir_performance.py` 中比较：每个

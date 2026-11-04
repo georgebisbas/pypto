@@ -72,6 +72,33 @@ inside loops, Bias/A5 scale spaces, mixed cube/vector kernels, SPMD block
 queries, `buffer.extract/subview/reshape/set_validshape`, and any operator
 without an emitter registration.
 
+## Optimization passes
+
+The route runs cce-mlir's canonical pipelines, which already carry the
+allocation and synchronization work:
+
+| Runs | Role |
+| --- | --- |
+| `pto-split-by-kind`, `pto-lower-cross-core` | cube/vector split and cross-core handoff |
+| `pto-propagate-layout` | fold/cancel relayout chains (no-op on today's kernels) |
+| `lower-pto-to-cce` | PTO to CCE tensor SSA |
+| `cce-insert-sync-dataflow` | derive pipeline barriers from tensor dataflow |
+| `cce-verify-flag-pairs`, `cce-allocate-flags` | check and assign event ids |
+| `cce-materialize-rank`, `npu-bufferize`, `cce-bufferize`, `npu-void-kernel-abi` | layout rank and bufferization |
+| `cce-assign-ub-buffers`, `cce-resolve-onchip-carries`, `cce-allocate-buffer-offsets`, `cce-lower-to-hivm` | UB placement, loop-carried buffers, byte offsets |
+| `hivm-lower-to-llvm` + LLVM tail | device LLVM |
+| `bisheng -O3` | device-object optimization |
+
+Not used, and why:
+
+| Pass | Why not |
+| --- | --- |
+| `pto-tile-cube-gemm` | tiles a whole-matrix `linalg`→PTO contraction; the bridge emits an explicit tile chain. It becomes relevant if the route accepts shapes larger than L0 |
+| `npu-swizzle-grid` | CUTLASS-style SPMD grid rasterization; the route is single-block |
+| `npu-lower-device-builtins` | for SPMD kernels that read `core_id`/`block_dim` |
+| `convert-linalg-to-pto`, `outline-linalg-to-npu` | linalg front end; this bridge starts from Buffer IR |
+| `npu-embed-kernel-binary`, `convert-npu-kernel-to-func` | alternate build/host-emulation paths |
+
 ## Performance
 
 The two routes are compared in
