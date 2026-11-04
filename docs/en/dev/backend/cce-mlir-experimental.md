@@ -228,6 +228,50 @@ default is unchanged.
 | `<kernel>.manifest.json` | Derived contract, revisions, object digest, symbols, queue task id |
 | `report.json` | Compile status and diagnostics |
 
+## Inspecting the generated code
+
+`python -m pypto.tools.trace_kernel` compiles one `@pl.jit` kernel with every
+PyPTO pass dumped and every backend artifact saved, then prints a map from each
+lowering stage to the file that holds it:
+
+```bash
+python -m pypto.tools.trace_kernel \
+    --file tests/st/runtime/cce_mlir/corpus.py --function matmul_kloop
+```
+
+Use `--function` when the file defines several kernels, and `--samples
+f16:128x512,f16:512x128,f32:128x128` when the parameters carry bare
+`pl.Tensor` annotations (no static shape to specialize on). `--compiler ptoas`
+traces the other route instead; `--out DIR` chooses the artifact root
+(default `build_output/trace_<stem>`).
+
+Add `--html` to also render `<out>/trace.html`: one page listing every stage in
+pipeline order, each diffed line by line against the previous stage in the same
+representation (PyPTO IR, PTO MLIR, cce-mlir pipeline, device LLVM), with a
+stage index, per-stage `+n/−n` counts, and an "only changed stages" filter.
+Diffs never cross a representation boundary; the page marks the boundary
+instead.
+
+For the cce-mlir route the tool also runs cce-mlir's pass manager when
+`cce-opt` is available. `--mlir-print-ir-tree-dir` writes one file per pass
+under `<out>/cce_passes/NN_<pass>.mlir`, and `<out>/cce_level.mlir` is the
+module after PTO→CCE. Read the descent in this order:
+
+| Stage | File |
+| --- | --- |
+| your Python, as PyPTO IR | `passes_dump/00_frontend.py` |
+| tensor ops become tile ops | `passes_dump/*after_ConvertTensorToTileOps.py` |
+| tile memory spaces / layouts | `passes_dump/*after_InferTileMemorySpace.py`, `*after_ResolveBackendOpLayouts.py` |
+| Buffer-IR gate | `passes_dump/*after_SelectBufferIRFunctions.py` |
+| Buffer IR (backend handoff) | `passes_dump/*after_LowerTileToBuffer.py` |
+| PTO MLIR emitted by PyPTO | `cce_mlir/*.mlir` |
+| cce-mlir passes / CCE level | `cce_passes/NN_<pass>.mlir`, `cce_level.mlir` |
+| device LLVM | `cce_mlir/*.lowered.mlir` |
+
+If `*after_SelectBufferIRFunctions.py` records `"buffer_ir_selected": False`,
+the kernel stopped at Tile IR and this route will have produced no
+`cce_mlir/` artifacts: the Buffer-IR gate, not the bridge, rejected it.
+
 ## Reproduce with Docker
 
 Build from the PyPTO repository root (ARM64 Ascend host):

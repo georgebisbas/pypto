@@ -209,6 +209,46 @@ cce_mlir/<name>.manifest.json         合约、版本、object 摘要
 | `<kernel>.manifest.json` | 推导合约、版本、object 摘要、符号、队列任务 id |
 | `report.json` | 编译状态与诊断 |
 
+## 查看生成的代码
+
+`python -m pypto.tools.trace_kernel` 编译一个 `@pl.jit` kernel，导出每个 PyPTO
+pass 的 IR 与全部后端产物，并打印“阶段 → 文件”的对照表：
+
+```bash
+python -m pypto.tools.trace_kernel \
+    --file tests/st/runtime/cce_mlir/corpus.py --function matmul_kloop
+```
+
+文件中定义多个 kernel 时用 `--function` 选择；参数是裸 `pl.Tensor` 注解（没有
+静态形状）时用 `--samples f16:128x512,f16:512x128,f32:128x128` 指定样本张量。
+`--compiler ptoas` 改为追踪另一条路线；`--out DIR` 指定产物根目录（默认
+`build_output/trace_<stem>`）。
+
+加 `--html` 会额外渲染 `<out>/trace.html`：一页按流水线顺序列出全部阶段，每个
+阶段与**同一表示**中的上一阶段逐行 diff（PyPTO IR、PTO MLIR、cce-mlir
+pipeline、device LLVM），并带阶段索引、每阶段 `+n/−n` 计数和“只看有变化的阶段”
+过滤。diff 不跨表示边界，跨边界处页面会显式标注。
+
+cce-mlir 路线下，若找到 `cce-opt`，工具还会运行 cce-mlir 自己的 pass manager：
+`--mlir-print-ir-tree-dir` 会在 `<out>/cce_passes/NN_<pass>.mlir` 下为每个 pass
+单独写出一个文件，`<out>/cce_level.mlir` 是 PTO→CCE 之后的 module
+（PTO→CCE 之后的 module）。建议按以下顺序阅读：
+
+| 阶段 | 文件 |
+| --- | --- |
+| 你写的 Python，对应的 PyPTO IR | `passes_dump/00_frontend.py` |
+| tensor 算子变为 tile 算子 | `passes_dump/*after_ConvertTensorToTileOps.py` |
+| tile 内存空间 / layout | `passes_dump/*after_InferTileMemorySpace.py`、`*after_ResolveBackendOpLayouts.py` |
+| Buffer IR 选择门 | `passes_dump/*after_SelectBufferIRFunctions.py` |
+| Buffer IR（后端交接点） | `passes_dump/*after_LowerTileToBuffer.py` |
+| PyPTO 发射的 PTO MLIR | `cce_mlir/*.mlir` |
+| cce-mlir 各 pass / CCE 层 | `cce_passes/NN_<pass>.mlir`、`cce_level.mlir` |
+| device LLVM | `cce_mlir/*.lowered.mlir` |
+
+若 `*after_SelectBufferIRFunctions.py` 中记录 `"buffer_ir_selected": False`，说明
+kernel 停在 Tile IR，该路线不会产生 `cce_mlir/` 产物：拒绝它的是 Buffer IR
+选择门，而不是桥接层。
+
 ## 使用 Docker 复现
 
 在 PyPTO 仓库根目录（ARM64 Ascend 主机）构建：
