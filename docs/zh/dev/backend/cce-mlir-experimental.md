@@ -322,7 +322,14 @@ device function 模式来替代这一重写。
 - 每个 kernel 一个 block；不支持 SPMD block 查询。
 - 只有二维静态形状能进入 Buffer IR，因此 rank-3 batch kernel 不会进入该路线。
 - `buffer.full` 被 cce-mlir 缺陷阻塞：对 rank-2 目标，`pto.expands` 会错误地
-  lower 成只带一个 index 的 `tensor.extract`。
+  lower 成只带一个 index 的 `tensor.extract`（cce-mlir#272，与 #253 重复）。
+- 以循环变量为 offset、写入更大 GM tensor 窗口的 store（`pl.store(tile, [i * 128, 0], out)`）
+  无法 lower：`cce-lower-to-hivm` 会留下未转换的 `unrealized_conversion_cast`
+  （cce-mlir#271，相关 #64、#102）。静态 offset 可以 lower 且结果精确。
+- `buffer.recip` 映射到近似的 `vrec`，sigmoid/softmax 类数值与 PTOAS 相差约
+  3e-3 相对误差（cce-mlir#273）。
+- 原地 elementwise 更新（`dest == src`）在上游会算错（cce-mlir#274，与 #147
+  重复）；桥接层改为写入 scratch，在循环内再把结果拷回目标 buffer。
 - `pl.pipeline` 在两条路线下都使用 PyPTO planner 比较。PTOAS planner 的 slot
   形式（`MemRef.slot_count_ > 1`、`iv % F` 索引）被 Buffer IR 选择 pass 排除，
   因此该路线无法消费。

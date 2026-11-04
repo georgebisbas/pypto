@@ -93,6 +93,26 @@ def test_emitted_module_verifies_and_reparses():
         reparsed.operation.verify()
 
 
+def test_in_place_update_copies_back_inside_a_loop():
+    # PyPTO's Buffer IR reuses the destination tile as a source for in-place
+    # ops, and cce-mlir miscomputes dest == src. The emitter computes into a
+    # distinct scratch; inside a loop it then copies the result back into the
+    # destination buffer, so the value yielded for the loop carry is still that
+    # buffer and not a separate allocation.
+    _, text = _emit(kernels.vector_chunked_add)
+
+    loop = text.index("scf.for")
+    assert "tensor.empty" not in text[loop:]
+    add = next(line for line in text.splitlines() if "pto.add " in line)
+    first, _, destination = (
+        part.strip() for part in add.split("pto.add", 1)[1].split(" : ", 1)[0].split(",")[:3]
+    )
+    assert destination != first, add
+    assert "pto.mov" in text[loop:]
+    moved = next(line for line in text.splitlines() if "pto.mov" in line)
+    assert moved.split("pto.mov", 1)[1].split(" : ", 1)[0].split(",")[1].strip() == first
+
+
 def test_scalar_elementwise_builds_with_a_typed_scalar():
     _, text = _emit(kernels.vector_scalar_chain)
 

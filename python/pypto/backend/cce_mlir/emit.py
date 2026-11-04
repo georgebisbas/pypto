@@ -86,6 +86,14 @@ class MlirBuilder:
         # normalization. A nested loop may shadow an outer name, so callers
         # restore the previous binding when the body is done.
         self._loop_indices: dict[str, Any] = {}
+        # Distinct destinations for in-place ops that sit inside a loop,
+        # allocated at function entry so no ``tensor.empty`` lands in the body.
+        # Keyed per op: two chained in-place ops must not share one scratch.
+        self._scratch: dict[int, Any] = {}
+        # Loop nesting depth: inside a loop an in-place result must stay in the
+        # destination buffer so the loop carry remains equivalent to its iter
+        # argument (see the elementwise emitters).
+        self._loop_depth = 0
 
     # -- types ------------------------------------------------------------
 
@@ -236,6 +244,20 @@ class MlirBuilder:
 
         return arith.constant(_element_type(self._cir, scalar.element), scalar.value)
 
+    @property
+    def in_loop(self) -> bool:
+        """Whether emission is currently inside an ``scf.for`` body."""
+        return self._loop_depth > 0
+
+    def allocate_scratch(self, ops: list[Any]) -> None:
+        """Materialize the distinct destinations for loop-nested in-place ops."""
+        for op in ops:
+            self._scratch[id(op)] = self.empty_like(op.write_tensor)
+
+    def scratch(self, op: Any) -> Any:
+        """The pre-allocated distinct destination for one in-place op."""
+        return self._scratch[id(op)]
+
     def _slice_arguments(self, offsets: CceIntTuple, sizes: tuple[int, ...]) -> tuple[list[Any], list[int]]:
         """Split a window into dynamic offset operands and static offsets."""
         dynamic_size = self._cir.ShapedType.get_dynamic_size()
@@ -369,6 +391,7 @@ def emit_module(
                     arguments = list(function.body.blocks[0].arguments)
                     for tensor, value in zip(kernel.parameters, arguments, strict=True):
                         builder.bind(tensor, value)
+                    builder.allocate_scratch(_loop_scratch_ops(kernel.body))
                     _emit_statements(kernel.body, builder, cir)
                     npu.ReturnOp([builder.value(tensor) for tensor in kernel.returns])
             if with_host:
@@ -392,6 +415,36 @@ def _written_tensors(statements: Any) -> list[CceTensor]:
 
     visit(statements)
     return list(written.values())
+
+
+def _loop_scratch_ops(statements: Any) -> list[Any]:
+    """In-place ops nested in a loop body.
+
+    Only those need a pre-allocated scratch: allocating inside the loop body is
+    rejected by cce-mlir, and the result must be copied back into the
+    destination buffer so the loop carry stays equivalent to its iter argument.
+    Ops outside a loop keep the inline scratch the emitter has always used; two
+    chained in-place ops must not share one pre-allocated scratch.
+    """
+    found: list[Any] = []
+
+    def visit(block: Any, depth: int) -> None:
+        for statement in block:
+            if isinstance(statement, CceFor):
+                visit(statement.body, depth + 1)
+                continue
+            if depth == 0:
+                continue
+            destination = statement.write_tensor
+            if destination is None:
+                continue
+            if any(
+                statement.operands[index].value_id == destination.value_id for index in statement.read_indices
+            ):
+                found.append(statement)
+
+    visit(statements, 0)
+    return found
 
 
 def _emit_statements(statements: Any, builder: MlirBuilder, cir: Any) -> None:
@@ -422,6 +475,7 @@ def _emit_statements(statements: Any, builder: MlirBuilder, cir: Any) -> None:
                 # be affine in the induction variable, so bind it for the body.
                 body_arguments = list(loop.body.arguments)
                 induction = body_arguments[0]
+                builder._loop_depth += 1
                 previous_index = builder.bind_loop_index(statement.loop_var, induction)
                 try:
                     for tensor, argument in zip(carried, body_arguments[1:], strict=True):
@@ -430,6 +484,7 @@ def _emit_statements(statements: Any, builder: MlirBuilder, cir: Any) -> None:
                     scf.YieldOp([builder.value(tensor) for tensor in carried])
                 finally:
                     builder.restore_loop_index(statement.loop_var, previous_index)
+                    builder._loop_depth -= 1
             for tensor, result in zip(carried, loop.results, strict=True):
                 builder.bind(tensor, result)
             continue

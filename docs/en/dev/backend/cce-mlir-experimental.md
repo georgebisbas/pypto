@@ -352,7 +352,17 @@ vector add through `CompiledProgram` on an Ascend 910B2 and passes.
 - Only rank-2, statically shaped tensors reach Buffer IR, so rank-3 batch
   kernels never enter this route.
 - `buffer.full` is blocked by a cce-mlir bug: `pto.expands` mis-lowers to
-  `tensor.extract` with one index for rank-2 destinations.
+  `tensor.extract` with one index for rank-2 destinations (cce-mlir#272,
+  duplicate of #253).
+- A store into a window of a larger GM tensor at a loop-variable offset
+  (`pl.store(tile, [i * 128, 0], out)`) does not lower: `cce-lower-to-hivm`
+  leaves a live `unrealized_conversion_cast` (cce-mlir#271, related #64 and
+  #102). Static offsets lower and are exact.
+- `buffer.recip` maps to the approximate `vrec`, so sigmoid/softmax-style
+  numerics differ from PTOAS by about 3e-3 relative (cce-mlir#273).
+- An in-place elementwise update (`dest == src`) miscomputes upstream
+  (cce-mlir#274, duplicate of #147); the bridge computes into a scratch and,
+  inside a loop, copies the result back into the destination buffer.
 - `pl.pipeline` is compared under the PyPTO planner on both routes. The PTOAS
   planner's slot form (`MemRef.slot_count_ > 1`, `iv % F` indexing) is excluded
   by the Buffer-IR selection pass, so this route cannot consume it.

@@ -153,7 +153,7 @@ def test_windowed_store_is_recorded():
     (lowered,) = _lower(kernels.vector_store_window)
 
     (store,) = [op for op in lowered.ops if op.op_name == "buffer.store"]
-    assert store.offsets.values == (64, 128)
+    assert store.offsets.values == (128, 0)
     assert store.extents.values == (128, 128)
 
 

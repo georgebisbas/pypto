@@ -170,13 +170,24 @@ def _elementwise_emitter(constructor: Any, arity: int) -> Any:
         destination = op.write_tensor
         assert destination is not None
         sources = [builder.value(tensor) for tensor in op.read_tensors[:arity]]
-        # PyPTO's Buffer IR reuses the destination tile as the first source for
-        # in-place elementwise ops. cce-mlir's destination-passing lowering does
-        # not preserve that aliasing, so give the op a distinct destination and
-        # let the typed value binding forward the result.
+        # An in-place update (PyPTO's Buffer IR reuses the destination as a
+        # source). cce-mlir's destination-passing lowering does not preserve
+        # dest == src (it miscomputes), so compute into a distinct scratch and
+        # copy the result into the destination buffer. Writing the destination
+        # buffer keeps a loop-carried value equivalent to its iter argument.
         aliased = any(tensor.value_id == destination.value_id for tensor in op.read_tensors[:arity])
-        destination_value = builder.empty_like(destination) if aliased else builder.value(destination)
-        value = constructor(builder.tensor_type(destination), *sources, destination_value).result
+        if not aliased:
+            value = constructor(builder.tensor_type(destination), *sources, builder.value(destination)).result
+        elif builder.in_loop:
+            # Allocating inside the loop body is rejected, and a loop carry must
+            # yield the destination buffer itself: compute into a scratch
+            # allocated at entry, then copy the result back into the buffer.
+            computed = constructor(builder.tensor_type(destination), *sources, builder.scratch(op)).result
+            value = pto.MovOp(builder.tensor_type(destination), computed, builder.value(destination)).result
+        else:
+            value = constructor(
+                builder.tensor_type(destination), *sources, builder.empty_like(destination)
+            ).result
         builder.bind(destination, value)
 
     return emit
@@ -207,17 +218,30 @@ def _scalar_emitter(constructor: Any) -> Any:
         assert destination is not None
         source = op.read_tensors[0]
         (scalar,) = [operand for operand in op.operands if isinstance(operand, CceScalar)]
-        # PyPTO's Buffer IR may reuse the destination as the source for an
-        # in-place update; cce-mlir's destination-passing lowering does not
-        # preserve that aliasing, so give the op a distinct destination.
-        aliased = source.value_id == destination.value_id
-        destination_value = builder.empty_like(destination) if aliased else builder.value(destination)
-        value = constructor(
-            builder.tensor_type(destination),
-            builder.coerce(source, destination),
-            builder.scalar_value(scalar),
-            destination_value,
-        ).result
+        # In-place update: compute into a scratch, and inside a loop copy the
+        # result into the destination buffer (see the elementwise emitter above).
+        if source.value_id == destination.value_id and builder.in_loop:
+            computed = constructor(
+                builder.tensor_type(destination),
+                builder.coerce(source, destination),
+                builder.scalar_value(scalar),
+                builder.scratch(op),
+            ).result
+            value = pto.MovOp(builder.tensor_type(destination), computed, builder.value(destination)).result
+        elif source.value_id == destination.value_id:
+            value = constructor(
+                builder.tensor_type(destination),
+                builder.coerce(source, destination),
+                builder.scalar_value(scalar),
+                builder.empty_like(destination),
+            ).result
+        else:
+            value = constructor(
+                builder.tensor_type(destination),
+                builder.coerce(source, destination),
+                builder.scalar_value(scalar),
+                builder.value(destination),
+            ).result
         builder.bind(destination, value)
 
     return emit

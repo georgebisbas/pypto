@@ -121,12 +121,12 @@ def vector_add_offset_window(
 @pl.jit
 def vector_store_window(
     lhs: pl.Tensor[[128, 128], pl.FP32],
-    out: pl.Out[pl.Tensor[[256, 256], pl.FP32]],
+    out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
 ):
-    """Store a tile into a non-zero-offset window of a larger GM tensor."""
+    """Store a tile into a non-zero row-offset window of a taller GM tensor."""
     with pl.at(level=pl.Level.CORE_GROUP):
         tile = pl.load(lhs, [0, 0], [128, 128])
-        pl.store(tile, [64, 128], out)
+        pl.store(tile, [128, 0], out)
     return out
 
 
@@ -179,4 +179,23 @@ def vector_scalar_chain(
     with pl.at(level=pl.Level.CORE_GROUP):
         tile = pl.load(lhs, [0, 0], [128, 128])
         pl.store(pl.add(pl.mul(tile, 1.5), 1.0), [0, 0], out)
+    return out
+
+
+@pl.jit
+def vector_chunked_add(
+    lhs: pl.Tensor[[256, 128], pl.FP32],
+    rhs: pl.Tensor[[256, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[256, 128], pl.FP32]],
+):
+    """A chunked elementwise loop: each iteration loads, adds and stores.
+
+    The tile's lifetime is the loop body, so Buffer IR allocates it inside the
+    loop; the emitter must hoist that allocation to the function entry.
+    """
+    with pl.at(level=pl.Level.CORE_GROUP):
+        for i in pl.range(2):
+            lhs_tile = pl.load(lhs, [i * 128, 0], [128, 128])
+            rhs_tile = pl.load(rhs, [i * 128, 0], [128, 128])
+            pl.store(pl.add(lhs_tile, rhs_tile), [i * 128, 0], out)
     return out
