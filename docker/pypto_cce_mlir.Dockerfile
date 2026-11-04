@@ -68,6 +68,20 @@ RUN python3 -m pip install --no-cache-dir \
  && python3 -m pip install --no-cache-dir \
       torch --index-url https://download.pytorch.org/whl/cpu
 
+# PTOAS, the device-code assembler for the default route. The pin in
+# toolchain/versions.env carries the CPython 3.10 wheels CI consumes; this image
+# runs CPython 3.12, so its wheel is pinned here by sha256 independently. Bump
+# the two together and re-verify with `ptoas --version` below.
+ARG PTOAS_VERSION=0.72
+ARG PTOAS_WHEEL_SHA256_AARCH64=f5d2f77b69c75293de439f2a7be03f0985a78eb330d96ac23f76d4154bd30c02
+RUN PTOAS_WHEEL="ptoas-${PTOAS_VERSION}-cp312-cp312-manylinux_2_34_aarch64.whl" \
+ && curl -fsSL -o "/tmp/${PTOAS_WHEEL}" \
+      "https://github.com/hw-native-sys/PTOAS/releases/download/v${PTOAS_VERSION}/${PTOAS_WHEEL}" \
+ && echo "${PTOAS_WHEEL_SHA256_AARCH64}  /tmp/${PTOAS_WHEEL}" | sha256sum -c - \
+ && python3 -m pip install --no-cache-dir --no-deps "/tmp/${PTOAS_WHEEL}" \
+ && rm "/tmp/${PTOAS_WHEEL}" \
+ && test "$(ptoas --version)" = "ptoas ${PTOAS_VERSION}"
+
 WORKDIR /opt/pypto
 COPY . /opt/pypto
 
