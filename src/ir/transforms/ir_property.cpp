@@ -135,6 +135,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "SimtOutputsMaterialized";
     case IRProperty::SimtSpecialized:
       return "SimtSpecialized";
+    case IRProperty::SemanticCanonical:
+      return "SemanticCanonical";
     default:
       return "Unknown";
   }
@@ -205,7 +207,8 @@ const IRPropertySet& GetVerifiedProperties() {
                                    IRProperty::FixpipeEpilogueValid,
                                    IRProperty::AccCompactValid,
                                    IRProperty::AtomicAddDtypeValid,
-                                   IRProperty::AccStorePhaseValid};
+                                   IRProperty::AccStorePhaseValid,
+                                   IRProperty::SemanticCanonical};
   return props;
 }
 

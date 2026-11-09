@@ -25,6 +25,7 @@ class TestIRProperty:
         assert passes.IRProperty.NoRedundantBlocks is not None
         assert passes.IRProperty.SplitIncoreOrch is not None
         assert passes.IRProperty.HasMemRefs is not None
+        assert passes.IRProperty.SemanticCanonical is not None
 
     def test_property_values_are_different(self):
         """Test that all property values are distinct."""
@@ -36,6 +37,7 @@ class TestIRProperty:
             passes.IRProperty.NoRedundantBlocks,
             passes.IRProperty.SplitIncoreOrch,
             passes.IRProperty.HasMemRefs,
+            passes.IRProperty.SemanticCanonical,
         ]
         assert len(props) == len(set(props))
 
@@ -203,11 +205,18 @@ class TestPassPropertyAccessors:
         assert p.get_required_properties().contains(passes.IRProperty.HasMemRefs)
 
     def test_flatten_call_expr_requires_and_produces_ssa(self):
-        """Test FlattenCallExpr requires SSAForm and produces SSAForm + NoNestedCalls."""
+        """Test FlattenCallExpr consumes canonical expressions and produces SSA form."""
         p = passes.flatten_call_expr()
         assert p.get_required_properties().contains(passes.IRProperty.SSAForm)
+        assert p.get_required_properties().contains(passes.IRProperty.SemanticCanonical)
         assert p.get_produced_properties().contains(passes.IRProperty.SSAForm)
         assert p.get_produced_properties().contains(passes.IRProperty.NoNestedCalls)
+
+    def test_simplify_establishes_semantic_canonical(self):
+        """Simplify is the explicit producer and refreshes the semantic boundary."""
+        p = passes.simplify()
+        assert p.get_produced_properties().contains(passes.IRProperty.SemanticCanonical)
+        assert p.get_invalidated_properties().contains(passes.IRProperty.SemanticCanonical)
 
     def test_outline_incore_requires_and_produces_ssa(self):
         """Test OutlineIncoreScopes requires and produces SSAForm."""

@@ -184,6 +184,33 @@ def test_get_default_verify_properties():
     assert props.contains(passes.IRProperty.OutParamNotShadowed)
 
 
+def test_get_default_verify_properties_includes_semantic_canonical():
+    """The semantic boundary is part of the standard verified property set."""
+    props = passes.get_default_verify_properties()
+    assert props.contains(passes.IRProperty.SemanticCanonical)
+
+
+def test_semantic_canonical_requires_simplify_fixed_point():
+    """The property rejects an expression that Simplify can still fold."""
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(self, out: pl.Tensor[[8], pl.INT64]):
+            for i in pl.range(8):
+                y: pl.Scalar[pl.INT64] = i + 0
+                pl.tensor.write(out, [i], y)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.SemanticCanonical)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, Before)
+    assert any(d.rule_name == "SemanticCanonical" for d in diagnostics)
+
+    canonical = passes.simplify()(Before)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, canonical)
+    assert diagnostics == []
+
+
 def test_get_structural_properties():
     """Test get_structural_properties returns expected set."""
     props = passes.get_structural_properties()

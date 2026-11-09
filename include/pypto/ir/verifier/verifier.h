@@ -704,6 +704,16 @@ PropertyVerifierPtr CreateReturnParamsExplicitPropertyVerifier();
  */
 PropertyVerifierPtr CreateHardSyncallOccupancyPropertyVerifier();
 
+/**
+ * @brief Factory for the semantic canonicalization property verifier
+ *
+ * Re-runs the existing SimplifyFunction transform and requires a structural
+ * fixed point. This is deliberately a narrow first contract: it proves that
+ * scalar and shape simplification is owned by Simplify, without claiming that
+ * memory has been allocated or that a physical tile layout has been chosen.
+ */
+PropertyVerifierPtr CreateSemanticCanonicalPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

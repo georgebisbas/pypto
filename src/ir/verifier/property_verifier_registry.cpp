@@ -126,6 +126,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // partial occupancy deadlocks on device. Produced by ExpandMixedKernel and in
   // GetVerifiedProperties(), so it fires once right after that pass.
   Register(IRProperty::HardSyncallOccupancyValid, CreateHardSyncallOccupancyPropertyVerifier);
+  Register(IRProperty::SemanticCanonical, CreateSemanticCanonicalPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

@@ -59,9 +59,10 @@ class TestPassMetadata:
         p = passes.simplify()
         assert p.get_required_properties().empty()
 
-    def test_pass_no_produced_properties(self):
+    def test_pass_produces_semantic_canonical(self):
         p = passes.simplify()
-        assert p.get_produced_properties().empty()
+        assert p.get_produced_properties().contains(passes.IRProperty.SemanticCanonical)
+        assert p.get_invalidated_properties().contains(passes.IRProperty.SemanticCanonical)
 
 
 # ============================================================================

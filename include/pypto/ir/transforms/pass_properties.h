@@ -154,7 +154,7 @@ inline const PassProperties kConvertToSSAProperties{.produced = {IRProperty::SSA
 // -- Expression / statement normalisation passes ------------------------------
 
 inline const PassProperties kFlattenCallExprProperties{
-    .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure},
+    .required = {IRProperty::SSAForm, IRProperty::NormalizedStmtStructure, IRProperty::SemanticCanonical},
     .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure}};
 
 inline const PassProperties kNormalizeStmtStructureProperties{
@@ -162,7 +162,11 @@ inline const PassProperties kNormalizeStmtStructureProperties{
 
 // -- Simplification pass ------------------------------------------------------
 
-inline const PassProperties kSimplifyProperties{};
+// Simplify is the first producer of the semantic boundary. The verifier makes
+// this an explicit fixed-point contract: later passes may consume canonical
+// scalar/shape expressions without taking ownership of physical allocation.
+inline const PassProperties kSimplifyProperties{
+    .produced = {IRProperty::SemanticCanonical}, .invalidated = {IRProperty::SemanticCanonical}};
 
 // -- Composite op lowering pass (trig / packed MX quant / InCore collectives -> primitives) ------
 //

@@ -160,6 +160,7 @@ enum class IRProperty : uint64_t {
   SimtValid,                  ///< Canonical SIMT helper signatures, domains, and launch result mappings
   SimtOutputsMaterialized,    ///< Writable SIMT Tiles use initialized, dedicated output storage
   SimtSpecialized,            ///< Reachable helpers carry resources matching their launch dimensions
+  SemanticCanonical,          ///< Scalar/shape expressions are at Simplify's fixed point; no physical allocation claim
   kCount                      ///< Sentinel (must be last)
 };
 
@@ -295,7 +296,7 @@ enum class VerificationLevel {
  * ReturnParamsExplicit, AivSplitValid, AivSplitLoweredValid, TileMemoryInferred, TileOps2D,
  * HardSyncallOccupancyValid, IterArgCarryClassified, RuntimeScopesMaterialized, DistTensorCtxMaterialized,
  * GraphBoundaryLegalized, AccToGmStoreValid, FixpipeEpilogueValid, AccCompactValid, AtomicAddDtypeValid,
- * AccStorePhaseValid} — lightweight checks that catch the most common IR errors.
+ * AccStorePhaseValid, SemanticCanonical} — lightweight checks that catch the most common IR errors.
  */
 const IRPropertySet& GetVerifiedProperties();
 
