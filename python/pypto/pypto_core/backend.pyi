@@ -9,6 +9,7 @@
 
 """Type stubs for backend module."""
 
+from collections.abc import Mapping, Sequence
 from typing import ClassVar, overload
 
 from pypto import ir
@@ -45,7 +46,10 @@ class Mem:
 class Core:
     """Processing core."""
 
-    def __init__(self, core_type: ir.CoreType, mems: list[Mem]) -> None: ...
+    # `mems` binds `std::vector<Mem>`, whose caster accepts any sequence except
+    # str/bytes -- so the parameter is `Sequence`, while the `mems` property
+    # below returns a real `list` built by nanobind and stays `list`.
+    def __init__(self, core_type: ir.CoreType, mems: Sequence[Mem]) -> None: ...
     @property
     def core_type(self) -> ir.CoreType: ...
     @property
@@ -54,12 +58,18 @@ class Core:
 class Cluster:
     """Cluster of cores."""
 
+    # The counts parameter binds `std::map<Core, int>`, whose caster goes
+    # through `PyMapping_Items` and so accepts any mapping, not only `dict`.
+    # The `core_counts` property returns a real `dict` and stays `dict`.
+    # Every `nb::init` here is declared with `nb::arg(...)`, so the parameters
+    # are keyword-callable; this signature must not be positional-only.
+    # Same shape in `Die` and `SoC` below.
     @overload
-    def __init__(self, core_counts: dict[Core, int], /) -> None:
+    def __init__(self, core_counts: Mapping[Core, int]) -> None:
         """Create a cluster from a core-counts map."""
 
     @overload
-    def __init__(self, core: Core, count: int, /) -> None:
+    def __init__(self, core: Core, count: int) -> None:
         """Create a cluster with a single core type repeated ``count`` times."""
 
     @property
@@ -70,11 +80,11 @@ class Die:
     """Die containing clusters."""
 
     @overload
-    def __init__(self, cluster_counts: dict[Cluster, int], /) -> None:
+    def __init__(self, cluster_counts: Mapping[Cluster, int]) -> None:
         """Create a die from a cluster-counts map."""
 
     @overload
-    def __init__(self, cluster: Cluster, count: int, /) -> None:
+    def __init__(self, cluster: Cluster, count: int) -> None:
         """Create a die with a single cluster type repeated ``count`` times."""
 
     @property
@@ -86,11 +96,11 @@ class SoC:
     """System on Chip."""
 
     @overload
-    def __init__(self, die_counts: dict[Die, int], /) -> None:
+    def __init__(self, die_counts: Mapping[Die, int]) -> None:
         """Create a SoC from a die-counts map."""
 
     @overload
-    def __init__(self, die: Die, count: int, /) -> None:
+    def __init__(self, die: Die, count: int) -> None:
         """Create a SoC with a single die type repeated ``count`` times."""
 
     @property

@@ -9,6 +9,8 @@
 
 """Tests for Backend, SoC construction, and serialization."""
 
+from types import MappingProxyType
+
 import pytest
 from pypto import DataType, backend, ir, passes
 from pypto.backend import (
@@ -69,6 +71,55 @@ class TestSoCConstruction:
         assert soc.total_die_count() == 2
         assert soc.total_cluster_count() == 4
         assert soc.total_core_count() == 8
+
+
+class TestSoCConstructorStubContract:
+    """Pin the call shapes the SoC constructors accept at runtime.
+
+    These assertions exist because ``pypto_core/backend.pyi`` previously
+    described these constructors more narrowly than the bindings do, so pyright
+    rejected calls that work: ``Core`` was annotated ``mems: list[Mem]`` though
+    ``std::vector<Mem>`` casts from any non-str sequence, and the
+    ``Cluster``/``Die``/``SoC`` counts-map overloads were annotated ``dict`` and
+    marked positional-only (``/``) though ``std::map`` casts via
+    ``PyMapping_Items`` and every ``nb::init`` is declared with ``nb::arg``.
+    The stub now says ``Sequence`` / ``Mapping`` with named parameters; each
+    test below is the runtime fact that makes one of those widenings correct, so
+    a binding change that narrows the contract again fails here rather than
+    silently making the stub a lie.
+    """
+
+    def test_core_accepts_any_sequence_of_mems(self):
+        """`mems` binds std::vector<Mem>, which casts from a tuple, not just a list."""
+        core = Core(ir.CoreType.CUBE, (Mem(ir.MemorySpace.Left, 256 * 1024, 64),))
+
+        assert len(core.mems) == 1
+
+    def test_core_accepts_keyword_arguments(self):
+        """Both params are declared with nb::arg, so neither is positional-only."""
+        core = Core(
+            core_type=ir.CoreType.VECTOR,
+            mems=[Mem(ir.MemorySpace.Vec, 128 * 1024, 64)],
+        )
+
+        assert core.core_type == ir.CoreType.VECTOR
+
+    def test_cluster_accepts_non_dict_mapping(self):
+        """`core_counts` binds std::map, cast through PyMapping_Items."""
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
+
+        cluster = Cluster(MappingProxyType({core: 3}))
+
+        assert cluster.total_core_count() == 3
+
+    def test_counts_map_overloads_accept_keyword_arguments(self):
+        """The counts-map overload of each level is keyword-callable."""
+        core = Core(ir.CoreType.CUBE, [Mem(ir.MemorySpace.Left, 256 * 1024, 64)])
+        cluster = Cluster(core_counts={core: 2})
+        die = Die(cluster_counts={cluster: 2})
+        soc = SoC(die_counts={die: 1})
+
+        assert soc.total_core_count() == 4
 
 
 class TestSoCStructure:
