@@ -184,9 +184,9 @@ def test_get_default_verify_properties():
     assert props.contains(passes.IRProperty.OutParamNotShadowed)
 
 
-def test_get_default_verify_properties_includes_semantic_canonical():
-    """The semantic boundary is part of the standard verified property set."""
-    props = passes.get_default_verify_properties()
+def test_get_verified_properties_includes_semantic_canonical():
+    """The semantic boundary is part of the pipeline's verified property set."""
+    props = passes.get_verified_properties()
     assert props.contains(passes.IRProperty.SemanticCanonical)
 
 
