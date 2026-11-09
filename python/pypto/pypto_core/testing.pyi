@@ -13,6 +13,7 @@ Type stubs for pypto.testing submodule
 Internal testing utilities (do not use in production)
 """
 
+from collections.abc import Sequence
 from typing import Literal, NoReturn, TypedDict
 
 from .ir import BufferAccess, BufferResultBehavior, Call, Expr, Function, OpIRStage, Type
@@ -20,10 +21,10 @@ from .ir import BufferAccess, BufferResultBehavior, Call, Expr, Function, OpIRSt
 def validate_buffer_op_contract(
     stage: OpIRStage,
     arity: int | None,
-    args: list[Expr],
+    args: Sequence[Expr],
     result_type: Type,
-    effects: list[tuple[int, bool, BufferAccess, BufferAccess]],
-    results: list[tuple[int, BufferResultBehavior, int | None]],
+    effects: Sequence[tuple[int, bool, BufferAccess, BufferAccess]],
+    results: Sequence[tuple[int, BufferResultBehavior, int | None]],
     internal_only: bool = True,
 ) -> None:
     """Check a local registration and call without mutating the global registry.
@@ -34,7 +35,7 @@ def validate_buffer_op_contract(
     """
 
 def validate_op_type_registration(
-    stage: OpIRStage, internal_only: bool, typing_modes: list[Literal["deduced", "explicit"]]
+    stage: OpIRStage, internal_only: bool, typing_modes: Sequence[Literal["deduced", "explicit"]]
 ) -> None:
     """Check ordered typing-mode declarations without changing the global registry."""
 

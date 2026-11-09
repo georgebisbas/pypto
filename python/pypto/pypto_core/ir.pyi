@@ -2110,7 +2110,7 @@ class IfStmt(Stmt):
         condition: Expr,
         then_body: Stmt,
         else_body: Stmt | None,
-        return_vars: list[Var],
+        return_vars: Sequence[Var],
         span: Span,
     ) -> None:
         """Create a conditional statement with then and else branches.
@@ -2131,7 +2131,7 @@ class YieldStmt(Stmt):
     """List of variables to yield (can be empty)."""
 
     @overload
-    def __init__(self, value: list[Expr], span: Span) -> None:
+    def __init__(self, value: Sequence[Expr], span: Span) -> None:
         """Create a yield statement with a list of variables.
 
         Args:
@@ -2156,7 +2156,7 @@ class ReturnStmt(Stmt):
     """List of expressions to return (can be empty)."""
 
     @overload
-    def __init__(self, value: list[Expr], span: Span) -> None:
+    def __init__(self, value: Sequence[Expr], span: Span) -> None:
         """Create a return statement with a list of expressions.
 
         Args:
@@ -2222,9 +2222,9 @@ class ForStmt(Stmt):
         start: Expr,
         stop: Expr,
         step: Expr,
-        iter_args: list[IterArg],
+        iter_args: Sequence[IterArg],
         body: Stmt,
-        return_vars: list[Var],
+        return_vars: Sequence[Var],
         span: Span,
         kind: ForKind = ForKind.Sequential,
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
@@ -2264,9 +2264,9 @@ class WhileStmt(Stmt):
     def __init__(
         self,
         condition: Expr,
-        iter_args: list[IterArg],
+        iter_args: Sequence[IterArg],
         body: Stmt,
-        return_vars: list[Var],
+        return_vars: Sequence[Var],
         span: Span,
     ) -> None:
         """Create a while loop statement.
@@ -2486,7 +2486,7 @@ class RegScopeStmt(ScopeStmt):
         name_hint: str,
         body: Stmt,
         span: Span,
-        leading_comments: list[str] = [],
+        leading_comments: Sequence[str] = [],
         attrs: dict[str, object] | list[tuple[str, object]] | None = None,
     ) -> None:
         """Create a register lexical scope statement."""
@@ -2600,8 +2600,8 @@ class CommDomainScopeStmt(ScopeStmt):
 
     def __init__(
         self,
-        devices: list[int],
-        slots: list[WindowBuffer],
+        devices: Sequence[int],
+        slots: Sequence[WindowBuffer],
         name_hint: str = "",
         *,
         body: Stmt,
@@ -2628,7 +2628,7 @@ class SeqStmts(Stmt):
     def __iter__(self) -> Iterator[Stmt]:
         """Iterate the statements in order (the C++ binding exposes iteration)."""
 
-    def __init__(self, stmts: list[Stmt], span: Span) -> None:
+    def __init__(self, stmts: Sequence[Stmt], span: Span) -> None:
         """Create a sequence of statements.
 
         Args:
@@ -2671,7 +2671,7 @@ class SimtScopeStmt(Stmt):
     private_scalars: list[Var]
 
     def __init__(
-        self, block_dims: list[Expr], body: Stmt, span: Span, private_scalars: Sequence[Var] = ()
+        self, block_dims: Sequence[Expr], body: Stmt, span: Span, private_scalars: Sequence[Var] = ()
     ) -> None: ...
 
 class SimtLaunchStmt(Stmt):
@@ -2686,10 +2686,10 @@ class SimtLaunchStmt(Stmt):
     def __init__(
         self,
         callee: GlobalVar,
-        block_dims: list[Expr],
-        args: list[Expr],
-        results: list[Var],
-        result_param_indices: list[int],
+        block_dims: Sequence[Expr],
+        args: Sequence[Expr],
+        results: Sequence[Var],
+        result_param_indices: Sequence[int],
         span: Span,
     ) -> None:
         """Create a launch with three block dimensions and explicit result mappings."""
@@ -2860,7 +2860,7 @@ class Program(IRNode):
 
     def __init__(
         self,
-        functions: list[Function],
+        functions: Sequence[Function],
         name: str,
         span: Span,
     ) -> None:
@@ -3053,7 +3053,7 @@ def assert_structural_equal(
     Always use identical options for hashing and equality.
     """
 
-def attach_leading_comments(stmt: Stmt, comments: list[str]) -> Stmt:
+def attach_leading_comments(stmt: Stmt, comments: Sequence[str]) -> Stmt:
     """Attach leading comments to an existing statement.
 
     ``Stmt.leading_comments`` is read-only from Python; this helper is the
@@ -3985,7 +3985,7 @@ class IRBuilder:
             stmt: Statement to emit
         """
 
-    def push_pending_leading_comments(self, comments: list[str]) -> None:
+    def push_pending_leading_comments(self, comments: Sequence[str]) -> None:
         """Push leading comments onto the pending stack.
 
         The DSL parser calls this before dispatching to a ``parse_*`` helper.
@@ -4026,7 +4026,7 @@ class IRBuilder:
         """
 
     @overload
-    def return_(self, values: list[Expr], span: Span) -> ReturnStmt:
+    def return_(self, values: Sequence[Expr], span: Span) -> ReturnStmt:
         """Create a return statement and emit it.
 
         Args:
@@ -4339,15 +4339,15 @@ def find_yield_stmt(body: Stmt) -> YieldStmt | None:
 def get_last_yield_stmt(body: Stmt) -> YieldStmt | None:
     """Find the trailing YieldStmt in a statement body (checks only the last element)."""
 
-def substitute_expr(expr: Expr, var_map: list[tuple[Var, Var]]) -> Expr:
+def substitute_expr(expr: Expr, var_map: Sequence[tuple[Var, Var]]) -> Expr:
     """Substitute variables in an expression using a list of (original_var, replacement_var) pairs."""
 
-def substitute_stmt(body: Stmt, var_map: list[tuple[Var, Var]]) -> Stmt:
+def substitute_stmt(body: Stmt, var_map: Sequence[tuple[Var, Var]]) -> Stmt:
     """Substitute variable references in a statement subtree using (original_var, replacement_var) pairs."""
 
 def deep_clone(
     body: Stmt,
-    var_map: list[tuple[Var, Expr]] = ...,
+    var_map: Sequence[tuple[Var, Expr]] = ...,
 ) -> tuple[Stmt, list[tuple[Var, Var]]]:
     """Deep-clone a statement subtree, creating fresh Var objects at definition sites.
 

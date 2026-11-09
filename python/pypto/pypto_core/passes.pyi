@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 """Type stubs for PyPTO IR Pass transformations."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import Enum
 from types import TracebackType
 from typing import Any, overload
@@ -296,7 +296,7 @@ class PassContext:
 
     def __init__(
         self,
-        instruments: list[PassInstrument],
+        instruments: Sequence[PassInstrument],
         verification_level: VerificationLevel = VerificationLevel.BASIC,
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
@@ -986,7 +986,7 @@ class PropertyVerifierRegistry:
     @staticmethod
     def verify_or_throw(properties: IRPropertySet, program: Program) -> None: ...
     @staticmethod
-    def generate_report(diagnostics: list[Diagnostic]) -> str: ...
+    def generate_report(diagnostics: Sequence[Diagnostic]) -> str: ...
 
 def run_verifier(properties: IRPropertySet | None = None) -> Pass:
     """Create a verifier pass. Defaults to get_default_verify_properties() if None."""
