@@ -248,7 +248,8 @@ class TestL3HostTensorAllToAllV:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -260,7 +261,15 @@ class TestL3HostTensorAllToAllV:
         assert variant_dir.is_dir(), f"expected {variant_dir}"
         assert (variant_dir / "kernel_config.py").is_file()
 
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         # Rank rank receives from src the chunk that src sent to dest=rank.
         for rank in range(nr):
@@ -323,14 +332,23 @@ class TestL3HostTensorAllToAllV:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
                 ),
             ),
         )
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rank in range(nr):
             for src in range(nr):
@@ -422,11 +440,20 @@ class TestL3HostTensorAllToAllVSkew:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
             ),
         )
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rank in range(nr):
             for src in range(nr):

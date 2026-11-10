@@ -309,7 +309,8 @@ class TestL3Put:
         program = _build_ring_put_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -343,7 +344,8 @@ class TestL3Put:
         program = _build_ring_put_pipeline_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -376,7 +378,8 @@ class TestL3Put:
         program = _build_atomic_add_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -478,7 +481,8 @@ class TestL3PutSubregion:
         program = _build_row_put_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -606,7 +610,8 @@ class TestL3PutChunked:
         program = _build_chunked_ring_put_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,

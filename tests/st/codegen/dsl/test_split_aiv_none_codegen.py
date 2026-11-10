@@ -32,7 +32,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
-from pypto.runtime import RunConfig  # noqa: E402
+from pypto.backend import BackendType  # noqa: E402
+from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
 T, N = 128, 128
 DUMP_DIR = Path(__file__).resolve().parents[4] / "build_output" / "split_aiv_none_codegen"
@@ -69,7 +70,8 @@ def compiled() -> Exception | None:
         shutil.rmtree(DUMP_DIR)
 
     cfg = RunConfig(
-        platform="a2a3",
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
         codegen_only=True,
         save_kernels=True,
         save_kernels_dir=str(DUMP_DIR),

@@ -40,7 +40,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
-from pypto.runtime import RunConfig  # noqa: E402
+from pypto.backend import BackendType  # noqa: E402
+from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
 POOL_ROWS, HEAD_DIM = 16384, 512
 ROWS, HALF, Q_ROWS = 128, 64, 16
@@ -76,7 +77,9 @@ def sparse_kv_qk(
 def test_per_lane_gather_row_lowers_to_split_aiv_kernels():
     """The region lowers to an AIV lane that gathers into a HALF UB tile and pushes
     it, and an AIC that pops the FULL tile — no GM staging, no manual barrier."""
-    program = sparse_kv_qk.lower(config=RunConfig(platform="a2a3"))
+    program = sparse_kv_qk.lower(
+        config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+    )
     text = str(program)
 
     aiv = text.split("def sparse_kv_aiv")[1].split("def ")[0]
@@ -101,7 +104,8 @@ def test_per_lane_gather_row_compiles_to_pto():
         shutil.rmtree(DUMP_DIR)
 
     cfg = RunConfig(
-        platform="a2a3",
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
         codegen_only=True,
         save_kernels=True,
         save_kernels_dir=str(DUMP_DIR),
@@ -167,7 +171,9 @@ def test_oversized_ring_depth_reports_the_reserved_bytes():
     ``AllocatedMemoryAddr`` verifier — which is why both carry the same note.
     """
     with pytest.raises(ValueError) as exc:
-        _deep_ring_kv_qk.lower(config=RunConfig(platform="a2a3"))
+        _deep_ring_kv_qk.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
     message = str(exc.value)
     assert "Mat buffer usage (1064960 bytes) exceeds platform limit (524288 bytes)" in message
     assert "The first 1048576 bytes of that space are reserved by system.reserve_buffer" in message

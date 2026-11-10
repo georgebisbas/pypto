@@ -88,7 +88,8 @@ class TestL3RingSizingPrewarm:
 
         compiled = ir.compile(
             L3AddProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=0,
@@ -100,7 +101,8 @@ class TestL3RingSizingPrewarm:
         # range). The same rc is passed to prepare() (prewarm) and to every
         # dispatch, so the prewarmed arena's sizing key matches the run's.
         rc = RunConfig(
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             ring_task_window=64,
             ring_heap=8 * 1024 * 1024,
             ring_dep_pool=256,

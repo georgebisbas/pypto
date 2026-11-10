@@ -150,7 +150,8 @@ class TestL3TensorAllGatherRuntimeWidth:
         program = _build_runtime_width_program(n_ranks)
         compiled = program.compile(
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -164,7 +165,13 @@ class TestL3TensorAllGatherRuntimeWidth:
             inputs = _make_rank_inputs(n_ranks, w).bfloat16()
             outputs = torch.zeros((n_ranks, n_ranks, w * D), dtype=torch.bfloat16)
 
-            compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+            compiled(
+                inputs,
+                outputs,
+                config=RunConfig(
+                    backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+                ),
+            )
 
             expected = _expected_allgather(inputs)
             # Pure data movement, so the result must be bit-exact: a tolerance

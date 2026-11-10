@@ -1537,7 +1537,9 @@ class TestRunner:
     3. Use CodeRunner to compile, execute, and validate
 
     Example:
-        runner = TestRunner(RunConfig(platform="a2a3sim"))
+        runner = TestRunner(
+            RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.SIM)
+        )
         result = runner.run(my_test_case)
         assert result.passed
     """

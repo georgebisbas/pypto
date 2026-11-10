@@ -292,7 +292,8 @@ class TestL3HostTensorAllToAllVReuse:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
             ),
         )
@@ -302,7 +303,9 @@ class TestL3HostTensorAllToAllVReuse:
             scratch,
             outputs,
             recv_outputs,
-            config=RunConfig(platform=test_config.platform),
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
         )
 
         for k in range(N_CALLS):

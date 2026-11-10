@@ -119,7 +119,8 @@ def test_remote_store_window_raw_device(test_config, device_ids):
     program = _build_repro()
     compiled = ir.compile(
         program,
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
     )
     srcs = (

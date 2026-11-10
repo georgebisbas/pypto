@@ -60,6 +60,7 @@ from harness.core.test_runner import (  # noqa: E402
 # fixture; the tests themselves import only ``harness.st``.
 from harness.st import case_run  # noqa: E402,F401
 from pypto import LogLevel  # noqa: E402
+from pypto._target import _parse_platform  # noqa: E402
 from pypto.pypto_core import _clear_thread_log_level, _set_thread_log_level  # noqa: E402
 from pypto.pypto_core.passes import MemoryPlanner  # noqa: E402
 from pypto.runtime.runner import (  # noqa: E402
@@ -565,9 +566,11 @@ def test_config(request) -> RunConfig:
     Session scope means the config is created once and shared across all tests,
     which is appropriate since CLI options don't change during a test run.
 
-    ``RunConfig.platform`` carries a single representative platform id; this
-    is only used as a fallback for legacy code paths that have not been
-    migrated to ``PTOTestCase.get_platform()``. Per-test parametrized variants
+    ``RunConfig.backend_type`` / ``execution_mode`` carry a single
+    representative target; this is only used as a fallback for legacy code
+    paths that have not been migrated to ``PTOTestCase.get_platform()``. The
+    derived ``RunConfig.platform`` wire string remains available for callers
+    that still take the packed spelling. Per-test parametrized variants
     forward their own ``platform`` to the test case constructor and therefore
     override this value via ``tc.get_platform()`` inside ``TestRunner``.
     """
@@ -580,9 +583,11 @@ def test_config(request) -> RunConfig:
 
     platform_filter = _parse_platform_filter(request.config.getoption("--platform"))
     fallback_platform = platform_filter[0] if platform_filter else "a2a3"
+    backend_type, execution_mode = _parse_platform(fallback_platform)
 
     return RunConfig(
-        platform=fallback_platform,
+        backend_type=backend_type,
+        execution_mode=execution_mode,
         device_id=_resolve_device_id(request.config.getoption("--device")),
         save_kernels=save_kernels,
         save_kernels_dir=save_kernels_dir,

@@ -45,7 +45,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from pypto.runtime import RunConfig  # noqa: E402
+from pypto.backend import BackendType  # noqa: E402
+from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
 ROWS, COLS, K = 16, 128, 128
 HALF = ROWS // 2
@@ -219,7 +220,13 @@ def odd_rows_pto(tmp_path_factory) -> str:
     failure is captured rather than raised.
     """
     dump_dir = tmp_path_factory.mktemp("split_odd_axis")
-    cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(dump_dir))
+    cfg = RunConfig(
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
+        codegen_only=True,
+        save_kernels=True,
+        save_kernels_dir=str(dump_dir),
+    )
     error: Exception | None = None
     try:
         odd_rows(*_args(ODD_VALID_M), config=cfg)
@@ -286,7 +293,11 @@ def test_deep_tail_is_rebalanced_onto_the_valid_region():
     lane-localized compute, and the store offsets (``idx * 7``) — otherwise the
     two lanes would disagree about which rows they own.
     """
-    printed = str(deep_tail_rows.lower(config=RunConfig(platform="a2a3")))
+    printed = str(
+        deep_tail_rows.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
+    )
     aiv = _lowered_half(printed, "aiv")
 
     # The stride rides onto the transport so every consumer of the boundary —
@@ -307,7 +318,9 @@ def test_rebalance_is_declined_when_a_value_is_split_independently():
     the blocking value and the extents that would work.
     """
     with pytest.raises(ValueError) as exc:
-        deep_tail_with_independent_value.lower(config=RunConfig(platform="a2a3"))
+        deep_tail_with_independent_value.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
 
     message = str(exc.value)
     assert "leaves the two AIV lanes 8 and 5 cells" in message
@@ -334,7 +347,9 @@ def test_explicit_region_odd_box_is_refused_with_unplaceable_lanes():
     ``test_odd_pop_carries_a_per_lane_row_extent_and_the_full_column_box``.
     """
     with pytest.raises(ValueError) as exc:
-        explicit_region_odd_box.lower(config=RunConfig(platform="a2a3"))
+        explicit_region_odd_box.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
 
     message = str(exc.value)
     assert "leaves the two AIV lanes 16 and 1 cells" in message, message
@@ -345,7 +360,13 @@ def test_explicit_region_odd_box_is_refused_with_unplaceable_lanes():
 def runtime_tail_pto(tmp_path_factory) -> str:
     """Codegen-only .pto for the runtime-extent kernel."""
     dump_dir = tmp_path_factory.mktemp("split_runtime_tail")
-    cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(dump_dir))
+    cfg = RunConfig(
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
+        codegen_only=True,
+        save_kernels=True,
+        save_kernels_dir=str(dump_dir),
+    )
     error: Exception | None = None
     try:
         runtime_tail_rows(
@@ -407,7 +428,10 @@ def test_runtime_extent_rejects_a_pad_fill_at_the_boundary():
     two authoring routes that do work.
     """
     with pytest.raises(ValueError) as exc:
-        runtime_tail_fillpad_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+        runtime_tail_fillpad_first(
+            *_runtime_tail_args(12),
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD),
+        )
 
     message = str(exc.value)
     assert "fills the padding of a Cube -> Vector boundary tile" in message, message
@@ -417,7 +441,10 @@ def test_runtime_extent_rejects_a_pad_fill_at_the_boundary():
 def test_runtime_extent_rejects_a_direct_store_of_the_boundary():
     """Storing the boundary tile itself would write the transport's padding."""
     with pytest.raises(ValueError) as exc:
-        runtime_tail_store_first(*_runtime_tail_args(12), config=RunConfig(platform="a2a3"))
+        runtime_tail_store_first(
+            *_runtime_tail_args(12),
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD),
+        )
 
     message = str(exc.value)
     assert "consumes a Cube -> Vector boundary tile directly" in message, message

@@ -157,7 +157,8 @@ class TestL3TensorReduceScatterIntrinsic:
         program = _build_reduce_scatter_program(n_ranks, reduce_op)
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,

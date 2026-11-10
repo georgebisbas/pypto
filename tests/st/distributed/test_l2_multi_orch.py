@@ -83,7 +83,8 @@ class TestL2MultiOrch:
         ir.compile(
             TwoL2AddSubProgram,
             output_dir=str(tmp_path),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             skip_ptoas=True,
         )
 
@@ -121,7 +122,8 @@ class TestL2MultiOrch:
         compiled = ir.compile(
             TwoL2AddSubProgram,
             output_dir=str(tmp_path),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             skip_ptoas=True,
         )
 
@@ -185,7 +187,8 @@ class TestL2MultiOrch:
         compiled = ir.compile(
             TwoL2AddSubProgram,
             output_dir=str(tmp_path),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
         )
 
         a = torch.full((128, 128), 2.0, dtype=torch.float32)

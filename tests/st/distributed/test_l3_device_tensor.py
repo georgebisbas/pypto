@@ -92,7 +92,8 @@ class TestL3DeviceTensorReuse:
 
         compiled = ir.compile(
             L3AddProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=0,

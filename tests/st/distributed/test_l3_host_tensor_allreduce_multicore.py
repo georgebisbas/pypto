@@ -311,7 +311,8 @@ class TestL3HostTensorAllReduceMulticore:
             outputs,
             signal_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -319,7 +320,14 @@ class TestL3HostTensorAllReduceMulticore:
             ),
         )
 
-        compiled(inputs, outputs, signal_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            signal_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected_outputs = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected_outputs, rtol=1e-4, atol=1e-5), (
@@ -379,7 +387,8 @@ class TestL3HostTensorAllReduceMulticore:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -387,7 +396,13 @@ class TestL3HostTensorAllReduceMulticore:
             ),
         )
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rd in range(rounds):
             expected = _expected_allreduce(inputs[rd])

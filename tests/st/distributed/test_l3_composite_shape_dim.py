@@ -104,7 +104,8 @@ class TestL3CompositeShapeDim:
 
         compiled = ir.compile(
             _build_program(),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:NRANKS],
                 num_sub_workers=0,

@@ -142,14 +142,21 @@ class TestL3TensorAllToAllIntrinsic:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
                 ),
             ),
         )
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_all_to_all(inputs, size)
         assert torch.allclose(outputs, expected), (

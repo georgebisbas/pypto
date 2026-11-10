@@ -129,6 +129,7 @@ def _persistent_process(root, platform, device_id, consume, connection, change_s
     cache_logger.addHandler(handler)
     try:
         from pypto import CacheConfig, cache_stats  # noqa: PLC0415
+        from pypto._target import _parse_platform  # noqa: PLC0415
         from pypto.runtime import RunConfig  # noqa: PLC0415
         from pypto.runtime.kernel_compiler import KernelCompiler  # noqa: PLC0415
 
@@ -140,8 +141,10 @@ def _persistent_process(root, platform, device_id, consume, connection, change_s
             directory.mkdir()
             os.chdir(directory)
             os.environ["PATH"] = os.pathsep.join((str(directory), os.environ.get("PATH", "")))
+        backend_type, execution_mode = _parse_platform(platform)
         config = RunConfig(
-            platform=platform,
+            backend_type=backend_type,
+            execution_mode=execution_mode,
             device_id=device_id,
             cache_config=CacheConfig(enabled=True, root=Path(root), readonly=consume),
         )

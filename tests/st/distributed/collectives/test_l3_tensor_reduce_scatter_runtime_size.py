@@ -167,7 +167,8 @@ class TestL3TensorReduceScatterRuntimeSize:
         program = _build_runtime_size_program(n_ranks)
         compiled = program.compile(
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -179,7 +180,13 @@ class TestL3TensorReduceScatterRuntimeSize:
             inputs = _make_rank_inputs(n_ranks, size)
             outputs = torch.zeros((n_ranks, 2, size), dtype=torch.float32)
 
-            compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+            compiled(
+                inputs,
+                outputs,
+                config=RunConfig(
+                    backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+                ),
+            )
 
             expected = _expected_reduce_scatter(inputs)
             for call in range(2):

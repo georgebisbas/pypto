@@ -99,7 +99,8 @@ class TestL3DfxPerRank:
         program = _build_per_rank_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,
@@ -110,7 +111,8 @@ class TestL3DfxPerRank:
         outputs = torch.zeros((n_ranks, ROWS, COLS), dtype=torch.float32)
 
         run_config = RunConfig(
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             enable_dep_gen=True,
             enable_scope_stats=True,
         )
@@ -151,7 +153,8 @@ class TestL3DfxPerRank:
         program = _build_per_rank_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,
@@ -162,7 +165,11 @@ class TestL3DfxPerRank:
         outputs = torch.zeros((n_ranks, ROWS, COLS), dtype=torch.float32)
 
         # User asks for swimlane only; dep_gen is co-enabled by the driver.
-        run_config = RunConfig(platform=test_config.platform, enable_chip_swimlane=True)
+        run_config = RunConfig(
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
+            enable_chip_swimlane=True,
+        )
         compiled(inputs, outputs, config=run_config)
 
         assert torch.allclose(outputs, inputs + 1.0)

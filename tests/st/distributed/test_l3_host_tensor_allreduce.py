@@ -421,7 +421,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -433,7 +434,13 @@ class TestL3HostTensorAllReduce:
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected), (
@@ -462,7 +469,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -472,7 +480,13 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__sum__fp32"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rd in range(rounds):
             expected = _expected_allreduce(inputs[rd])
@@ -504,7 +518,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -514,7 +529,13 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__sum__fp32"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rd in range(rounds):
             expected = _expected_allreduce(inputs[rd])
@@ -537,7 +558,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -547,7 +569,13 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__max__fp32"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         reduced = inputs.max(dim=0).values
         expected = torch.stack([reduced] * n_ranks)
@@ -568,7 +596,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -578,7 +607,13 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.allreduce__sum__fp16"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_allreduce(inputs)
         assert torch.allclose(outputs, expected, rtol=2e-2, atol=2e-2), (
@@ -624,7 +659,8 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -634,7 +670,13 @@ class TestL3HostTensorAllReduce:
         variant_dir = compiled.output_dir / f"next_levels/builtin.tensor.allreduce__{op_name}__fp16"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_allreduce(inputs, op_name)
         assert torch.allclose(outputs, expected, rtol=2e-2, atol=2e-2), (
@@ -656,14 +698,21 @@ class TestL3HostTensorAllReduce:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
                 ),
             ),
         )
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_allreduce(inputs)
         assert torch.equal(outputs, expected)

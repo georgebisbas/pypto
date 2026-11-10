@@ -145,7 +145,8 @@ class TestL3TensorAllGatherIntrinsic:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -153,7 +154,13 @@ class TestL3TensorAllGatherIntrinsic:
             ),
         )
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_allgather(inputs)
         assert torch.allclose(outputs, expected), (

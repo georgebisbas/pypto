@@ -513,7 +513,8 @@ class TestL3HostTensorAllToAllVMulticore:
             recv_outputs,
             signal_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -526,7 +527,9 @@ class TestL3HostTensorAllToAllVMulticore:
             outputs,
             recv_outputs,
             signal_outputs,
-            config=RunConfig(platform=test_config.platform),
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
         )
 
         for rank in range(nr):
@@ -603,14 +606,23 @@ class TestL3HostTensorAllToAllVMulticore:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
                 ),
             ),
         )
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rd in range(rounds):
             for rank in range(nr):
@@ -668,7 +680,8 @@ class TestL3HostTensorAllToAllVMulticore:
             recv_outputs,
             signal_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -683,7 +696,9 @@ class TestL3HostTensorAllToAllVMulticore:
                 outputs,
                 recv_outputs,
                 signal_outputs,
-                config=RunConfig(platform=test_config.platform),
+                config=RunConfig(
+                    backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+                ),
             )
 
     @pytest.mark.parametrize(
@@ -729,7 +744,8 @@ class TestL3HostTensorAllToAllVMulticore:
             recv_outputs,
             signal_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -744,7 +760,9 @@ class TestL3HostTensorAllToAllVMulticore:
             outputs,
             recv_outputs,
             signal_outputs,
-            config=RunConfig(platform=test_config.platform),
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
         )
         lines = _new_log_lines(log_root, before)
         if log_root is None:
@@ -805,7 +823,8 @@ class TestL3HostTensorAllToAllVMulticore:
             recv_outputs,
             signal_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -822,7 +841,9 @@ class TestL3HostTensorAllToAllVMulticore:
                 outputs,
                 recv_outputs,
                 signal_outputs,
-                config=RunConfig(platform=test_config.platform),
+                config=RunConfig(
+                    backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+                ),
             )
 
         lines = _new_log_lines(log_root, before)

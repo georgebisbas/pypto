@@ -295,7 +295,8 @@ class TestL3TensorAllToAllVIntrinsic:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -307,7 +308,9 @@ class TestL3TensorAllToAllVIntrinsic:
             send_counts,
             outputs,
             recv_outputs,
-            config=RunConfig(platform=test_config.platform),
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
         )
 
         # Golden validation:
@@ -366,11 +369,17 @@ class TestL3TensorAllToAllVIntrinsic:
         compiled = program.compile(
             *args,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
             ),
         )
-        compiled(*args, config=RunConfig(platform=test_config.platform))
+        compiled(
+            *args,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for step in range(iterations):
             for rank in range(nr):
@@ -481,7 +490,8 @@ class TestL3TensorAllToAllVSkew:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
             ),
         )
@@ -490,7 +500,9 @@ class TestL3TensorAllToAllVSkew:
             send_counts,
             outputs,
             recv_outputs,
-            config=RunConfig(platform=test_config.platform),
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
         )
 
         for rank in range(nr):

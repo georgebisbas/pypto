@@ -31,7 +31,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 import pypto.language as pl  # noqa: E402
-from pypto.runtime import RunConfig  # noqa: E402
+from pypto.backend import BackendType  # noqa: E402
+from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
 # K reduced in chunks of KC; the leading dim is the batch dimension.
 T, K, N, KC = 32, 4096, 128, 512
@@ -77,7 +78,8 @@ def test_no_mat_to_mat_tmov():
     out = torch.zeros((1, T, N), dtype=torch.int32)
 
     cfg = RunConfig(
-        platform="a2a3",
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
         codegen_only=True,
         dump_passes=True,
         save_kernels=True,

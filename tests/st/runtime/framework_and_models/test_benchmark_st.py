@@ -76,10 +76,19 @@ def test_benchmark_register_once_surfaces_timing(test_config, tmp_path):
     aggregated. Asserts each measured sample is a real L2 device wall (default
     ``SIMPLER_HOST_STRACE`` build) and that warmup launches are excluded.
     """
-    compiled = ir.compile(AddProgram, output_dir=str(tmp_path), platform=test_config.platform)
+    compiled = ir.compile(
+        AddProgram,
+        output_dir=str(tmp_path),
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+    )
 
     a, b, c = _inputs()
-    worker_cfg = RunConfig(platform=test_config.platform, device_id=test_config.device_id)
+    worker_cfg = RunConfig(
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+        device_id=test_config.device_id,
+    )
     rounds, warmup = 5, 2
     stats = benchmark(compiled, [a, b, c], rounds=rounds, warmup=warmup, config=worker_cfg)
 
@@ -105,15 +114,26 @@ def test_benchmark_from_dir_replay_surfaces_timing(test_config, tmp_path):
     asserts the reloaded object drives the *same* on-device path: correct output
     plus real per-launch ``device_wall_us`` off the ``[STRACE]`` markers.
     """
-    ir.compile(AddProgram, output_dir=str(tmp_path), platform=test_config.platform)
+    ir.compile(
+        AddProgram,
+        output_dir=str(tmp_path),
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+    )
 
     # Drop the live object entirely; everything below comes from the directory.
-    compiled = ir.CompiledProgram.from_dir(tmp_path, platform=test_config.platform)
+    compiled = ir.CompiledProgram.from_dir(
+        tmp_path, backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+    )
     assert compiled.program is None, "from_dir must not carry live IR"
     assert compiled.param_names == ["a", "b", "c"]
 
     a, b, c = _inputs()
-    worker_cfg = RunConfig(platform=test_config.platform, device_id=test_config.device_id)
+    worker_cfg = RunConfig(
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+        device_id=test_config.device_id,
+    )
     rounds, warmup = 5, 2
     stats = benchmark(compiled, [a, b, c], rounds=rounds, warmup=warmup, config=worker_cfg)
 
@@ -185,7 +205,8 @@ def test_benchmark_l3_surfaces_per_rank_timing(test_config, device_ids):
     program = _build_per_rank_add_one()
     compiled = ir.compile(
         program,
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(device_ids=device_ids[:n_ranks], num_sub_workers=0),
     )
 

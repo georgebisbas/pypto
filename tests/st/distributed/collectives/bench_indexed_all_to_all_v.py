@@ -19,8 +19,9 @@ from pathlib import Path
 import pypto.language as pl
 import pypto.language.distributed as pld
 import torch
+from pypto.backend import BackendType
 from pypto.ir import DistributedConfig
-from pypto.runtime import RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 from pypto.runtime._artifact_runtime import runtime_output_directory
 from pypto.runtime._binary_cache import invalidate_binary_context
 
@@ -195,7 +196,8 @@ def main():
         compiled = build_program(nr, capacity, width, cores, indexed, warmup + rounds).compile(
             *args,
             config=RunConfig(
-                platform="a5",
+                backend_type=BackendType.Ascend950,
+                execution_mode=ExecutionMode.ONBOARD,
                 save_kernels=True,
                 save_kernels_dir=str(root / "compiled"),
                 distributed_config=DistributedConfig(device_ids=devices, num_sub_workers=0),

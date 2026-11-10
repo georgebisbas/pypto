@@ -38,7 +38,8 @@ from pypto.language.parser.diagnostics import ParserSyntaxError
 
 torch = pytest.importorskip("torch")
 
-from pypto.runtime import RunConfig  # noqa: E402
+from pypto.backend import BackendType  # noqa: E402
+from pypto.runtime import ExecutionMode, RunConfig  # noqa: E402
 
 DUMP_DIR = Path(__file__).resolve().parents[4] / "build_output" / "split_aiv_ragged_split_axis"
 
@@ -183,7 +184,13 @@ def _ragged_rows_pto() -> str:
         return _PTO_CACHE["pto"]
     if DUMP_DIR.exists():
         shutil.rmtree(DUMP_DIR)
-    cfg = RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(DUMP_DIR))
+    cfg = RunConfig(
+        backend_type=BackendType.Ascend910,
+        execution_mode=ExecutionMode.ONBOARD,
+        codegen_only=True,
+        save_kernels=True,
+        save_kernels_dir=str(DUMP_DIR),
+    )
     error: Exception | None = None
     try:
         ragged_rows(*_ragged_rows_args(), config=cfg)
@@ -209,7 +216,13 @@ def test_ragged_rows_localize_to_a_per_lane_extent():
     ceil(5 / 2) = 3 would drop rows 3 and 4 on lane 0 and fabricate three rows on
     lane 1; the truth is 5 rows on lane 0 and none on lane 1.
     """
-    aiv = _aiv_body(str(ragged_rows.lower(config=RunConfig(platform="a2a3"))))
+    aiv = _aiv_body(
+        str(
+            ragged_rows.lower(
+                config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+            )
+        )
+    )
 
     assert "pl.tile.tpop_from_aic(split=1)" in aiv
     # The per-lane extent is an expression over the region's own lane index.
@@ -263,7 +276,13 @@ def test_nested_control_flow_is_repaired_too():
     branch on the deducer's ceil(V/2) — silently, since nothing downstream can
     tell a lane-agnostic extent from a lane-aware one.
     """
-    aiv = _aiv_body(str(ragged_rows_nested.lower(config=RunConfig(platform="a2a3"))))
+    aiv = _aiv_body(
+        str(
+            ragged_rows_nested.lower(
+                config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+            )
+        )
+    )
 
     lane = re.search(r"= pl\.tile\.get_subblock_idx\(\)", aiv)
     assert lane, aiv
@@ -281,7 +300,13 @@ def test_per_lane_extent_propagates_through_a_vector_consumer():
     must pass it through — otherwise the store would write the deducer's
     ceil(V/2) rows.
     """
-    aiv = _aiv_body(str(ragged_rows_with_compute.lower(config=RunConfig(platform="a2a3"))))
+    aiv = _aiv_body(
+        str(
+            ragged_rows_with_compute.lower(
+                config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+            )
+        )
+    )
 
     exp_line = next((line for line in aiv.splitlines() if '"tile.exp"' in line), None)
     assert exp_line is not None, aiv
@@ -297,7 +322,9 @@ def test_hand_authored_partial_gather_is_rejected_where_the_lanes_are_known():
     lane-agnostic guess.
     """
     with pytest.raises(ValueError) as exc:
-        hand_authored_partial_gather.lower(config=RunConfig(platform="a2a3"))
+        hand_authored_partial_gather.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
 
     message = str(exc.value)
     assert "tile.aic_gather re-joins the two lanes positionally" in message
@@ -308,7 +335,9 @@ def test_hand_authored_partial_gather_is_rejected_where_the_lanes_are_known():
 def test_left_right_ragged_columns_are_rejected_with_a_dsl_fix():
     """The column field is pinned by the transport, so a per-lane column has no carrier."""
     with pytest.raises(ParserSyntaxError) as exc:
-        ragged_cols_left_right.lower(config=RunConfig(platform="a2a3"))
+        ragged_cols_left_right.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
 
     # Valid M/N now reaches this check during parsing rather than lowering.
     assert isinstance(exc.value.__cause__, ValueError)
@@ -323,7 +352,9 @@ def test_left_right_ragged_columns_are_rejected_with_a_dsl_fix():
 def test_ragged_rows_with_narrowed_columns_are_rejected():
     """treshape restores the column extent statically and would clobber the per-lane row."""
     with pytest.raises(ParserSyntaxError) as exc:
-        ragged_rows_and_cols.lower(config=RunConfig(platform="a2a3"))
+        ragged_rows_and_cols.lower(
+            config=RunConfig(backend_type=BackendType.Ascend910, execution_mode=ExecutionMode.ONBOARD)
+        )
 
     # Valid M/N now reaches this check during parsing rather than lowering.
     assert isinstance(exc.value.__cause__, ValueError)

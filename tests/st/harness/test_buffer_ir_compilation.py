@@ -17,6 +17,7 @@ import torch
 from pypto import ir, passes
 from pypto.backend import BackendType
 from pypto.backend._ptoas_locate import find_ptoas_binary
+from pypto.runtime import ExecutionMode
 from pypto.runtime.runner import RunConfig
 
 from harness import st
@@ -76,7 +77,13 @@ def test_actual_compile_paths_preserve_case_mode_and_planner(tmp_path, planner, 
                 pool.submit(tr._compile_for_cache, case, work_dir, "a2a3", False, False, None).result()
     else:
         runner = tr.TestRunner(
-            RunConfig(platform="a2a3", codegen_only=True, save_kernels=True, save_kernels_dir=str(tmp_path))
+            RunConfig(
+                backend_type=BackendType.Ascend910,
+                execution_mode=ExecutionMode.ONBOARD,
+                codegen_only=True,
+                save_kernels=True,
+                save_kernels_dir=str(tmp_path),
+            )
         )
         result = runner.run(case)
         assert result.passed, result.error

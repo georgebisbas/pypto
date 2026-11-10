@@ -193,7 +193,8 @@ class TestL3HostTensorBarrier:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -205,7 +206,13 @@ class TestL3HostTensorBarrier:
         assert variant_dir.is_dir()
         assert (variant_dir / "kernel_config.py").is_file()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         expected = _expected_peer_swap(inputs)
         assert torch.allclose(outputs, expected), (
@@ -234,7 +241,8 @@ class TestL3HostTensorBarrier:
             inputs,
             outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:n_ranks],
                     num_sub_workers=0,
@@ -244,7 +252,13 @@ class TestL3HostTensorBarrier:
         variant_dir = compiled.output_dir / "next_levels" / "builtin.tensor.barrier__fp32"
         assert variant_dir.is_dir()
 
-        compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rd in range(rounds):
             expected = _expected_peer_swap(inputs[rd])

@@ -51,6 +51,7 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
+from pypto._target import _parse_platform
 from pypto.runtime import ChipWorker, Worker, ensure_pto_isa_root
 from pypto.runtime.runner import RunConfig
 
@@ -141,20 +142,31 @@ def _register_through_worker(rt: Worker, compiled):
 
 def test_l2_training_loop_explicit_dispatch(test_config, _no_leak_warning):
     """Weights uploaded once, two callables registered, sustained dispatch loop."""
-    platform = test_config.platform
+    backend_type, execution_mode = _parse_platform(test_config.platform)
     with tempfile.TemporaryDirectory(prefix="pypto_l2_dispatch_") as work_dir:
         fwd = ir.compile(
-            ForwardAddProgram, output_dir=f"{work_dir}/fwd", platform=platform, dump_passes=False
+            ForwardAddProgram,
+            output_dir=f"{work_dir}/fwd",
+            backend_type=backend_type,
+            execution_mode=execution_mode,
+            dump_passes=False,
         )
         bwd = ir.compile(
-            BackwardMulProgram, output_dir=f"{work_dir}/bwd", platform=platform, dump_passes=False
+            BackwardMulProgram,
+            output_dir=f"{work_dir}/bwd",
+            backend_type=backend_type,
+            execution_mode=execution_mode,
+            dump_passes=False,
         )
 
         a = torch.full((M, M), 2.0, dtype=torch.float32)
         b = torch.full((M, M), 3.0, dtype=torch.float32)
 
         worker = ChipWorker(
-            config=RunConfig(platform=platform, device_id=test_config.device_id), runtime=_RUNTIME
+            config=RunConfig(
+                backend_type=backend_type, execution_mode=execution_mode, device_id=test_config.device_id
+            ),
+            runtime=_RUNTIME,
         )
         try:
             assert worker.aicpu_dlopen_count == 0, "no callable dlopened before any dispatch"

@@ -180,7 +180,8 @@ class TestL3HostTensorReduceScatter:
 
         compiled = ir.compile(
             HostTensorReduceScatter,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,
@@ -210,7 +211,8 @@ class TestL3HostTensorReduceScatter:
         rounds = 2
         compiled = ir.compile(
             _build_host_reduce_scatter_signal_reuse_program(),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:n_ranks],
                 num_sub_workers=0,

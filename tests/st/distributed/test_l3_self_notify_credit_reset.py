@@ -147,7 +147,8 @@ class TestL3SelfNotifyCreditReset:
         program = _build_self_notify_credit_reset_program()
         return ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,

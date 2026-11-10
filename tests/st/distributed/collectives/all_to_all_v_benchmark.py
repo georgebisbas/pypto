@@ -982,11 +982,14 @@ def check_correctness(
 
 def _compile(program, *, platform: str, device_ids: list[int], output_dir: str | None, skip_ptoas: bool):
     from pypto import ir  # noqa: PLC0415
+    from pypto._target import _parse_platform  # noqa: PLC0415
     from pypto.ir import DistributedConfig  # noqa: PLC0415
 
+    backend_type, execution_mode = _parse_platform(platform)
     return ir.compile(
         program,
-        platform=platform,
+        backend_type=backend_type,
+        execution_mode=execution_mode,
         output_dir=output_dir,
         skip_ptoas=skip_ptoas,
         dump_passes=False,
@@ -1094,7 +1097,10 @@ def _timed_session(  # noqa: PLR0913
 
 
 def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]:
+    from pypto._target import _parse_platform  # noqa: PLC0415
     from pypto.runtime import RunConfig  # noqa: PLC0415
+
+    backend_type, execution_mode = _parse_platform(args.platform)
 
     if not row_bytes_aligned(shape.row_width):
         raise ValueError(
@@ -1120,8 +1126,8 @@ def run_benchmark(args: argparse.Namespace, shape: BenchShape) -> dict[str, Any]
     send_b, recv_b = valid_bytes_per_rank(send_counts, shape)
     expected_b = cal_all_to_all_v_blocks(shape.p, args.core_num)
 
-    slot_cfg = RunConfig(platform=args.platform, enable_chip_swimlane=0)
-    swim_cfg = RunConfig(platform=args.platform, enable_chip_swimlane=1)
+    slot_cfg = RunConfig(backend_type=backend_type, execution_mode=execution_mode, enable_chip_swimlane=0)
+    swim_cfg = RunConfig(backend_type=backend_type, execution_mode=execution_mode, enable_chip_swimlane=1)
     common = dict(
         compiled=compiled,
         inputs=inputs,

@@ -25,6 +25,7 @@ from examples.intermediate.matmul_acc import matmul_acc_64
 from harness.core.harness import ALL_PLATFORM_IDS, PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto import backend as _backend
 from pypto import ir, passes
+from pypto._target import _parse_platform
 from pypto.backend import BackendType, pto_backend
 from pypto.pypto_core import passes as _core_passes
 from pypto.pypto_core.passes import MemoryPlanner
@@ -44,6 +45,17 @@ from pypto.runtime.runner import RunConfig
 # even where the golden is ~0 and rtol contributes nothing.
 _FP32_MATMUL_RTOL = 1e-4
 _FP32_MATMUL_ATOL = 1e-4
+
+
+def _run_config(platform: str, **kwargs: Any) -> RunConfig:
+    """Build a ``RunConfig`` for a parametrized platform id.
+
+    ``PLATFORMS`` carries wire ids because the harness selects and binds cases
+    by that spelling; ``RunConfig`` takes the two target axes instead of the
+    deprecated packed string.
+    """
+    backend_type, execution_mode = _parse_platform(platform)
+    return RunConfig(backend_type=backend_type, execution_mode=execution_mode, **kwargs)
 
 
 @pytest.mark.platforms("a2a3", "a5")
@@ -1737,7 +1749,7 @@ class TestMatmulOperations:
         assert choice.stationarity == _core_passes.l0_tile_chooser.Stationarity.OutputStationary
         assert not choice.double_buffer_c
         assert choice.k < k, "the system case must exercise a real K split"
-        cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
+        cfg = _run_config(platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
         result = test_runner.run(
             TestMatmulAutoL0(
                 m=m,
@@ -1755,7 +1767,7 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("m,k,n", _AUTOL0_BF16_SHAPES)
     def test_matmul_autol0_bf16(self, test_runner, platform, planner, m, k, n):
         """BF16 matmul on Mat-resident operands — qwen3 kv_proj per-matmul shape."""
-        cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
+        cfg = _run_config(platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
         result = test_runner.run(
             TestMatmulAutoL0BF16(
                 m=m,
@@ -1777,7 +1789,7 @@ class TestMatmulOperations:
         blocks and peels a straight-line matmul_acc tail of 48 (all 16-aligned).
         Validates the K-boundary peel numerically on device. (N=192 keeps the pick on
         the k=80 codegen-clean peel; see the case class docstring.)"""
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0NonAlignedK(
                 memory_planner=planner,
@@ -1808,7 +1820,7 @@ class TestMatmulOperations:
         )
         assert choice.stationarity == expected_stationarity
         assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0AStationary(
                 m=m,
@@ -1851,7 +1863,7 @@ class TestMatmulOperations:
         assembly path numerically on device. Weights are scaled 1/sqrt(fan-in) so the
         bf16 intermediate keeps the output O(1) (see define_tensors) -- a per-element
         allclose at rtol=atol=2e-2 is then robust on the chain's cancellation elements."""
-        cfg = RunConfig(platform=platform, rtol=2e-2, atol=2e-2)
+        cfg = _run_config(platform, rtol=2e-2, atol=2e-2)
         result = test_runner.run(
             TestChainedMatmulMatScratch(
                 memory_planner=planner,
@@ -1878,7 +1890,7 @@ class TestMatmulOperations:
             n=64,
             memory_planner=planner,
             platform=platform,
-            config=RunConfig(platform=platform, rtol=2e-2, atol=2e-2),
+            config=_run_config(platform, rtol=2e-2, atol=2e-2),
         )
         printed = _printed_through_auto_tile(case.get_program(), planner)
         assert "pl.range(" in printed
@@ -1908,7 +1920,7 @@ class TestMatmulOperations:
         )
         assert choice.stationarity == expected_stationarity
         assert choice.double_buffer_c == (planner == MemoryPlanner.PTOAS)
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0BStationary(
                 m=m,
@@ -1926,7 +1938,7 @@ class TestMatmulOperations:
     def test_matmul_autol0_mn_grid(self, test_runner, platform, planner):
         """Output-stationary M/N grid stored to DDR (512x512x64) — the DirectGmPlacer
         path on a large output (the other AutoL0 s-tests are K-only)."""
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0MNGrid(
                 memory_planner=planner,
@@ -1941,7 +1953,7 @@ class TestMatmulOperations:
     def test_matmul_autol0_mn_boundary_peel(self, test_runner, platform, planner):
         """M/N grid whose tile does not divide M/N (272x416x32) — the L-shaped boundary
         peeled into straight-line partial tiles."""
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         result = test_runner.run(
             TestMatmulAutoL0MNBoundaryPeel(
                 memory_planner=planner,
@@ -1958,7 +1970,7 @@ class TestMatmulOperations:
         if/else matmul/matmul_acc with AutoTileMatmulL0 K-tiling inside. This was
         previously skipped for a device hang; run it under every planner to guard
         the loop-carried accumulator and nested-pipeline fixes."""
-        cfg = RunConfig(platform=platform, rtol=2e-3, atol=2e-3)
+        cfg = _run_config(platform, rtol=2e-3, atol=2e-3)
         case = TestMatmulOuterPipelinedBF16(
             memory_planner=planner,
             platform=platform,
@@ -2024,7 +2036,7 @@ class TestMatmulOperations:
         FP32 cube matmul vs torch fp32 golden differs by accumulation-order rounding,
         so use a realistic tolerance rather than bit-exact.
         """
-        cfg = RunConfig(platform=platform, rtol=1e-3, atol=1e-3)
+        cfg = _run_config(platform, rtol=1e-3, atol=1e-3)
         result = test_runner.run(TestSharedKVMatmul(m=m, k=k, n=n, platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
@@ -2036,7 +2048,7 @@ class TestMatmulOperations:
         """2D a_trans=True matmul: the LHS loads natural and is reinterpreted by a
         zero-copy NZ<->ZN view on the Left cube operand, mirroring the b_trans
         view but on the A side (#1776). Validates a_trans view numerics."""
-        cfg = RunConfig(platform=platform, rtol=1e-3, atol=1e-3)
+        cfg = _run_config(platform, rtol=1e-3, atol=1e-3)
         result = test_runner.run(TestATransMatmul(m=m, k=k, n=n, platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 

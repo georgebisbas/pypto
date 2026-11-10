@@ -193,7 +193,8 @@ def test_split_send_wait_dispatch_order(test_config, device_ids):
 
     compiled = ir.compile(
         _build_split_send_wait_program(),
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(
             device_ids=device_ids[:P],
             num_sub_workers=0,

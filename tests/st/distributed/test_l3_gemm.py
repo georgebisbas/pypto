@@ -127,7 +127,8 @@ class TestL3Gemm:
         program = _build_gemm_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,

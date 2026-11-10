@@ -226,7 +226,8 @@ class TestL3WindowSourceSlice:
         program = _build_window_source_slice_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -255,7 +256,8 @@ class TestL3WindowTargetSlice:
         program = _build_window_target_slice_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,
@@ -283,7 +285,8 @@ class TestL3WindowComputeReduce:
         program = _build_window_compute_reduce_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=0,

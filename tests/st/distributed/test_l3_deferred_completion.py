@@ -153,7 +153,8 @@ def _compile_two_rank(program, test_config, device_ids, output_dir):
     return ir.compile(
         program,
         output_dir=str(output_dir),
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(
             device_ids=device_ids[:_N_RANKS],
             num_sub_workers=0,

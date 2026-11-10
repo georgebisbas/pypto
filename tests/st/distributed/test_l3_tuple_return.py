@@ -89,7 +89,8 @@ class TestL3TupleReturn:
         """End-to-end: compile + execute, verify out_sum = a+b, out_diff = a-b."""
         compiled = ir.compile(
             L3TupleReturnProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 aicpu_thread_num=4,

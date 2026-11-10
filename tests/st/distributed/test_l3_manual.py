@@ -93,7 +93,8 @@ class TestL3Manual:
         ir.compile(
             L2OnlyAddProgram,
             output_dir=str(out_dir),
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
         )
         if test_config.codegen_only:
             pytest.skip("--codegen-only disables distributed runtime execution")

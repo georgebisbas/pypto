@@ -131,7 +131,8 @@ def _run_stacked(test_config, device_ids, program, worker_ids, *, inherited_sour
     twice with different per-call inputs, and assert ``f == a + b`` each time."""
     compiled = ir.compile(
         program,
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(
             device_ids=device_ids[:N_RANKS],
             num_sub_workers=0,

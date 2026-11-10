@@ -277,7 +277,8 @@ class TestL2TensorAllToAllV:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(
                     device_ids=device_ids[:nr],
                     num_sub_workers=0,
@@ -296,7 +297,15 @@ class TestL2TensorAllToAllV:
         kernel_src = next_levels / "chip_pipeline" / "kernels" / "aiv" / "__builtin_all_to_all_v__fp32.cpp"
         assert kernel_src.is_file(), f"expected the rendered builtin kernel at {kernel_src}"
 
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         # Rank `rank` receives from `src` the chunk that `src` sent to dest=rank.
         for rank in range(nr):
@@ -402,11 +411,20 @@ class TestL2TensorAllToAllVSkew:
             outputs,
             recv_outputs,
             config=RunConfig(
-                platform=test_config.platform,
+                backend_type=test_config.backend_type,
+                execution_mode=test_config.execution_mode,
                 distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
             ),
         )
-        compiled(inputs, send_counts, outputs, recv_outputs, config=RunConfig(platform=test_config.platform))
+        compiled(
+            inputs,
+            send_counts,
+            outputs,
+            recv_outputs,
+            config=RunConfig(
+                backend_type=test_config.backend_type, execution_mode=test_config.execution_mode
+            ),
+        )
 
         for rank in range(nr):
             for src in range(nr):
@@ -479,7 +497,8 @@ def test_l2_all_to_all_v_staging_chunks(test_config, device_ids, dtype_name, cor
     recv = torch.zeros_like(counts).share_memory_()
     program = _build_l2_all_to_all_v_program(nr, mr, core_num, payload_dtype=payload_dtype)
     config = RunConfig(
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
     )
     compiled = program.compile(inputs, counts, outputs, recv, config=config)

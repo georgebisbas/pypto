@@ -42,7 +42,11 @@ def _worker_config(test_config: RunConfig) -> RunConfig:
     same platform so ``CompiledProgram.__call__`` can reuse this Worker
     rather than spinning up a one-shot one.
     """
-    return RunConfig(platform=test_config.platform, device_id=test_config.device_id)
+    return RunConfig(
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+        device_id=test_config.device_id,
+    )
 
 
 def _specialize_and_get_compiled(test_config: RunConfig):

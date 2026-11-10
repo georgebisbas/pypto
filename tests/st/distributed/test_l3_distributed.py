@@ -109,7 +109,8 @@ class TestL3Dependency:
         """End-to-end: compile + execute via Worker(level=3), verify f = a + b."""
         compiled = ir.compile(
             L3DependencyProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,
@@ -135,7 +136,8 @@ class TestL3Dependency:
             pytest.skip(f"test_execute_inline needs 2 devices, got {device_ids}")
         compiled = ir.compile(
             L3DependencyInlineProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:2],
                 num_sub_workers=1,
@@ -177,7 +179,8 @@ class TestL3SubWorkerOverride:
 
         compiled = ir.compile(
             L3DependencyProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,
@@ -217,7 +220,8 @@ class TestL3SubWorkerOverride:
         """An override naming a non-existent sub-worker fails fast with a clear error."""
         compiled = ir.compile(
             L3DependencyProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,

@@ -114,7 +114,8 @@ class TestL3ParallelReduce:
         """End-to-end: compile + execute, verify f = (a+b) + (a-b) = 2a."""
         compiled = ir.compile(
             L3ParallelReduceProgram,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:1],
                 num_sub_workers=1,

@@ -15,8 +15,9 @@ import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
 import torch
+from pypto.backend import BackendType
 from pypto.ir import DistributedConfig
-from pypto.runtime import RunConfig
+from pypto.runtime import ExecutionMode, RunConfig
 
 
 def build_indexed_program(nr: int, capacity: int, width: int, cores: int, payload_dtype: str = "fp32"):
@@ -185,7 +186,9 @@ def test_indexed_exchange(test_config, device_ids, cores, capacity, mode, payloa
     compiled = build_indexed_program(nr, capacity, width, cores, payload_dtype).compile(
         *args,
         config=RunConfig(
-            platform="a5", distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0)
+            backend_type=BackendType.Ascend950,
+            execution_mode=ExecutionMode.ONBOARD,
+            distributed_config=DistributedConfig(device_ids=device_ids[:nr], num_sub_workers=0),
         ),
     )
     # Reuse live signals/queue state without clearing persistent windows.
@@ -193,7 +196,10 @@ def test_indexed_exchange(test_config, device_ids, cores, capacity, mode, payloa
         registered = worker.register(compiled)
         for iteration in range(3):
             inputs.add_(iteration)
-            registered(*args, config=RunConfig(platform="a5"))
+            registered(
+                *args,
+                config=RunConfig(backend_type=BackendType.Ascend950, execution_mode=ExecutionMode.ONBOARD),
+            )
             expected = golden.clone()
             expected[golden != 123] += iteration * (iteration + 1) // 2
             assert torch.equal(recv, counts.transpose(0, 1)), (iteration, recv, counts)

@@ -103,7 +103,8 @@ class TestL3RankSliceDispatch:
         program = _build_rank_slice_program()
         compiled = ir.compile(
             program,
-            platform=test_config.platform,
+            backend_type=test_config.backend_type,
+            execution_mode=test_config.execution_mode,
             distributed_config=DistributedConfig(
                 device_ids=device_ids[:N_RANKS],
                 num_sub_workers=0,

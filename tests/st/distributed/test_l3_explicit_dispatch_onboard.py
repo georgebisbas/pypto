@@ -125,7 +125,8 @@ def test_l3_explicit_dispatch_single_chip(test_config, device_ids, _no_leak_warn
 
     compiled = ir.compile(
         L3AddProgram,
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(
             device_ids=device_ids[:1],
             num_sub_workers=1,
@@ -181,7 +182,8 @@ def test_l3_explicit_dispatch_multi_chip(test_config, device_ids, _no_leak_warni
 
     compiled = ir.compile(
         L3MultiChipProgram,
-        platform=test_config.platform,
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
         distributed_config=DistributedConfig(
             device_ids=device_ids[:2],
             num_sub_workers=1,
@@ -235,7 +237,11 @@ def test_l3_multi_program_shared_kv_cache(test_config, device_ids, _no_leak_warn
         num_sub_workers=1,
         aicpu_thread_num=4,
     )
-    cfg = RunConfig(platform=test_config.platform, distributed_config=dc)
+    cfg = RunConfig(
+        backend_type=test_config.backend_type,
+        execution_mode=test_config.execution_mode,
+        distributed_config=dc,
+    )
 
     # Per-call IO buffers must be shared-memory host tensors allocated BEFORE
     # the worker forks inside DistributedWorker(...).
