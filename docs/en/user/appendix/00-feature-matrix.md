@@ -65,6 +65,38 @@ API and consumed by its completion calls; a kernel holds them, it does not const
 | `AsyncEvent` | An in-flight prefetch completion event |
 | `AsyncSession` | The session an `AsyncEvent` belongs to |
 
+## Distributed
+
+Which rail each `pld.tensor.*` collective runs on. "InCore composite" and "HOST builtin"
+exist for every collective below; "CHIP/L2 builtin" is a third rail that only the two
+all-to-all-v operators have. Dtype and reduce-op caveats are footnoted rather than
+crammed into cells — see the notes below the table.
+
+| Collective | InCore composite | HOST builtin | CHIP/L2 builtin | Reduce ops | Dtypes |
+| ---------- | ---------------- | ------------ | --------------- | ---------- | ------ |
+| `allreduce` | ✅ | ✅ | — | Sum/Max/Min/Prod [1] | FP16/FP32 [1] |
+| `allgather` | ✅ | ✅ | — | — | any/FP32 [2] |
+| `reduce_scatter` | ✅ | ✅ | — | Sum/Max/Min/Prod [3] | any/FP32 [2] |
+| `broadcast` | ✅ | ✅ | — | — | any/FP32 [2] |
+| `all_to_all` | ✅ | ✅ | — | — | any/FP32 [2] |
+| `all_to_all_v` | ✅ [4] | ✅ | ✅ | — | FP32, INT8 |
+| `indexed_all_to_all_v` | — | — | ✅ [5] | — | FP32, INT8 |
+| `barrier` | ✅ | ✅ | — | — | INT32 signal only |
+
+1. `allreduce`: both rails' `mesh` mode and InCore's `ring` mode support all four
+   `ReduceOp`s with FP16/FP32; the HOST builtin's `ring` mode is `Sum`+FP32 only.
+2. "any/FP32" means: any GM dtype on InCore, FP32 only on the HOST builtin.
+3. `reduce_scatter`: all four `ReduceOp`s on InCore; `Sum` only on the HOST builtin.
+4. `all_to_all_v`'s InCore composite rail is unrestricted (it's built from `pld.tile.put`,
+   which has no dtype restriction of its own) — the FP32/INT8 limit applies to the
+   HOST/CHIP builtin rails only.
+5. `indexed_all_to_all_v`'s CHIP/L2 rail is A5 URMA only.
+
+Verified against [Distributed Operators](../../dev/distributed_ops.md) and
+[InCore vs Host-Level Collectives](../distributed/01-collectives.md#incore-vs-host-level-collectives);
+treat this table as a summary pointer, not a replacement for either page. See the
+[catalog](../ops/01-catalog.md) for the exact API signatures these cells summarize.
+
 ## See Also
 
 - [Compiling](../execution/00-compile.md) — where `backend_type`, `memory_planner` and `verification_level` are set.
