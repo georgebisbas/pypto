@@ -139,7 +139,9 @@ generation as a function at all.
 
 A function's `level` and `role` refine this further — `pl.Level.HOST` with
 `pl.Role.Orchestrator` marks the host orchestrator of a distributed program. (There is
-no `FunctionType.Host`; the level/role pair is how host-ness is expressed.)
+no `FunctionType.Host`; the level/role pair is how host-ness is expressed.) See
+[Distributed](language/07-distributed.md) for the `pld` surface that program reaches for,
+and [Distributed Programming](distributed/index.md) for the model it operates on.
 
 ### The compilation pipeline
 

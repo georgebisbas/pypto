@@ -180,6 +180,7 @@ nav:
           - en/user/language/04-scopes.md
           - en/user/language/05-directives.md
           - en/user/language/06-syntax.md
+          - en/user/language/07-distributed.md
       - Tutorials:
           - en/user/tutorials/index.md
           - en/user/tutorials/00-elementwise.md

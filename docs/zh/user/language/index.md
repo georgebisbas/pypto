@@ -21,6 +21,7 @@
 | [作用域与放置](04-scopes.md) | `at` / `cluster` / `spmd` / `split_aiv` —— 代码在哪里执行 |
 | [编译期指令](05-directives.md) | `static_print` / `static_assert`、`const` |
 | [语言语法](06-syntax.md) | 下标语法糖、Python 运算符、闭包捕获 |
+| [分布式](07-distributed.md) | `pld` 自己的类型与命名空间划分 —— `DistributedTensor`、`CommCtx`、`pl` 与 `pld` 的取舍规则 |
 
 ## 阅读顺序
 

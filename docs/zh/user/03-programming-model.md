@@ -125,7 +125,8 @@ InCore (AIC / AIV)            执行面
 
 函数的 `level` 与 `role` 会进一步细化：`pl.Level.HOST` 配 `pl.Role.Orchestrator` 标记的是
 分布式程序的主机编排者。（**不存在 `FunctionType.Host`**；"主机性"是用 level/role 这一对来
-表达的。）
+表达的。）该程序所用到的 `pld` 表面见[分布式](language/07-distributed.md)，它所基于的模型见
+[分布式编程](distributed/index.md)。
 
 ### 编译流水
 

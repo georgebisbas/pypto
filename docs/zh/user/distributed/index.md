@@ -47,7 +47,8 @@ PyPTO 的分布式模型建立在**对称内存与信号**之上——完整说�
 > 及以上（跨芯片的一切）。完整模型见 simpler 的
 > [层级化 Level Runtime](https://hw-native-sys.github.io/simpler/hierarchical-level-runtime/)。
 
-分布式章节涵盖 L3。L2 内容见[编译](../execution/00-compile.md)。
+分布式章节涵盖 L3。L2 内容见[语言指南](../language/index.md)与单设备
+[教程](../tutorials/index.md)，而非某个专门名为 "L2" 的页面。
 
 ## 术语表
 

@@ -29,6 +29,7 @@ through that alias.
 | [Scopes and Placement](04-scopes.md) | `at` / `cluster` / `spmd` / `split_aiv` — where work runs |
 | [Compile-Time Directives](05-directives.md) | `static_print` / `static_assert`, `const` |
 | [Language Syntax](06-syntax.md) | Subscript sugar, Python operators, closure capture |
+| [Distributed](07-distributed.md) | `pld`'s own types and namespace split — `DistributedTensor`, `CommCtx`, the `pl`-vs-`pld` rule |
 
 ## Reading order
 

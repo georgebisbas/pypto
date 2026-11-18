@@ -52,8 +52,9 @@ guarantee that.
 > [Hierarchical Level Runtime](https://hw-native-sys.github.io/simpler/hierarchical-level-runtime/)
 > for the full model.
 
-The distributed chapter covers L3. L2 is covered in the
-[Compiling](../execution/00-compile.md).
+The distributed chapter covers L3. L2 is covered by the
+[Language Guide](../language/index.md) and the single-device
+[Tutorials](../tutorials/index.md), not by any one page named "L2".
 
 ## Glossary
 
