@@ -81,6 +81,8 @@ table.
 
 - [Distributed Programming](../distributed/index.md) — the model, the
   collectives, and the 16-step tutorial ladder.
+- [API Reference: `pld`](../../api/distributed.md) — generated signatures for
+  every public `pld.*` symbol.
 - [Distributed Operators](../../dev/distributed_ops.md) — op semantics, the
   ABI enums' exact numbering, and the barrier-signal protocol.
 - [Catalog](../ops/01-catalog.md) — every `pld` operator with its signature

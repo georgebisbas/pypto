@@ -68,6 +68,7 @@
 ## 接下来看什么
 
 - [分布式编程](../distributed/index.md) —— 模型、集合通信，以及 16 步教程阶梯。
+- [API 参考：`pld`](../../api/distributed.md) —— 每个公开 `pld.*` 符号的生成签名。
 - [Distributed Operators](../../dev/distributed_ops.md) —— 算子语义、ABI
   枚举的确切编号，以及 barrier 信号协议。
 - [算子目录](../ops/01-catalog.md) —— 每个 `pld` 算子及其签名页。
