@@ -60,9 +60,10 @@ GM→L2 预取面暴露三种句柄类型。它们由预取 API 产出、由其�
 
 ## 分布式
 
-每个 `pld.tensor.*` 集合通信运行在哪条通路上。"InCore composite" 与 "HOST builtin"
-对每个集合通信都存在；"CHIP/L2 builtin" 是第三条通路，只有两个 all-to-all-v 算子才有。
-dtype 与 reduce 算子的细节以脚注列在表格下方，没有塞进单元格里。
+每个 `pld.tensor.*` 集合通信运行在哪条通路上。除 `indexed_all_to_all_v` 外，
+"InCore composite" 与 "HOST builtin" 对每个集合通信都存在；"CHIP/L2 builtin" 是
+第三条通路，只有两个 all-to-all-v 算子才有。dtype 与 reduce 算子的细节以脚注列在
+表格下方，没有塞进单元格里。
 
 | 集合通信 | InCore composite | HOST builtin | CHIP/L2 builtin | Reduce 算子 | Dtype |
 | -------- | ---------------- | ------------ | --------------- | ----------- | ----- |
@@ -79,9 +80,9 @@ dtype 与 reduce 算子的细节以脚注列在表格下方，没有塞进单元
    `ReduceOp`，dtype 为 FP16/FP32；HOST builtin 的 `ring` 模式仅支持 `Sum` + FP32。
 2. "任意/FP32" 表示：InCore 上任意 GM dtype，HOST builtin 上仅 FP32。
 3. `reduce_scatter`：InCore 上支持全部四种 `ReduceOp`；HOST builtin 上仅 `Sum`。
-4. `all_to_all_v` 的 InCore composite 通路本身无限制（它基于 `pld.tile.put`
-   构建，而后者没有自己的 dtype 限制）——FP32/INT8 的限制只适用于 HOST/CHIP
-   builtin 通路。
+4. `all_to_all_v` 的 InCore composite 通路没有 FP32/INT8 白名单，但 input 与
+   target 的 dtype 必须一致（它基于 `pld.tile.put` 构建）——FP32/INT8 的限制
+   只适用于 HOST/CHIP builtin 通路。
 5. `indexed_all_to_all_v` 的 CHIP/L2 通路仅支持 A5 URMA。
 
 依据 [Distributed Operators](../../dev/distributed_ops.md) 与

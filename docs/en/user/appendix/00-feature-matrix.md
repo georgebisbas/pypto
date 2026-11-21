@@ -68,9 +68,9 @@ API and consumed by its completion calls; a kernel holds them, it does not const
 ## Distributed
 
 Which rail each `pld.tensor.*` collective runs on. "InCore composite" and "HOST builtin"
-exist for every collective below; "CHIP/L2 builtin" is a third rail that only the two
-all-to-all-v operators have. Dtype and reduce-op caveats are footnoted rather than
-crammed into cells — see the notes below the table.
+exist for every collective below except `indexed_all_to_all_v`; "CHIP/L2 builtin" is a
+third rail that only the two all-to-all-v operators have. Dtype and reduce-op caveats are
+footnoted rather than crammed into cells — see the notes below the table.
 
 | Collective | InCore composite | HOST builtin | CHIP/L2 builtin | Reduce ops | Dtypes |
 | ---------- | ---------------- | ------------ | --------------- | ---------- | ------ |
@@ -87,9 +87,9 @@ crammed into cells — see the notes below the table.
    `ReduceOp`s with FP16/FP32; the HOST builtin's `ring` mode is `Sum`+FP32 only.
 2. "any/FP32" means: any GM dtype on InCore, FP32 only on the HOST builtin.
 3. `reduce_scatter`: all four `ReduceOp`s on InCore; `Sum` only on the HOST builtin.
-4. `all_to_all_v`'s InCore composite rail is unrestricted (it's built from `pld.tile.put`,
-   which has no dtype restriction of its own) — the FP32/INT8 limit applies to the
-   HOST/CHIP builtin rails only.
+4. `all_to_all_v`'s InCore composite rail has no FP32/INT8 allowlist, but input and
+   target dtypes must match (it's built from `pld.tile.put`) — the FP32/INT8 limit
+   applies to the HOST/CHIP builtin rails only.
 5. `indexed_all_to_all_v`'s CHIP/L2 rail is A5 URMA only.
 
 Verified against [Distributed Operators](../../dev/distributed_ops.md) and
