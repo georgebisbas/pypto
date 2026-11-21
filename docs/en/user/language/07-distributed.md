@@ -10,11 +10,14 @@ collectives — see [Distributed Programming](../distributed/index.md) for that.
 
 ## When to use `pld`
 
-`pld` is chosen by **what the data does, not where it lives**: if an operation
-crosses ranks, it's `pld`; otherwise it's `pl`. The namespace split mirrors
-`pl`'s — `pld.tile.*` inside an InCore function, `pld.tensor.*` in
-orchestration on whole tensors, plus a third family, `pld.system.*`, for
-rank/signal primitives that have no `pl` equivalent. See
+`pld` is chosen by **what the data does, not where it lives**: it is the namespace
+for distributed operations. Cross-rank transfers and collectives are `pld`, as are
+the window/rank/context primitives that support them even when a particular call
+stays local (`pld.window`, `pld.rank`); everything outside that distributed surface
+is `pl`. The namespace split mirrors `pl`'s — `pld.tile.*` on tile operands inside
+an InCore function, `pld.tensor.*` on whole tensors (orchestration or an InCore
+composite collective), plus a third family, `pld.system.*`, for rank/signal
+primitives that have no `pl` equivalent. See
 [Choosing a Namespace](../ops/00-dispatch.md) for the full rule and the exact
 list of names with a 2-segment short form.
 

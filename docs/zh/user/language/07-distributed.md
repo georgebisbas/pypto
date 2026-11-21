@@ -9,11 +9,13 @@
 
 ## 何时使用 `pld`
 
-`pld` 的选择标准是**数据做什么，而不是数据在哪里**：如果操作跨越 rank，就用
-`pld`，否则用 `pl`。命名空间的切分与 `pl` 一致——`pld.tile.*` 用于 InCore
-函数内部，`pld.tensor.*` 用于编排层对整张张量的操作，再加上第三个家族
-`pld.system.*`，用于 `pl` 没有对应物的 rank/信号原语。完整规则与带 2 段式简写
-的完整名字列表见[选择命名空间](../ops/00-dispatch.md)。
+`pld` 的选择标准是**数据做什么，而不是数据在哪里**：它是分布式操作的命名空间。
+跨 rank 的传输与集合通信属于 `pld`；支撑它们的 window/rank/context 原语也属于
+`pld`，即使某次调用本身不跨 rank（例如 `pld.window`、`pld.rank`）。这一分布式范围
+之外的操作使用 `pl`。命名空间的切分与 `pl` 一致——`pld.tile.*` 用于 InCore
+函数内部的 tile 操作，`pld.tensor.*` 用于整张张量（编排层或 InCore composite
+集合通信），再加上第三个家族 `pld.system.*`，用于 `pl` 没有对应物的 rank/信号原语。
+完整规则与带 2 段式简写的完整名字列表见[选择命名空间](../ops/00-dispatch.md)。
 
 ## `DistributedTensor`
 
