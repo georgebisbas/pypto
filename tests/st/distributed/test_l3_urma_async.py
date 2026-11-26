@@ -1727,6 +1727,159 @@ class TestL3UrmaAsyncProducerCompute:
             assert torch.count_nonzero(extras[r, others, :]) == 0, f"rank {r}: unexpected extra rows"
 
 
+def _tile_producer_inputs(round_index: int) -> torch.Tensor:
+    """Rank r's own row, salted by round so stale window bytes (Trap 4) can't
+    masquerade as a correct transfer."""
+    base = round_index * 10000
+    inputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+    for r in range(2):
+        inputs[r, 0, :] = torch.arange(SIZE, dtype=torch.float32) + base + r * 1000
+    return inputs
+
+
+def _tile_producer_expected(round_index: int) -> torch.Tensor:
+    """Each rank reads back its PEER's (input + 1.0) row after the PUT."""
+    base = round_index * 10000
+    expected = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+    for r in range(2):
+        peer = 1 - r
+        expected[r, 0, :] = torch.arange(SIZE, dtype=torch.float32) + base + peer * 1000 + 1.0
+    return expected
+
+
+def _build_tile_producer_compute():
+    """A 2-rank tile-level PUT where the source is written by `pl.store`
+    immediately before `pld.tile.put_async`, with no intervening rendezvous or
+    barrier between the store and the submission.
+
+    This is the Job 2 diagnostic from `pr_plans/145-put-a5-npu-handoff.md`:
+    `TestL3UrmaAsyncProducerCompute` (above) does NOT exercise this question —
+    its `compute_put` calls `pld.tensor.put_async`, which lowers to
+    `pypto_urma_transfer_impl` (`pto_backend.py`'s `_URMA_TRANSFER_ADAPTER_TEMPLATE`),
+    an adapter that has always had an unconditional `pipe_barrier(PIPE_ALL)` in
+    both directions and was never in question. `gather_put_local` /
+    `scatter_get_local` (this file, `_build_local_async`) exercise the right
+    adapters (`pypto_urma_gather_put` / `pypto_urma_scatter_get`) but always go
+    through `fill()` -> `rendezvous()` -> the transfer, so an existing
+    cross-rank handshake already provides the visibility this diagnostic needs
+    to isolate. Only this kernel reaches `pypto_urma_gather_put`'s own
+    `pipe_barrier(PIPE_ALL)` with nothing else to mask a missing one.
+    """
+    window_rows = 2
+
+    @pl.jit.incore
+    def compute_tile_put(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        session = pld.system.make_session(ctx)
+        row = pl.load(inp, [0, 0], [1, SIZE])
+        row = pl.add(row, 1.0)  # compute immediately before the store
+        # Store, then submit with NO intervening barrier or rendezvous — the
+        # one thing that is supposed to make pypto_urma_gather_put's own
+        # pipe_barrier(PIPE_ALL) necessary (or not).
+        data = pl.store(row, [0, 0], data)
+        src = pl.tensor.view(data, [1, SIZE], offsets=[0, 0])
+        dst = pl.tensor.view(data, [1, SIZE], offsets=[1, 0])
+        _after, event = pld.tile.put_async(dst, 1 - pld.rank(ctx), src, session)
+        pld.system.defer_wait_event(event, session)
+        return data
+
+    @pl.jit.incore
+    def announce(
+        data: pld.DistributedTensor[[window_rows, SIZE], pl.FP32],
+        signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        peer = 1 - pld.rank(ctx)
+        pld.system.notify(signal, peer=peer, offsets=[pld.rank(ctx), 0], value=1, op=pld.NotifyOp.Set)
+        return signal
+
+    @pl.jit.incore
+    def await_peer(
+        signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+        ctx = pld.get_comm_ctx(signal)
+        peer = 1 - pld.rank(ctx)
+        pld.system.wait(signal=signal, offsets=[peer, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return signal
+
+    @pl.jit.incore
+    def readback(
+        data: pld.DistributedTensor[[window_rows, SIZE], pl.FP32],
+        signal: pld.DistributedTensor[[2, 1], pl.INT32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        return pl.store(pl.load(data, [1, 0], [1, SIZE]), [0, 0], out)
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        staged = compute_tile_put(inp, data)
+        announced = announce(staged, signal)
+        waited = await_peer(announced)
+        return readback(staged, waited, out)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(window_rows * SIZE * pl.FP32.get_byte())
+        signal_buf = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [window_rows, SIZE], dtype=pl.FP32)
+            sig = pld.window(signal_buf, [2, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], data, sig, device=r)
+        return outputs
+
+    return host_orch
+
+
+@pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
+class TestL3UrmaAsyncTileProducerCompute:
+    """Job 2 diagnostic for PR #3597 / RFC #3304 — see
+    `pr_plans/145-put-a5-npu-handoff.md` Job 2. NOT part of #3597's functional
+    diff; added to answer "is pypto_urma_gather_put's own pipe_barrier
+    load-bearing" on real hardware, since no existing test reaches it without
+    an intervening rendezvous. Arms B/C (barrier removed from the adapter
+    template) are a deliberate experimental build of `pto_backend.py`, done by
+    hand per the hand-off doc, run against this same test — never edit this
+    test to perform that experiment."""
+
+    def test_tile_put_producer_compute(self, test_config, device_ids):
+        """Repeats internally (JOB2_REPEATS) so one task-submit run gives the
+        multi-iteration evidence the barrier question needs — a single clean
+        run proves nothing about a timing-dependent race."""
+        if len(device_ids) < 2:
+            pytest.skip("Tile producer-compute case needs 2 devices")
+        JOB2_REPEATS = 20
+        compiled = None
+        for round_index in range(JOB2_REPEATS):
+            inputs = _tile_producer_inputs(round_index)
+            outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+            if compiled is None:
+                compiled = _build_tile_producer_compute().compile(
+                    inputs,
+                    outputs,
+                    config=RunConfig(
+                        platform=test_config.platform,
+                        distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
+                    ),
+                )
+            compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+            expected = _tile_producer_expected(round_index)
+            assert torch.allclose(outputs, expected), (
+                f"round {round_index}: tile producer-compute PUT mismatch, "
+                f"max diff = {(outputs - expected).abs().max().item()}"
+            )
+
+
 CHUNK_ROWS = 65537
 CHUNK_COLS = 1024
 # 65537 x 1024 x 4 = 268,439,552 bytes = 256 MiB + 4 KiB, just above the
