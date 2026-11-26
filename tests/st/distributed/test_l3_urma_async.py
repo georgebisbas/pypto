@@ -1950,7 +1950,12 @@ def _build_tile_get_sentinel_race():
     ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
         ctx = pld.get_comm_ctx(data)
         session = pld.system.make_session(ctx)
-        sentinel = pl.full([1, SIZE], pl.FP32, _GET_SENTINEL)
+        # Derive a sentinel from the local row (already written by `fill`)
+        # rather than a bare constant — `pl.full` isn't shaped the way the
+        # tensor-level wrapper of the same name is when parsed inside a DSL
+        # body; `pl.add` on an existing load is the idiom `gather_put_local`
+        # (Arm A/B) already uses successfully for the same purpose.
+        sentinel = pl.add(pl.load(data, [0, 0], [1, SIZE]), _GET_SENTINEL)
         # Local store into the GET's OWN destination row, immediately before
         # the engine's incoming remote write — no intervening barrier. This
         # is the WAW-hazard analog of Arms A/B's RAW-before-engine-read.
@@ -2025,8 +2030,8 @@ class TestL3UrmaAsyncTileGetSentinelRace:
             compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
             expected = _tile_get_expected(round_index)
             assert torch.allclose(outputs, expected), (
-                f"round {round_index}: tile GET sentinel-race mismatch (sentinel leaked through "
-                f"if any value is {_GET_SENTINEL}), max diff = {(outputs - expected).abs().max().item()}"
+                f"round {round_index}: tile GET sentinel-race mismatch (local sentinel store may "
+                f"have clobbered the incoming peer write), max diff = {(outputs - expected).abs().max().item()}"
             )
 
 
