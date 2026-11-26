@@ -1880,6 +1880,156 @@ class TestL3UrmaAsyncTileProducerCompute:
             )
 
 
+_GET_SENTINEL = -999.0
+
+
+def _tile_get_inputs(round_index: int) -> torch.Tensor:
+    """Rank r's own source row (the row its peer will GET), salted by round."""
+    base = round_index * 10000
+    inputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+    for r in range(2):
+        inputs[r, 0, :] = torch.arange(SIZE, dtype=torch.float32) + base + r * 1000
+    return inputs
+
+
+def _tile_get_expected(round_index: int) -> torch.Tensor:
+    """Each rank reads back its PEER's row via GET -- never the sentinel."""
+    base = round_index * 10000
+    expected = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+    for r in range(2):
+        peer = 1 - r
+        expected[r, 0, :] = torch.arange(SIZE, dtype=torch.float32) + base + peer * 1000
+    return expected
+
+
+def _build_tile_get_sentinel_race():
+    """Job 2 Arm C: the GET-side analog of `_build_tile_producer_compute`.
+
+    The PUT race (Arms A/B) is consumer-side: does THIS rank's own store into
+    `src` retire before THIS rank's own engine reads it for submission.
+    `pypto_urma_scatter_get` (merged #3572, no barrier at all) has no
+    analogous "local store immediately before MY OWN submission reads it" --
+    the consumer issuing a GET writes nothing locally before the call. Its
+    actual exposure is the write-after-write hazard on the DESTINATION side:
+    a local sentinel store into the GET's own `dst` row, immediately before
+    `pld.tile.get_async` overwrites that same address with the incoming
+    remote write, no intervening barrier. If the sentinel store can retire
+    AFTER the remote write lands (instead of strictly before), the sentinel
+    clobbers the just-arrived peer data and readback sees `_GET_SENTINEL`
+    instead of the peer's real value.
+
+    The peer's SOURCE row must still be filled and rendezvous'd before this
+    rank's GET reads it (same as `scatter_get_local`/Job 1) -- that handshake
+    is not the thing under test here; the sentinel-store-vs-engine-write
+    ordering on the LOCAL destination is.
+    """
+    window_rows = 2
+
+    @pl.jit.incore
+    def fill(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
+        return pl.store(pl.load(inp, [0, 0], [1, SIZE]), [0, 0], data)
+
+    @pl.jit.incore
+    def rendezvous(
+        dep: pld.DistributedTensor[[window_rows, SIZE], pl.FP32],
+        signal: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pld.DistributedTensor[[2, 1], pl.INT32]:
+        rank = pld.rank(pld.get_comm_ctx(signal))
+        peer = 1 - rank
+        pld.system.notify(signal, peer=peer, offsets=[rank, 0], value=1, op=pld.NotifyOp.Set)
+        pld.system.wait(signal, offsets=[peer, 0], expected=1, cmp=pld.WaitCmp.Ge)
+        return signal
+
+    @pl.jit.incore
+    def compute_tile_get(
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pld.DistributedTensor[[2, 1], pl.INT32],
+    ) -> pld.DistributedTensor[[window_rows, SIZE], pl.FP32]:
+        ctx = pld.get_comm_ctx(data)
+        session = pld.system.make_session(ctx)
+        sentinel = pl.full([1, SIZE], pl.FP32, _GET_SENTINEL)
+        # Local store into the GET's OWN destination row, immediately before
+        # the engine's incoming remote write — no intervening barrier. This
+        # is the WAW-hazard analog of Arms A/B's RAW-before-engine-read.
+        data = pl.store(sentinel, [1, 0], data)
+        src = pl.tensor.view(data, [1, SIZE], offsets=[0, 0])
+        dst = pl.tensor.view(data, [1, SIZE], offsets=[1, 0])
+        _after, event = pld.tile.get_async(dst, 1 - pld.rank(ctx), src, session)
+        pld.system.defer_wait_event(event, session)
+        return data
+
+    @pl.jit.incore
+    def readback(
+        data: pld.DistributedTensor[[window_rows, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        return pl.store(pl.load(data, [1, 0], [1, SIZE]), [0, 0], out)
+
+    @pl.jit
+    def chip_orch(
+        inp: pl.Tensor[[1, SIZE], pl.FP32],
+        out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[window_rows, SIZE], pl.FP32]],
+        ready: pl.InOut[pld.DistributedTensor[[2, 1], pl.INT32]],
+    ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        filled = fill(inp, data)
+        readied = rendezvous(filled, ready)
+        transferred = compute_tile_get(filled, readied)
+        return readback(transferred, out)
+
+    @pl.jit.host
+    def host_orch(
+        inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
+        outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+    ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+        data_buf = pld.alloc_window_buffer(window_rows * SIZE * pl.FP32.get_byte())
+        ready_buf = pld.alloc_window_buffer(2 * pl.INT32.get_byte())
+        for r in pl.range(pld.world_size()):
+            data = pld.window(data_buf, [window_rows, SIZE], dtype=pl.FP32)
+            ready = pld.window(ready_buf, [2, 1], dtype=pl.INT32)
+            chip_orch(inputs[r], outputs[r], data, ready, device=r)
+        return outputs
+
+    return host_orch
+
+
+@pytest.mark.platforms("a5", reason="URMA async transfers require the A5 backend")
+class TestL3UrmaAsyncTileGetSentinelRace:
+    """Job 2 Arm C for PR #3597 / #3572 / RFC #3304 — see
+    `pr_plans/145-put-a5-npu-handoff.md` Job 2. Diagnostic only, not part of
+    any PR's functional diff. Tests `pypto_urma_scatter_get` (merged #3572,
+    no barrier at all) for the GET-side analog of Arms A/B's race."""
+
+    def test_tile_get_sentinel_race(self, test_config, device_ids):
+        """Repeats internally — a single clean run proves nothing about a
+        timing-dependent race."""
+        if len(device_ids) < 2:
+            pytest.skip("Tile GET sentinel-race case needs 2 devices")
+        JOB2_REPEATS = 20
+        compiled = None
+        for round_index in range(JOB2_REPEATS):
+            inputs = _tile_get_inputs(round_index)
+            outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+            if compiled is None:
+                compiled = _build_tile_get_sentinel_race().compile(
+                    inputs,
+                    outputs,
+                    config=RunConfig(
+                        platform=test_config.platform,
+                        distributed_config=DistributedConfig(device_ids=device_ids[:2], num_sub_workers=0),
+                    ),
+                )
+            compiled(inputs, outputs, config=RunConfig(platform=test_config.platform))
+            expected = _tile_get_expected(round_index)
+            assert torch.allclose(outputs, expected), (
+                f"round {round_index}: tile GET sentinel-race mismatch (sentinel leaked through "
+                f"if any value is {_GET_SENTINEL}), max diff = {(outputs - expected).abs().max().item()}"
+            )
+
+
 CHUNK_ROWS = 65537
 CHUNK_COLS = 1024
 # 65537 x 1024 x 4 = 268,439,552 bytes = 256 MiB + 4 KiB, just above the
